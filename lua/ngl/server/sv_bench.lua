@@ -275,6 +275,8 @@ local function startNext()
 		class = job.class,
 		count = job.count,
 		ply = job.ply,
+		limit = job.limit,
+		duration = job.duration,
 		reporter = IsValid(job.ply) and job.ply or player.GetAll()[1],
 		phase = "baseline",
 		phaseEnd = now + cvBaseline:GetFloat(),
@@ -386,7 +388,12 @@ local function finish(run)
 	end
 	say(p, "  Server frame, empty:   " .. fmt(base))
 	say(p, "  Server frame, loaded:  " .. fmt(loaded))
-	if result.added_ms then
+	if result.dedicated then
+		-- On srcds the networked frame time is wall time per frame including the
+		-- idle sleep, so it sits at the tick interval until the server overloads.
+		-- Late ticks (and ngl_bench_limit) are the real signal there.
+		say(p, string.format("  Note: on a dedicated server the frame time stays at ~%.2f ms (the tick interval) until it overloads. Use late ticks, or ngl_bench_limit.", tickMs))
+	elseif result.added_ms then
 		say(p, string.format("  Added by NPCs:         %.3f ms/tick  (%.1f us per NPC, %.1f%% of the %.2f ms tick)",
 			result.added_ms, result.added_us_per_npc, result.tick_budget_pct, tickMs))
 	end
@@ -406,6 +413,37 @@ local function finish(run)
 	file.Write(name, util.TableToJSON(result, true))
 	say(p, "  Saved to garrysmod/data/" .. name)
 	say(p, "------------------------------------------------------------")
+
+	local L = run.limit
+	if L then
+		local latePct = run.loaded.ticks > 0 and (run.loaded.overruns / run.loaded.ticks * 100) or 0
+		L.results[#L.results + 1] = { count = run.count, late_pct = latePct, lua_ms = lua and lua.avg or 0, alive = alive }
+
+		local nextCount = L.ladder[L.idx + 1]
+		if latePct <= L.maxLatePct and nextCount then
+			L.idx = L.idx + 1
+			table.insert(B.Queue, 1, { class = run.class, count = nextCount, ply = run.ply, limit = L, duration = run.duration })
+		else
+			local okCount = 0
+			say(p, "============================================================")
+			say(p, string.format("Limit for %s (pass = at most %.0f%% late ticks):", run.class, L.maxLatePct))
+			for _, r in ipairs(L.results) do
+				local pass = r.late_pct <= L.maxLatePct
+				if pass then okCount = r.count end
+				say(p, string.format("  %5d NPCs: %5.1f%% late ticks, Lua %.2f ms  %s", r.count, r.late_pct, r.lua_ms, pass and "PASS" or "FAIL"))
+			end
+			if okCount == L.ladder[#L.ladder] and latePct <= L.maxLatePct then
+				say(p, string.format("  => Still holding %d tick at %d NPCs (top of the ladder).", result.tickrate, okCount))
+			else
+				say(p, string.format("  => Holds %d tick up to %d NPCs.", result.tickrate, okCount))
+			end
+			say(p, "============================================================")
+			L.max_ok = okCount
+			file.Write(string.format("ngl_bench/limit_%s_%s_%s.json", result.map, run.class, os.date("%Y%m%d_%H%M%S")),
+				util.TableToJSON({ class = run.class, map = result.map, dedicated = result.dedicated, tickrate = result.tickrate,
+					max_late_pct = L.maxLatePct, max_ok = okCount, results = L.results }, true))
+		end
+	end
 
 	if not cvKeep:GetBool() or #B.Queue > 0 then
 		B.Clear()
@@ -452,10 +490,11 @@ hook.Add("Tick", "NGL.Bench.Harness", function()
 	elseif run.phase == "warmup" then
 		if now >= run.phaseEnd then
 			run.phase = "sampling"
-			run.phaseEnd = now + cvDuration:GetFloat()
+			local dur = run.duration or cvDuration:GetFloat()
+			run.phaseEnd = now + dur
 			run.lastTick = nil
 			sendPhase(run, "loaded")
-			say(run.ply, string.format("Sampling for %ds...", cvDuration:GetInt()))
+			say(run.ply, string.format("Sampling for %ds...", dur))
 		end
 
 	elseif run.phase == "sampling" then
@@ -487,8 +526,8 @@ end)
 
 local function queue(ply, class, count)
 	count = math.floor(tonumber(count) or 0)
-	if count < 1 or count > 1000 then
-		say(ply, "Count must be between 1 and 1000.")
+	if count < 1 or count > 2000 then
+		say(ply, "Count must be between 1 and 2000.")
 		return false
 	end
 	B.Queue[#B.Queue + 1] = { class = class, count = count, ply = ply }
@@ -522,6 +561,34 @@ concommand.Add("ngl_bench_sweep", function(ply, _, args)
 	for c in string.gmatch(counts, "%d+") do
 		queue(ply, args[1], c)
 	end
+	kick(ply)
+end)
+
+-- Stress mode: climb a ladder of NPC counts until the server starts missing
+-- ticks. Works on any server; on a dedicated server it is the most honest
+-- number we have, because it measures the point where the CPU runs out.
+local LIMIT_LADDER = { 100, 200, 300, 400, 500, 600, 800, 1000, 1250, 1500, 2000 }
+local LIMIT_CLASSES = { "ngl_bench_light", "ngl_bench_nextbot", "npc_combine_s" }
+local cvLimitLate = CreateConVar("ngl_bench_limit_late", "1", FCVAR_ARCHIVE, "ngl_bench_limit: max % of late ticks that still counts as a pass.", 0, 100)
+local cvLimitDuration = CreateConVar("ngl_bench_limit_duration", "10", FCVAR_ARCHIVE, "ngl_bench_limit: seconds of sampling per step.", 3, 120)
+
+concommand.Add("ngl_bench_limit", function(ply, _, args)
+	if not canRun(ply) then return end
+	local which = args[1] or "all"
+	local classes = (which == "all") and LIMIT_CLASSES or { which }
+	local startAt = tonumber(args[2] or "") or LIMIT_LADDER[1]
+
+	for _, class in ipairs(classes) do
+		local ladder = {}
+		for _, c in ipairs(LIMIT_LADDER) do
+			if c >= startAt then ladder[#ladder + 1] = c end
+		end
+		if #ladder > 0 then
+			local L = { ladder = ladder, idx = 1, results = {}, maxLatePct = cvLimitLate:GetFloat() }
+			B.Queue[#B.Queue + 1] = { class = class, count = ladder[1], ply = ply, limit = L, duration = cvLimitDuration:GetFloat() }
+		end
+	end
+	say(ply, "Stress test queued for: " .. table.concat(classes, ", ") .. ". Steps: " .. table.concat(LIMIT_LADDER, ", ", 1) .. " (stops at the first failing step).")
 	kick(ply)
 end)
 
