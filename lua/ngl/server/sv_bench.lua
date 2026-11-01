@@ -366,6 +366,24 @@ local function finish(run)
 	else
 		say(p, "  Frame time source:     " .. frameSource)
 	end
+
+	-- Validity checks: say loudly when the frame numbers can't be trusted.
+	local warnings = {}
+	if not game.IsDedicated() then
+		warnings[#warnings + 1] = "Not a dedicated server: the frame time includes the host's rendering. Trust only the Lua line, or rerun on a local srcds."
+	end
+	if client then
+		for _, phase in ipairs({ "baseline", "loaded" }) do
+			local c = client[phase]
+			if c and (c.unfocused_pct or 0) > 1 then
+				warnings[#warnings + 1] = string.format("Game window was unfocused for %.0f%% of the %s phase (engine sleeps in the background). Frame numbers are invalid; keep the window focused or set engine_no_focus_sleep 0.", c.unfocused_pct, phase)
+			end
+		end
+	end
+	result.warnings = warnings
+	for _, w in ipairs(warnings) do
+		say(p, "  WARNING: " .. w)
+	end
 	say(p, "  Server frame, empty:   " .. fmt(base))
 	say(p, "  Server frame, loaded:  " .. fmt(loaded))
 	if result.added_ms then

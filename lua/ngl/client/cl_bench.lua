@@ -38,13 +38,18 @@ hook.Add("Think", "NGL.Bench.ClientSample", function()
 	end
 
 	bucket.fps[#bucket.fps + 1] = FrameTime() * 1000
+	bucket.frames = bucket.frames + 1
+	if not system.HasFocus() then
+		-- Unfocused, the engine sleeps (engine_no_focus_sleep), which ruins the numbers.
+		bucket.unfocused = bucket.unfocused + 1
+	end
 end)
 
 net.Receive("ngl_bench_phase", function()
 	local phase = net.ReadString()
 
 	if phase == "baseline" or phase == "loaded" then
-		bucket = { sv = {}, fps = {} }
+		bucket = { sv = {}, fps = {}, frames = 0, unfocused = 0 }
 		buckets[phase] = bucket
 		return
 	end
@@ -62,6 +67,7 @@ net.Receive("ngl_bench_phase", function()
 				sv_ms = stats(b.sv),
 				client_frame_ms = stats(b.fps),
 				raw_first = b.raw,
+				unfocused_pct = b.frames > 0 and (b.unfocused / b.frames * 100) or 0,
 			}
 		end
 		buckets = {}
