@@ -58,7 +58,17 @@ Both run the same decision code (`lua/ngl/server/sv_bench_ai.lua`), so the compa
 - `ngl_bench_nextbot`: stock NextBot with engine locomotion and animation. It moves with `loco:Approach` and no path-finding, so a real path-finding NextBot costs more.
 - `ngl_bench_light`: `base_anim` entity with no per-entity Think. One `Tick` hook drives all of them, movement is `SetPos` plus one ground trace, collision is a bounding box, and animation plays on the client.
 
-For dependable numbers, run on a **dedicated server**: on a listen or singleplayer server the client's rendering shares the process and adds noise.
+### Getting trustworthy numbers
+
+On singleplayer or a listen server the "server frame" is really the whole game frame, including rendering, so only the Lua line means anything there. The harness prints a warning in that case, and also when the game window lost focus (GMod sleeps 50 ms per frame in the background).
+
+For real numbers, run a local dedicated server on the same PC:
+
+1. Install SteamCMD and run `app_update 4020` to get the Garry's Mod dedicated server.
+2. Copy this addon into its `garrysmod/addons/` folder.
+3. Start it: `srcds -console -game garrysmod +map gm_construct +maxplayers 2` (`srcds_run` on Linux).
+4. Join it from your game with `connect localhost`.
+5. Type `ngl_bench_compare 100` in the **server console window**. NPCs spawn where the first player is looking, and your connected game reports the frame time, so keep the game window focused.
 
 ## Results
 
