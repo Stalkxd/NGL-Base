@@ -5,8 +5,8 @@ An NPC base for Garry's Mod built for large battles (100+ NPCs) with minimal ser
 ## Roadmap
 
 1. **Benchmark harness and entity choice** (done). Stress test on a dedicated server, 67 tick, gm_construct: NextBot held 800 NPCs, our lightweight entity 400, stock `npc_combine_s` 200. **NextBot is the foundation.**
-2. **NPC base core** (in progress). One central scheduler with a CPU budget per tick, distance-based update rates (LOD), a spatial grid for perception, and an authoring API (states, relationships, damage, weapons).
-3. **Custom navigation.** Our own lightweight nav graph generated per map (no navmesh, no AI nodes), path-finding spread over several ticks, and shared paths / flow fields for groups.
+2. **NPC base core** (done). Central scheduler with a CPU budget, distance-based think rate, spatial grid, factions and a modding API. `ngl_combine_soldier` holds **1250** NPCs at 67 tick in the typical case (one player watching) and **800** in the worst case (every NPC thinking at 10 Hz and firing real bullets). Stock `npc_combine_s`: 200.
+3. **Custom navigation** (in progress). Our own walk grid generated per map (no navmesh, no AI nodes), path-finding spread over ticks under a CPU budget, shared and cached paths.
 4. **Battle test.** Two teams of 100+ soldiers on several maps, singleplayer and dedicated server, tuned against the target.
 
 **Target:** 300 NGL NPCs with real combat AI holding 67 tick (under 1% late ticks, `ngl_bench_limit`) on a local dedicated server on a normal PC. That's 3x the 100 goal, so weaker servers still manage 100+.
@@ -55,7 +55,31 @@ Examples shipped: `ngl_combine_soldier` and `ngl_rebel` (NPC tab, category "NGL 
 - **Death ragdolls are client-side** by default (`ngl_ragdolls 1`), and the weapon model is client-only.
 - `ngl_status` prints the NPC count and grid usage.
 
-Movement is a straight line for now; step 3 adds our own navigation.
+## Navigation
+
+NGL NPCs use their own walk grid instead of the navmesh or AI nodes.
+
+1. Load the map, stand anywhere walkable, and run `ngl_nav_generate` (server console or superadmin). It flood-fills the walkable area from the map's spawn points and every player, spending at most `ngl_nav_gen_budget` ms per tick, and prints progress. On gm_construct expect around a minute.
+2. The grid is saved to `garrysmod/data/ngl_nav/<map>.dat` and loaded automatically on that map from then on. Ship the file with your addon or server.
+
+How NPCs use it:
+
+- Enemy in clear view and within 1500 units: straight line, no path-finding at all.
+- Otherwise: an A* path is requested in the background. All searches share `ngl_nav_budget` ms per tick (default 2), identical requests share one search, and results are cached for 4 s, so a squad chasing the same target pays for one path.
+- Waypoints advance in the per-tick steering, so far-away NPCs that think once a second still walk paths smoothly.
+- An NPC that hasn't moved for 2 s drops its path and decides again.
+- No grid for the map: NPCs fall back to straight lines.
+
+| Command / ConVar | Meaning |
+| --- | --- |
+| `ngl_nav_generate` | Build and save the grid for the current map |
+| `ngl_nav_info` | Points, spacing, running searches, cached paths |
+| `ngl_nav_draw [radius]` | Draw the grid around you for 15 s (listen server with `developer 1`) |
+| `ngl_nav_reload` | Reload the saved grid |
+| `ngl_nav_spacing` (96) | Grid spacing for generation. Smaller = more precise, more points |
+| `ngl_nav_max_nodes` (150000) | Generation stops at this many points |
+| `ngl_nav_budget` (2) | ms per tick for path-finding |
+| `ngl_nav_max_expand` (30000) | A search gives up after this many points |
 
 ## Installing
 

@@ -223,6 +223,9 @@ function Core.SetEnemy(npc, enemy)
 	if old == enemy then return end
 	npc.NGLEnemy = enemy
 	npc.NGLFireAccum = 0
+	npc.NGLPath = nil
+	npc.NGLEnemyVisible = true -- found by sight (or it just shot us); rechecked shortly
+	npc.NGLNextVis = CurTime() + 0.5
 	if IsValid(enemy) then
 		npc:OnSeeEnemy(enemy)
 	elseif IsValid(old) then
@@ -277,6 +280,41 @@ local function fire(npc, enemy, shots, visual)
 end
 
 local ATTACK_KEEP_SQR_PAD = 1.2 * 1.2
+local DIRECT_SQR = 1500 * 1500
+local STUCK_SQR = 16 * 16
+
+-- Move towards the enemy: straight line when it's in clear view and close,
+-- otherwise along a path from our nav grid (requested in the background).
+local function chase(npc, now, pos, tPos, visible, distSqr)
+	local nav = NGL.Nav
+	if not (nav and nav.Loaded) or (visible and distSqr < DIRECT_SQR and math.abs(tPos.z - pos.z) < 96) then
+		npc.NGLPath = nil
+		npc.NGLGoal = tPos
+		return
+	end
+
+	-- Keep the current path while the enemy hasn't moved far from its end.
+	local tgt = npc.NGLPathTarget
+	if npc.NGLPath and tgt and tgt:DistToSqr(tPos) < 300 * 300 and now < (npc.NGLRepathAt or 0) then return end
+	if npc.NGLPathPending then return end
+
+	npc.NGLPathPending = true
+	npc.NGLRepathAt = now + 3
+	local target = Vector(tPos.x, tPos.y, tPos.z)
+	nav.RequestPath(pos, target, function(path)
+		if not IsValid(npc) then return end
+		npc.NGLPathPending = false
+		npc.NGLGoal = target -- final leg after the last waypoint
+		if path and #path > 0 then
+			npc.NGLPath = path
+			npc.NGLPathIdx = (#path > 1) and 2 or 1
+			npc.NGLPathTarget = target
+		else
+			npc.NGLPath = nil
+		end
+	end)
+	if not npc.NGLPath then npc.NGLGoal = tPos end
+end
 
 -- One AI decision for one NPC. `dt` is the time since its last think.
 local function think(npc, now, dt, nearestPlayerSqr)
@@ -284,6 +322,18 @@ local function think(npc, now, dt, nearestPlayerSqr)
 
 	local pos = npc:GetPos()
 	gridUpdate(npc, pos)
+
+	-- Stuck (not moved 16 units in 2 s while trying to): drop the path and
+	-- strafe goal so the next decision starts fresh.
+	if npc.NGLGoal or npc.NGLPath then
+		local sp = npc.NGLStuckPos
+		if not sp or pos:DistToSqr(sp) >= STUCK_SQR then
+			npc.NGLStuckPos, npc.NGLStuckT = pos, now
+		elseif now - npc.NGLStuckT > 2 then
+			npc.NGLPath, npc.NGLGoal, npc.NGLStuckPos = nil, nil, nil
+			npc.NGLRepathAt, npc.NGLNextStrafe = 0, 0
+		end
+	end
 
 	local enemy = npc.NGLEnemy
 	local enemyOk = IsValid(enemy) and enemy:Health() > 0 and Core.IsHostile(npc, enemy)
@@ -298,6 +348,7 @@ local function think(npc, now, dt, nearestPlayerSqr)
 	if not enemyOk then
 		npc.NGLGoal = nil
 		npc.NGLFace = nil
+		npc.NGLPath = nil
 		return
 	end
 
@@ -306,12 +357,21 @@ local function think(npc, now, dt, nearestPlayerSqr)
 	local range = npc.AttackRange
 	local rangeSqr = range * range
 
-	if distSqr > rangeSqr * ATTACK_KEEP_SQR_PAD then
-		-- Chase. (Straight line for now; step 3 adds our own navigation.)
-		npc.NGLGoal = tPos
+	-- Line of sight to the current enemy, rechecked at most twice a second.
+	if now >= (npc.NGLNextVis or 0) then
+		npc.NGLNextVis = now + 0.5
+		npc.NGLEnemyVisible = canSee(npc, pos + Vector(0, 0, npc.EyeHeight), enemy)
+	end
+	local visible = npc.NGLEnemyVisible
+
+	if distSqr > rangeSqr * ATTACK_KEEP_SQR_PAD or not visible then
+		chase(npc, now, pos, tPos, visible, distSqr)
 		npc.NGLNextStrafe = 0
 		npc.NGLFireAccum = 0
+		npc.NGLFace = visible and tPos or nil -- look where we walk when it's out of sight
+		return
 	else
+		npc.NGLPath = nil
 		if now >= npc.NGLNextStrafe then
 			npc.NGLNextStrafe = now + Rand(2, 3.5)
 			local dir = tPos - pos
