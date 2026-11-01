@@ -37,7 +37,8 @@ local GOD_HEALTH = 10000000
 local function say(ply, msg)
 	msg = "[NGL] " .. msg
 	print(msg)
-	if IsValid(ply) then
+	-- In singleplayer / for the listen host, print() already lands in their console.
+	if IsValid(ply) and not game.SinglePlayer() and not ply:IsListenServerHost() then
 		ply:PrintMessage(HUD_PRINTCONSOLE, msg)
 	end
 end
@@ -52,7 +53,32 @@ end
 
 -- engine.ServerFrameTime() is the engine's own server frame time (the "sv"
 -- number from net_graph). It includes everything: engine NPC/NextBot code,
--- physics, networking and Lua.
+-- physics, networking and Lua. It is client-only on current builds, so the
+-- client samples it (cl_bench.lua) and reports back; this server-side read is
+-- only used if a build ever exposes it here.
+util.AddNetworkString("ngl_bench_phase")
+util.AddNetworkString("ngl_bench_report")
+
+local CLIENT_REPORT_TIMEOUT = 3
+
+local function sendPhase(run, phase)
+	local ply = run.reporter
+	if not IsValid(ply) then return end
+	net.Start("ngl_bench_phase")
+	net.WriteString(phase)
+	net.Send(ply)
+end
+
+net.Receive("ngl_bench_report", function(_, ply)
+	local run = B.Active
+	if not run or run.phase ~= "collecting" or ply ~= run.reporter then return end
+	local ok, report = pcall(net.ReadTable)
+	if ok and istable(report) then
+		run.client = report
+	end
+	run.phaseEnd = 0 -- finish on the next tick
+end)
+
 local function serverFrameMs()
 	if engine.ServerFrameTime then
 		local ft = engine.ServerFrameTime()
@@ -249,6 +275,7 @@ local function startNext()
 		class = job.class,
 		count = job.count,
 		ply = job.ply,
+		reporter = IsValid(job.ply) and job.ply or player.GetAll()[1],
 		phase = "baseline",
 		phaseEnd = now + cvBaseline:GetFloat(),
 		slots = buildSlots(origin, yaw, job.count),
@@ -259,6 +286,7 @@ local function startNext()
 		startedAt = os.time(),
 	}
 
+	sendPhase(B.Active, "baseline")
 	say(job.ply, string.format("Benchmark %s x%d: sampling empty baseline for %ds...",
 		job.class, job.count, cvBaseline:GetInt()))
 end
@@ -287,6 +315,13 @@ end
 local function finish(run)
 	local base = stats(run.baseline.frame)
 	local loaded = stats(run.loaded.frame)
+	local frameSource = "server"
+	local client = run.client
+	if not (base and loaded) and client and client.baseline and client.loaded then
+		base = client.baseline.sv_ms
+		loaded = client.loaded.sv_ms
+		frameSource = "client net_graph"
+	end
 	local lua = stats(run.loaded.lua)
 	local tickMs = engine.TickInterval() * 1000
 	local alive = aliveCount()
@@ -305,11 +340,15 @@ local function finish(run)
 		god = cvGod:GetBool(),
 		duration = cvDuration:GetFloat(),
 		time = os.date("%Y-%m-%d %H:%M:%S", run.startedAt),
+		frame_source = (base and loaded) and frameSource or nil,
 		baseline_frame_ms = base,
 		frame_ms = loaded,
 		bench_lua_ms = lua,
 		overruns = run.loaded.overruns,
 		ticks = run.loaded.ticks,
+		baseline_overruns = run.baseline.overruns,
+		baseline_ticks = run.baseline.ticks,
+		client = client,
 	}
 
 	if base and loaded then
@@ -322,8 +361,10 @@ local function finish(run)
 	say(p, "------------------------------------------------------------")
 	say(p, string.format("Result: %s x%d on %s (%d tick, %s)", run.class, run.count, result.map,
 		result.tickrate, result.dedicated and "dedicated" or (result.singleplayer and "singleplayer" or "listen")))
-	if not base then
-		say(p, "  engine.ServerFrameTime() returned nothing on this build; only Lua time is reported.")
+	if not (base and loaded) then
+		say(p, "  No server frame time available (no client report); only Lua time is reported.")
+	else
+		say(p, "  Frame time source:     " .. frameSource)
 	end
 	say(p, "  Server frame, empty:   " .. fmt(base))
 	say(p, "  Server frame, loaded:  " .. fmt(loaded))
@@ -334,7 +375,12 @@ local function finish(run)
 	if run.class == "ngl_bench_nextbot" or run.class == "ngl_bench_light" then
 		say(p, "  Bench AI Lua only:     " .. fmt(lua))
 	end
-	say(p, string.format("  Late ticks:            %d of %d", run.loaded.overruns, run.loaded.ticks))
+	say(p, string.format("  Late ticks, empty:     %d of %d", run.baseline.overruns, run.baseline.ticks))
+	say(p, string.format("  Late ticks, loaded:    %d of %d", run.loaded.overruns, run.loaded.ticks))
+	if client and client.loaded and client.loaded.client_frame_ms then
+		local cf = client.loaded.client_frame_ms
+		say(p, string.format("  Client FPS, loaded:    avg %.0f  (p95 frame %.2f ms)", 1000 / cf.avg, cf.p95))
+	end
 	say(p, string.format("  Alive at end:          %d / %d", alive, run.count))
 
 	file.CreateDir("ngl_bench")
@@ -365,6 +411,7 @@ hook.Add("Tick", "NGL.Bench.Harness", function()
 	if run.phase == "baseline" then
 		sample(run, run.baseline)
 		if now >= run.phaseEnd then
+			sendPhase(run, "pause")
 			run.phase = "spawning"
 			say(run.ply, "Spawning " .. run.count .. " NPCs...")
 		end
@@ -389,11 +436,23 @@ hook.Add("Tick", "NGL.Bench.Harness", function()
 			run.phase = "sampling"
 			run.phaseEnd = now + cvDuration:GetFloat()
 			run.lastTick = nil
+			sendPhase(run, "loaded")
 			say(run.ply, string.format("Sampling for %ds...", cvDuration:GetInt()))
 		end
 
 	elseif run.phase == "sampling" then
 		sample(run, run.loaded)
+		if now >= run.phaseEnd then
+			if IsValid(run.reporter) then
+				run.phase = "collecting"
+				run.phaseEnd = now + CLIENT_REPORT_TIMEOUT
+				sendPhase(run, "stop")
+			else
+				finish(run)
+			end
+		end
+
+	elseif run.phase == "collecting" then
 		if now >= run.phaseEnd then
 			finish(run)
 		end
@@ -460,6 +519,7 @@ end)
 concommand.Add("ngl_bench_stop", function(ply)
 	if not canRun(ply) then return end
 	B.Queue = {}
+	if B.Active then sendPhase(B.Active, "pause") end
 	B.Active = nil
 	B.Clear()
 	say(ply, "Benchmark stopped and NPCs removed.")

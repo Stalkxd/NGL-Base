@@ -29,10 +29,11 @@ Commands need superadmin (the host in singleplayer) or the server console. Look 
 
 Each run samples the empty server, spawns the NPCs in two facing teams, waits for warmup, then samples while they chase, strafe and shoot. The report shows:
 
-- **Server frame, empty / loaded**: the engine's own server frame time (`engine.ServerFrameTime`), which includes engine AI, physics, networking and Lua.
+- **Server frame, empty / loaded**: the engine's own server frame time, which includes engine AI, physics, networking and Lua. `engine.ServerFrameTime()` is client-only, so the client that ran the command (or the first player, for console runs) samples the value net_graph shows and reports it back. A dedicated-server run from the server console with nobody connected only gets Lua time.
 - **Added by NPCs**: loaded minus empty, per tick and per NPC, and the share of the tick budget used.
 - **Bench AI Lua only**: time spent in our own Lua for the two test entities.
-- **Late ticks**: ticks that arrived more than 1.5x the tick interval late.
+- **Late ticks, empty / loaded**: ticks that arrived more than 1.5x the tick interval late. Compare the two: in singleplayer, late ticks often come from a low client FPS rather than the NPCs.
+- **Client FPS**: the reporting client's framerate during the loaded phase.
 
 Results are also saved as JSON in `garrysmod/data/ngl_bench/`.
 
