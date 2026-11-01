@@ -1,0 +1,6 @@
+{
+	"title": "NGL Base",
+	"type": "npc",
+	"tags": [ "fun", "realism" ],
+	"ignore": [ "*.md", ".git*", "docs/*" ]
+}
