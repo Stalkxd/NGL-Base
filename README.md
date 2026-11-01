@@ -24,6 +24,7 @@ Commands need superadmin (the host in singleplayer) or the server console. Look 
 | `ngl_bench <class> <count>` | One run, e.g. `ngl_bench ngl_bench_light 100` |
 | `ngl_bench_compare [count]` | Light entity vs NextBot vs `npc_combine_s` at the same count (default 100) |
 | `ngl_bench_sweep <class> <c1,c2,...>` | Several counts in a row, e.g. `ngl_bench_sweep ngl_bench_light 25,50,100,200` |
+| `ngl_bench_limit [class\|all] [start]` | Stress test: climbs 100, 200, 300 ... 2000 NPCs until more than 1% of ticks are late, and prints the highest count that held. `all` (default) does light, NextBot and Combine |
 | `ngl_bench_stop` | Abort and remove everything |
 | `ngl_bench_clear` | Remove benchmark NPCs |
 
@@ -64,11 +65,13 @@ On singleplayer or a listen server the "server frame" is really the whole game f
 
 For real numbers, run a local dedicated server on the same PC:
 
-1. Install SteamCMD and run `app_update 4020` to get the Garry's Mod dedicated server.
+1. Download [SteamCMD](https://developer.valvesoftware.com/wiki/SteamCMD), then at its prompt run `force_install_dir C:\gmodserver`, `login anonymous`, `app_update 4020 validate`.
 2. Copy this addon into its `garrysmod/addons/` folder.
-3. Start it: `srcds -console -game garrysmod +map gm_construct +maxplayers 2` (`srcds_run` on Linux).
+3. Start it with a `start.bat` in that folder containing `srcds.exe -console -game garrysmod +map gm_flatgrass +maxplayers 2` (`srcds_win64.exe` if your game is on the x86-64 branch, `srcds_run` on Linux). Without `-console` you get a GUI window whose console is on the "Console" tab.
 4. Join it from your game with `connect localhost`.
-5. Type `ngl_bench_compare 100` in the **server console window**. NPCs spawn where the first player is looking, and your connected game reports the frame time, so keep the game window focused.
+5. Type commands in the **server console window**. NPCs spawn where the first player is looking, so stand somewhere open; gm_flatgrass fits the big counts.
+
+On a dedicated server the frame time reported by net_graph is wall time per frame **including the idle sleep**, so it sits at the tick interval (about 15 ms at 66 tick) until the server overloads. The useful numbers there are late ticks and the `ngl_bench_limit` stress test, which finds the NPC count where the server can no longer keep its tick rate.
 
 ## Results
 
