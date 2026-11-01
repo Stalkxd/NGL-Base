@@ -4,12 +4,58 @@ An NPC base for Garry's Mod built for large battles (100+ NPCs) with minimal ser
 
 ## Roadmap
 
-1. **Benchmark harness and entity choice** (this step). A tool that spawns N NPCs and measures server CPU per tick, used to compare an engine NextBot with a lightweight custom entity. Every later step is measured with it.
-2. **NPC base core.** One central scheduler with a CPU budget per tick, distance-based update rates (LOD), a spatial grid for perception, and an authoring API (states, relationships, damage, weapons).
+1. **Benchmark harness and entity choice** (done). Stress test on a dedicated server, 67 tick, gm_construct: NextBot held 800 NPCs, our lightweight entity 400, stock `npc_combine_s` 200. **NextBot is the foundation.**
+2. **NPC base core** (in progress). One central scheduler with a CPU budget per tick, distance-based update rates (LOD), a spatial grid for perception, and an authoring API (states, relationships, damage, weapons).
 3. **Custom navigation.** Our own lightweight nav graph generated per map (no navmesh, no AI nodes), path-finding spread over several ticks, and shared paths / flow fields for groups.
 4. **Battle test.** Two teams of 100+ soldiers on several maps, singleplayer and dedicated server, tuned against the target.
 
-**Target:** 100 NPCs fighting with minimal server CPU load. Step 1 gives us the baseline numbers to turn this into a hard ms-per-tick figure.
+**Target:** 300 NGL NPCs with real combat AI holding 67 tick (under 1% late ticks, `ngl_bench_limit`) on a local dedicated server on a normal PC. That's 3x the 100 goal, so weaker servers still manage 100+.
+
+## Design rules
+
+1. **Easy to mod, heavily optimized core.** Modders write a short NPC file with fields and optional hooks. They never touch the scheduler, movement or perception.
+2. **Hooks run on events or at the AI rate, never every tick.** A mod can't accidentally make every NPC run expensive code 67 times a second.
+3. **Pay for what players can see.** NPCs far from every player think less often and shoot with one silent trace instead of real bullets, but deal the same damage over time.
+4. **Everything is measured.** Each optimization is checked with `ngl_bench_limit` before and after.
+
+## Making an NPC
+
+Create `lua/entities/<your_class>.lua` in your own addon:
+
+```lua
+AddCSLuaFile()
+ENT.Base = "ngl_base"
+ENT.PrintName = "My Soldier"
+
+ENT.Model = "models/combine_soldier.mdl"
+ENT.Faction = "combine"      -- same faction = friends, others = enemies
+ENT.StartHealth = 80
+ENT.RunSpeed = 210
+ENT.WeaponModel = "models/weapons/w_smg1.mdl"
+ENT.Weapon = { Damage = 5, Delay = 0.12, Spread = 0.04, Accuracy = 0.6, Sound = "Weapon_SMG1.NPC_Single" }
+
+list.Set("NPC", "my_soldier", { Name = "My Soldier", Class = "my_soldier", Category = "My NPCs" })
+
+if SERVER then
+	function ENT:OnSeeEnemy(enemy) self:EmitSound("npc/combine_soldier/vo/contact.wav") end
+end
+```
+
+Fields and hooks are listed in `lua/entities/ngl_base/shared.lua`. Hooks: `OnSpawned`, `OnSeeEnemy`, `OnLoseEnemy`, `OnDamaged` (return true to ignore), `OnDeath`, `OnAIThink` (return true to skip the default behaviour). Relations between factions: `NGL.SetRelation("rebels", "player", D_LI)`.
+
+Examples shipped: `ngl_combine_soldier` and `ngl_rebel` (NPC tab, category "NGL Base").
+
+### How the core keeps it cheap
+
+- **Per tick**, each NPC only steers towards its current goal (`BehaveUpdate`: one `Approach`, one `FaceTowards`). The stock NextBot coroutine is not used.
+- **Decisions** (targets, chase or strafe, shooting) run in one central hook under a CPU budget (`ngl_ai_budget`, default 3 ms per tick). NPCs that don't fit think on the next tick.
+- **Think rate depends on the nearest player**: every 0.1 s within 1500 units, 0.3 s within 4000, 1 s further away (`ngl_ai_near`, `ngl_ai_mid`, `ngl_ai_rate_*`).
+- **Enemy search uses a 1024-unit spatial grid**, so cost depends on nearby NPCs, not all of them. Line of sight is checked for at most the 3 closest candidates, once per second.
+- **Far from players** (`ngl_ai_visual_range`, 3000), shots are one silent trace dealing the expected damage, so far battles cost almost nothing but still play out.
+- **Death ragdolls are client-side** by default (`ngl_ragdolls 1`), and the weapon model is client-only.
+- `ngl_status` prints the NPC count and grid usage.
+
+Movement is a straight line for now; step 3 adds our own navigation.
 
 ## Installing
 
@@ -22,9 +68,9 @@ Commands need superadmin (the host in singleplayer) or the server console. Look 
 | Command | What it does |
 | --- | --- |
 | `ngl_bench <class> <count>` | One run, e.g. `ngl_bench ngl_bench_light 100` |
-| `ngl_bench_compare [count]` | Light entity vs NextBot vs `npc_combine_s` at the same count (default 100) |
+| `ngl_bench_compare [count]` | `ngl_combine_soldier` vs bench NextBot vs `npc_combine_s` at the same count (default 100) |
 | `ngl_bench_sweep <class> <c1,c2,...>` | Several counts in a row, e.g. `ngl_bench_sweep ngl_bench_light 25,50,100,200` |
-| `ngl_bench_limit [class\|all] [start]` | Stress test: climbs 100, 200, 300 ... 2000 NPCs until more than 1% of ticks are late, and prints the highest count that held. `all` (default) does light, NextBot and Combine |
+| `ngl_bench_limit [class\|all] [start]` | Stress test: climbs 100, 200, 300 ... 2000 NPCs until more than 1% of ticks are late, and prints the highest count that held. `all` (default) does `ngl_combine_soldier`, the bench NextBot and `npc_combine_s` |
 | `ngl_bench_stop` | Abort and remove everything |
 | `ngl_bench_clear` | Remove benchmark NPCs |
 

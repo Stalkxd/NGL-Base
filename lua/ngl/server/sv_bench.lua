@@ -374,7 +374,9 @@ local function finish(run)
 	if not game.IsDedicated() then
 		warnings[#warnings + 1] = "Not a dedicated server: the frame time includes the host's rendering. Trust only the Lua line, or rerun on a local srcds."
 	end
-	if client then
+	-- On a dedicated server late ticks are measured on the server, so the
+	-- client's focus doesn't matter for them.
+	if client and not game.IsDedicated() then
 		for _, phase in ipairs({ "baseline", "loaded" }) do
 			local c = client[phase]
 			if c and (c.unfocused_pct or 0) > 1 then
@@ -397,8 +399,8 @@ local function finish(run)
 		say(p, string.format("  Added by NPCs:         %.3f ms/tick  (%.1f us per NPC, %.1f%% of the %.2f ms tick)",
 			result.added_ms, result.added_us_per_npc, result.tick_budget_pct, tickMs))
 	end
-	if run.class == "ngl_bench_nextbot" or run.class == "ngl_bench_light" then
-		say(p, "  Bench AI Lua only:     " .. fmt(lua))
+	if lua and lua.max > 0 then
+		say(p, "  NGL / bench Lua:       " .. fmt(lua))
 	end
 	say(p, string.format("  Late ticks, empty:     %d of %d", run.baseline.overruns, run.baseline.ticks))
 	say(p, string.format("  Late ticks, loaded:    %d of %d", run.loaded.overruns, run.loaded.ticks))
@@ -568,7 +570,7 @@ end)
 -- ticks. Works on any server; on a dedicated server it is the most honest
 -- number we have, because it measures the point where the CPU runs out.
 local LIMIT_LADDER = { 100, 200, 300, 400, 500, 600, 800, 1000, 1250, 1500, 2000 }
-local LIMIT_CLASSES = { "ngl_bench_light", "ngl_bench_nextbot", "npc_combine_s" }
+local LIMIT_CLASSES = { "ngl_combine_soldier", "ngl_bench_nextbot", "npc_combine_s" }
 local cvLimitLate = CreateConVar("ngl_bench_limit_late", "1", FCVAR_ARCHIVE, "ngl_bench_limit: max % of late ticks that still counts as a pass.", 0, 100)
 local cvLimitDuration = CreateConVar("ngl_bench_limit_duration", "10", FCVAR_ARCHIVE, "ngl_bench_limit: seconds of sampling per step.", 3, 120)
 
@@ -595,7 +597,7 @@ end)
 concommand.Add("ngl_bench_compare", function(ply, _, args)
 	if not canRun(ply) then return end
 	local count = args[1] or "100"
-	for _, class in ipairs({ "ngl_bench_light", "ngl_bench_nextbot", "npc_combine_s" }) do
+	for _, class in ipairs({ "ngl_combine_soldier", "ngl_bench_nextbot", "npc_combine_s" }) do
 		queue(ply, class, count)
 	end
 	kick(ply)
