@@ -6,6 +6,7 @@ local cvRagdolls = CreateConVar("ngl_ragdolls", "1", FCVAR_ARCHIVE,
 	"Death ragdolls for NGL NPCs: 0 = none, 1 = client-side (cheap, default), 2 = server-side (physics on the server).", 0, 2)
 
 local NEAR_GOAL_SQR = 32 * 32
+local WAYPOINT_SQR = 40 * 40
 
 -- Empty default hooks.
 function ENT:OnSpawned() end
@@ -60,10 +61,36 @@ function ENT:BehaveUpdate(interval)
 	if self.NGLDying then return end
 	local t0 = SysTime()
 
-	local goal = self.NGLGoal
-	if goal and self:GetPos():DistToSqr(goal) < NEAR_GOAL_SQR then
-		goal = nil
-		self.NGLGoal = nil
+	local pos = self:GetPos()
+
+	-- Following a nav path: advance waypoints here, every tick, so NPCs that
+	-- think rarely (far from players) don't stop at each corner.
+	local goal
+	local path = self.NGLPath
+	if path then
+		local idx = self.NGLPathIdx
+		local wp = path[idx]
+		if wp then
+			local dx, dy = wp.x - pos.x, wp.y - pos.y
+			if dx * dx + dy * dy < WAYPOINT_SQR then
+				idx = idx + 1
+				self.NGLPathIdx = idx
+				wp = path[idx]
+			end
+		end
+		if wp then
+			goal = wp
+		else
+			self.NGLPath = nil
+		end
+	end
+
+	if not goal then
+		goal = self.NGLGoal
+		if goal and pos:DistToSqr(goal) < NEAR_GOAL_SQR then
+			goal = nil
+			self.NGLGoal = nil
+		end
 	end
 
 	if goal then
