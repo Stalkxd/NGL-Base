@@ -9,6 +9,7 @@ An NPC base for Garry's Mod built for large battles (100+ NPCs) with minimal ser
 3. **Custom navigation** (done). Our own walk grid generated per map (no navmesh, no AI nodes), path-finding spread over ticks under a CPU budget, shared and cached paths.
 3a. **Behaviour, animation and modding** (done). Weapon animations with level of detail, wandering, alerts, enemy memory; melee, entity-free projectiles, voice lines, and building blocks for custom behaviour. `ngl_combine_soldier` holds **800** at 67 tick with full animations (v0.4.1).
 3b. **Squads, elite Combine, APC and dropship** (done). Squads and orders (v0.6.0), squad leaders and the elite Combine (v0.7.0), the APC with fire support from the elite (v0.8.0), flying navigation and the dropship bringing reinforcements (v0.9.0), the dropship carrying an APC (v0.10.0).
+3c. **AI modes and groups** (done, v0.14.0). Four fighting styles modders can pick or extend, NPCs teaming up on their own, idle pauses, the APC following hills and patrolling.
 4. **Battle test.** Two teams of 100+ soldiers on several maps, singleplayer and dedicated server, tuned against the target.
 
 **Target:** 300 NGL NPCs with real combat AI holding 67 tick (under 1% late ticks, `ngl_bench_limit`) on a local dedicated server on a normal PC. That's 3x the 100 goal, so weaker servers still manage 100+.
@@ -50,7 +51,7 @@ Every field, hook and building block is documented in `lua/entities/ngl_base/sha
 - `ngl_combine_soldier`: SMG plus a rifle-butt melee, voice lines.
 - `ngl_rebel`: random faces, male and female voices via `SoundsByModel`, friendly to players.
 - `ngl_zombie`: melee only, no code at all.
-- `ngl_apc`: a vehicle NPC that drives like a car: it speeds up and brakes, steers with its front wheels (a bicycle model with `WheelBase` and `MaxSteer`), can't turn on the spot, and backs up to get round tight corners, away from enemies that get too close, or out of a wall it is stuck on. Wheels spin and steer on clients from how it moves (nothing extra networked), with HL2's APC engine loops. The turret machine gun fires from the barrel (`muzzle` attachment) with HL2's helicopter tracers and muzzle flash; rockets go up out of the launcher (`cannon_muzzle`) at HL2's launch angles, light after 0.3 s and curve onto the target, with a smoke trail. Takes the elite's orders when one is near, its own decisions otherwise. Any vehicle NPC can drive itself with `ENT:NGLDrive(goal, dt)`; `ENT:NGLMuzzle()` sets where any NPC's shots start; projectiles can be guided (`Homing`, `Trail`).
+- `ngl_apc`: a vehicle NPC that drives like a car: it sits on the ground (the body pitches and rolls with the ground under its four wheels, `TrackWidth`, `MaxTilt`), slows down uphill and a little faster downhill (`SlopeSlow`), speeds up and brakes, steers with its front wheels (a bicycle model with `WheelBase` and `MaxSteer`), can't turn on the spot, and backs up to get round tight corners, away from enemies that get too close, or out of a wall it is stuck on. Wheels spin and steer on clients from how it moves (nothing extra networked), with HL2's APC engine loops. The turret machine gun fires from the barrel (`muzzle` attachment) with HL2's helicopter tracers and muzzle flash; rockets go up out of the launcher (`cannon_muzzle`) at HL2's launch angles, light after 0.3 s and curve onto the target, with a smoke trail. Takes the elite's orders when one is near, its own decisions otherwise: with nobody commanding it, it patrols round where it spawned (`ENT.Patrol = { Radius, MinDist, Pause }`, false to park), and in a fight it drives to a new spot round the enemy every few seconds (`RepositionDelay`) instead of sitting still. Any vehicle NPC can drive itself with `ENT:NGLDrive(goal, dt)`; `ENT:NGLMuzzle()` sets where any NPC's shots start; projectiles can be guided (`Homing`, `Trail`).
 - `ngl_combine_elite`: the first hard NPC. Super soldier model, AR2, tougher and more accurate, and leads up to 9 Combine soldiers with hand signals (`ENT.Squad`, see Squads and orders). Still no code beyond fields.
 
 ### Attacks
@@ -94,6 +95,7 @@ The default behaviour is built from these, so custom behaviour built from them g
 | Sound | `self:Speak(kindOrPath)` |
 | State | `self:IsNearPlayer()`, `self:IsDetailed()`, `self:IsBusy()` |
 | Orders | `self:GiveOrder(order)`, `self:GetOrder()`, `self:ClearOrder()` |
+| AI mode | `self:SetAIMode(name)`, `self:GetAIMode()` |
 | Squads | `self:MakeSquad(max)`, `self:GetSquad()`, `self:IsSquadLeader()`, `self:LeaveSquad()`, `squad:Add(npc)`, `squad:Order(who, order)`, `squad:Nearest(pos, n)`, `squad:Members()` |
 
 Example: a brute that roars and charges when its enemy is far, and otherwise fights normally.
@@ -113,7 +115,35 @@ function ENT:OnCombat(enemy, dist, visible)
 end
 ```
 
+### AI modes
+
+Each NPC fights in one of these styles, picked when it spawns from `ENT.AIMode` (a name, or weights for a random pick like `{ balanced = 3, flanker = 2, assault = 1, defender = 1 }`, which is what the Combine soldiers use):
+
+| Mode | What it does |
+| --- | --- |
+| `balanced` | The default. Stands, crouches or sidesteps while shooting (`StandChance`, `CrouchChance`), chases what it loses sight of. |
+| `assault` | Pushes forward no matter what: runs at the enemy shooting, never crouches or hides, and keeps pressing to where you went when it loses sight of you. |
+| `flanker` | Attacks from out of your sight: circles round to a spot at your side or back that you can't see, opens fire from there, and moves to a new hidden spot after a few seconds. |
+| `defender` | Holds the ground where the fight started (`DefendRadius`, 500): crouches and shoots from there, ducks out of sight when below half health, doesn't chase. |
+
+Your own mode, from any addon:
+
+```lua
+NGL.RegisterAIMode("sniper", {
+	StandChance = 0.8, CrouchChance = 0.2,          -- used by the default fight
+	Fight = function(npc, enemy, dist, visible, now, dt)
+		-- every think while it has an enemy and no order; return true when
+		-- you handled it, nothing for the default fight
+	end,
+})
+ENT.AIMode = "sniper"
+```
+
+`Fight` gets `visible = false` while the enemy is out of sight. Build it from the same pieces the built-in modes use (`NGL.Core.Chase`, `Shoot`, `Strafe`, `StopMoving`, `FindHiddenSpot`, `HiddenFrom`, `EyeOf`, `FacingYaw`, `GridSpot`, all in `sv_aimodes.lua` and `sv_core.lua`) or the building blocks above. Like every hook it runs at the AI rate. Testing (superadmin): `ngl_ai_mode <mode>` sets the NPC you look at, `ngl_ai_mode <mode> all` every NGL NPC; `ngl_ai_mode_override <mode>` makes every new NPC use one (empty = their own).
+
 ### Squads and orders
+
+**Groups.** NPCs that don't lead a squad team up on their own with allies of the same faction nearby (`ENT.Group = { Max = 6, Radius = 800 }` by default; `false` keeps one alone, as the zombie does). The nearest ally leads, the others walk in formation behind it and come to help when one of them spots an enemy; when the leader dies another member takes over, and a real squad leader (`ENT.Squad`, like the elite) nearby takes the group over. It costs one grid lookup every 3 to 5 seconds per idle NPC without a group.
 
 A squad is a leader plus members (`max` counts the leader). Members keep formation around the leader when there's nothing to fight (each squad picks a wedge, a line or a column at random; `ENT.Squad.Formations` limits the choice, `squad:SetFormation(name)` changes it), and when one of them spots an enemy the others go to look, however far away they are. A squad is a plain table, not an entity: it adds no per-tick work, members follow and obey inside their normal think.
 
@@ -150,7 +180,7 @@ ENT.Squad = {
 - **Target lost, not killed:** after `LostDelay` seconds with nobody in the squad seeing it, the leader signals halt and the whole squad holds, crouched, watching the last seen spot. 1.5 seconds later it signals forward and sends the `Scouts` nearest soldiers to search there. If anyone sees the enemy, the leader signals advance and everyone engages. If the scouts find nothing, it signals regroup and the squad forgets the target and falls back into formation.
 - **Signals and voice:** hand signals come from `Anims.SignalHalt`, `SignalSearch`, `SignalEngage`, `SignalStandDown` and `SignalReinforce` (an upper-body gesture when the model has one; stock HL2 models only have full-body signals, so the leader stops for the second the signal takes). Voice lines come from `Sounds.Halt`, `Search`, `Engage`, `StandDown` and `Reinforce`, and always play, even right after another line. One member answers each order (`Sounds.Ack`). With `ENT.Radio` every voice line has a radio click before and after, as the Combine examples do. Members act half a second after the signal, so players see it first.
 - **Vehicles:** NPCs with `ENT.Commandable` of the leader's faction within `CommandRadius` (3000) report to it, without joining the squad. The leader calls a `fire_at` order on the nearest free one when the target hides (before the scouts go in) and when 3 or more enemies are packed around its target, at most every `FireSupportDelay` seconds (voice line `Sounds.CallFire`). Idle vehicles follow behind their commander.
-- **Reinforcements:** with `Reinforce = { Ship, Cargo, Count, OnFootCount, When }` in `ENT.Squad`, a leader in a fight with `When` (3) or fewer members left calls more. On maps with open sky a dropship (`ngl_dropship`) flies in from the edge of the sky, sets its HL2 troop pod down at a checked spot behind the squad, and `Count` soldiers climb out of it (HL2's `Dropship_Deploy` animation) and join the squad. The pod's gun fires at enemies within 2000 units while the ship is around. The ship uses HL2's flight, landing and liftoff animations, leans with `body_accel`/`body_sway`, and plays HL2's engine sounds on clients (near and far loops faded by distance, landing and on-ground loops). When the leader is under a roof, when the ship can't land near it, and on maps with no open sky, `OnFootCount` soldiers arrive on foot from a spot neither the enemy nor any player can see. Server settings: `ngl_reinforce_limit` (3 waves per leader, -1 unlimited), `ngl_reinforce_cooldown` (90 s), `ngl_dropship_max` (2 in the air at once), `ngl_dropship_vulnerable` (0; 1 lets players shoot it down). Voice line `Sounds.Reinforce`.
+- **Reinforcements:** with `Reinforce = { Ship, Cargo, Count, OnFootCount, When }` in `ENT.Squad`, a leader in a fight with `When` (3) or fewer members left calls more. On maps with open sky a dropship (`ngl_dropship`) flies in from the edge of the sky, sets its HL2 troop pod down at a checked spot behind the squad, and `Count` soldiers climb out of it (HL2's `Dropship_Deploy` animation) and join the squad. The pod's gun fires at enemies within 2000 units while the ship is around. The ship uses HL2's flight, landing and liftoff animations, leans with `body_accel`/`body_sway`, and plays HL2's engine sounds on clients (near and far loops faded by distance, landing and on-ground loops). Or `OnFootCount` soldiers appear on foot close to the leader (700 to 1600 units away, its side away from the enemy first) at a spot neither the enemy nor any player can see (head and feet checked), never within 500 units of a player, and run to it. `ngl_reinforce_onfoot` picks: 0 = dropship under open sky, on foot only when it must; 1 = mixed, each wave at random (default, `ngl_reinforce_onfoot_chance` 0.5); 2 = always on foot. Under a roof, when the ship can't land near the leader, and on maps with no open sky they always come on foot. Server settings: `ngl_reinforce_limit` (3 waves per leader, -1 unlimited), `ngl_reinforce_cooldown` (90 s), `ngl_dropship_max` (2 in the air at once), `ngl_dropship_vulnerable` (0; 1 lets players shoot it down). Voice line `Sounds.Reinforce`.
 - **Vehicle drops:** add `Vehicle = "ngl_apc"` (plus `VehicleLimit`, 1, and `VehicleThreat`, 4) and a wave can be a vehicle instead of soldiers: the dropship carries it under it and sets it down, and it joins the leader as a commandable asset. The leader asks for one when it has no vehicle left and the fight is heavy (the target is a player or a vehicle, or `VehicleThreat` enemies stand near it); `ChooseVehicle = function(leader, squad, enemy)` overrides that. With no open sky the vehicle drives in from out of sight. If it can't come, soldiers come instead. Setting `ngl_reinforce_apc` (1; 0 turns vehicle drops off).
 - `OnLeaderThink(squad, now)` runs at the same rate for your own commands.
 
@@ -158,9 +188,9 @@ Testing in game (superadmin): `ngl_squad_make [size]` makes the NGL NPC you look
 
 ### Behaviour
 
-- **Idle:** strolls around its home spot (where it spawned or last fought) every few seconds at walking pace, with relaxed weapon animations (`WanderRadius`, `WanderDelay`, `WalkSpeed`; `WanderRadius = 0` stands still).
+- **Idle:** strolls around its home spot (where it spawned or last fought) at walking pace with relaxed weapon animations, then stands a while (`WanderDelay`, 4 to 10 s) and looks around now and then before the next stroll (`WanderRadius`, `WalkSpeed`; `WanderRadius = 0` stands still). Group members stand in formation while their leader does.
 - **Alerted:** when an NPC spots an enemy, allies within `AlertRadius` (1500) that have nothing to do run over to look.
-- **Fighting:** runs at the enemy with the weapon raised until in `AttackRange`, then strafes at walking pace and shoots, or now and then crouches and holds the spot (`CrouchChance`, 0.35; crouched it sees and shoots from `CrouchEyeHeight`). Reloads after `Weapon.Clip` shots (`Weapon.ReloadTime` seconds without firing).
+- **Fighting:** depends on the AI mode (above). The default runs at the enemy with the weapon raised until in `AttackRange`, then shoots while sidestepping at walking pace, standing still (`StandChance`, 0.3) or crouching to hold the spot (`CrouchChance`, 0.35; crouched it sees and shoots from `CrouchEyeHeight`). Reloads after `Weapon.Clip` shots (`Weapon.ReloadTime` seconds without firing).
 - **Enemy out of sight:** heads for where it last saw the enemy (no seeing through walls), and gives up after `EnemyMemory` seconds or once it gets there and finds nobody.
 - **Animations:** idle, alert idle, walk, run, aimed walk and aimed run, crouched idle, aim and walk picked per state; firing, reload and flinch gestures; upper body aims at the enemy. Strafing keeps the body on the target while the legs swing smoothly (every tick, eased) to the direction of travel, anywhere a player can see the NPC (`ngl_ai_visual_range`); standing or crouched, the upper body aims and the feet stay planted until the target is more than 45° off; running always faces where the NPC goes, with the gun raised only when the target is ahead. Walk/run cycles play at the speed the NPC actually moves. Models without crouch animations simply don't crouch. See the level of detail below.
 - **Animation level of detail:** within `ngl_anim_detail_range` (1500) of a player, NPCs get everything above. Further out they play only the plain idle, walk and run cycles: no aim pose, no gestures, no aimed variants with their extra aim layers, and their poses are reset once when they leave the range. This saves server time and, more importantly, drawing time on every client. Clients also skip drawing NPC weapons beyond `ngl_cl_weapon_range` (4000, client setting; 0 = always).

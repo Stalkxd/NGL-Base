@@ -10,6 +10,9 @@ ENT.Faction = "combine"
 ENT.StartHealth = 80
 ENT.RunSpeed = 210
 ENT.WeaponModel = "models/weapons/w_smg1.mdl"
+-- A mix of fighting styles (sv_aimodes.lua): most fight normally, some
+-- sneak round to your side, some rush you, some hold their ground.
+ENT.AIMode = { balanced = 3, flanker = 2, assault = 1, defender = 1 }
 
 -- Rifle butt when an enemy gets too close; the SMG (base default) otherwise.
 ENT.Melee = {

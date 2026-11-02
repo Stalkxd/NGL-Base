@@ -8,6 +8,11 @@
 -- Combine) commands it: rocket barrages on a spot, and it follows the
 -- leader when there's nothing to fight. Alone, it decides for itself.
 --
+-- It sits on the ground like a car: the body pitches and rolls with the
+-- ground under its four wheels, slows down uphill and speeds up a little
+-- downhill. With no commander it patrols on its own, and in a fight it
+-- keeps driving to new spots round the enemy instead of sitting still.
+--
 -- Source vehicle models face +Y, so the entity's angles are the model's and
 -- the direction it drives is 90 degrees from them (HeadingOffset).
 AddCSLuaFile()
@@ -43,11 +48,21 @@ ENT.WaypointRadius = 120        -- a car can't hit path points exactly
 -- Driving.
 ENT.HeadingOffset = 90          -- drives along the model's +Y
 ENT.WheelBase = 140             -- front to rear axle: sets how tight it turns
+ENT.TrackWidth = 110            -- left to right wheels: how much it rolls on side slopes
 ENT.WheelRadius = 26
 ENT.MaxSteer = 35               -- degrees
 ENT.Accel = 220                 -- units per second^2
 ENT.Brake = 500
 ENT.ReverseSpeed = 150
+ENT.SlopeSlow = 1.5             -- uphill speed loss per unit of slope (0.3 slope = 45% slower); downhill gains a little
+ENT.MaxTilt = 40                -- steepest ground (degrees) the body follows
+
+-- On its own (no squad leader commanding it): drives to a random spot
+-- MinDist..Radius from where it spawned, waits Pause seconds, and again.
+-- false = park and wait.
+ENT.Patrol = { Radius = 3000, MinDist = 800, Pause = { 6, 15 } }
+-- In a fight it drives to a new spot round the enemy every few seconds.
+ENT.RepositionDelay = { 6, 12 }
 
 -- Turret machine gun (HL2's APC: bursts of 10, 2 seconds apart, AR2 rounds,
 -- helicopter tracers and muzzle flash from the "muzzle" attachment).
@@ -268,6 +283,14 @@ function ENT:NGLDrive(goal, dt)
 		end
 	end
 
+	-- Hills: slower going up, a bit faster going down (the slope along the
+	-- way we drive, from the ground under the wheels last tick).
+	local slope = self.NGLSlope or 0
+	if want ~= 0 and slope ~= 0 then
+		local s = (want > 0) and slope or -slope
+		want = want * clamp(1 - s * (self.SlopeSlow or 1.5), 0.4, 1.15)
+	end
+
 	local rate = (want == 0 or (want > 0) ~= (speed > 0)) and self.Brake or self.Accel
 	if speed < want then speed = math.min(want, speed + rate * dt)
 	elseif speed > want then speed = math.max(want, speed - rate * dt) end
@@ -293,8 +316,81 @@ function ENT:NGLDrive(goal, dt)
 	self.NGLLastDrivePos = pos
 	self.NGLHeading = heading
 	self.NGLSpeed = speed
-	self:SetAngles(Angle(0, heading - self.HeadingOffset, 0))
 	self.NGLMoving = math.abs(speed) > 5
+	self:SetAngles(self:NGLBodyAngles(heading, dt, now))
+end
+
+-- Ground under the wheels ---------------------------------------------------
+
+local groundTrace = { mask = MASK_NPCSOLID_BRUSHONLY }
+local groundResult = {}
+groundTrace.output = groundResult
+
+-- Normal of the ground under the four wheels (front/rear axle, left/right
+-- wheels), or nil when a wheel hangs over an edge or the ground is too
+-- steep: then the body keeps the tilt it had.
+function ENT:NGLGroundNormal(heading)
+	local pos = self:GetPos()
+	local h = rad(heading)
+	local fx, fy = math.cos(h), math.sin(h)
+	local half, track = self.WheelBase * 0.5, (self.TrackWidth or 110) * 0.5
+	local function z(f, s)
+		local x, y = pos.x + fx * f - fy * s, pos.y + fy * f + fx * s
+		groundTrace.start = Vector(x, y, pos.z + 72)
+		groundTrace.endpos = Vector(x, y, pos.z - 96)
+		util.TraceLine(groundTrace)
+		return groundResult.Hit and groundResult.HitPos.z or nil
+	end
+	local fl, fr, rl, rr = z(half, track), z(half, -track), z(-half, track), z(-half, -track)
+	if not (fl and fr and rl and rr) then return nil end
+	-- front minus rear, and left minus right; the normal is their cross product
+	local ax, ay, az = fx * 2 * half, fy * 2 * half, (fl + fr - rl - rr) * 0.5
+	local bx, by, bz = -fy * 2 * track, fx * 2 * track, (fl + rl - fr - rr) * 0.5
+	local nx, ny, nz = ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx
+	local len = math.sqrt(nx * nx + ny * ny + nz * nz)
+	if len <= 0 then return nil end
+	nx, ny, nz = nx / len, ny / len, nz / len
+	if nz < math.cos(rad(self.MaxTilt or 40)) then return nil end
+	return Vector(nx, ny, nz)
+end
+
+-- Body angles for driving along `heading` on the ground: yaw from the
+-- heading, pitch and roll from the ground, eased so bumps don't jitter.
+-- Four traces per tick while moving near players, a few a second further
+-- away or parked.
+function ENT:NGLBodyAngles(heading, dt, now)
+	local n = self.NGLNormal or Vector(0, 0, 1)
+	if now >= (self.NGLNextGround or 0) then
+		self.NGLNextGround = now + ((not self.NGLMoving) and 1 or (self.NGLNear and 0 or 0.3))
+		local target = self:NGLGroundNormal(heading)
+		if target then
+			local k = self.NGLNormal and math.min(dt * 8, 1) or 1
+			if not self.NGLMoving then k = 1 end
+			n = Vector(n.x + (target.x - n.x) * k, n.y + (target.y - n.y) * k, n.z + (target.z - n.z) * k)
+			local len = math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z)
+			n = Vector(n.x / len, n.y / len, n.z / len)
+		end
+		self.NGLNormal = n
+	end
+	-- Drive direction laid onto the ground.
+	local h = rad(heading)
+	local dx, dy = math.cos(h), math.sin(h)
+	local dz = -(dx * n.x + dy * n.y) / n.z
+	local dl = math.sqrt(dx * dx + dy * dy + dz * dz)
+	dx, dy, dz = dx / dl, dy / dl, dz / dl
+	self.NGLSlope = dz
+	-- The model's forward: the drive direction turned by -HeadingOffset
+	-- round the ground normal.
+	local o = rad(self.HeadingOffset)
+	local cx, cy, cz = dy * n.z - dz * n.y, dz * n.x - dx * n.z, dx * n.y - dy * n.x -- drive x normal
+	local co, so = math.cos(o), math.sin(o)
+	local X = Vector(dx * co + cx * so, dy * co + cy * so, dz * co + cz * so)
+	-- right = forward x up; Source: roll = atan2(-right.z, up.z)
+	local rz = X.x * n.y - X.y * n.x
+	local pitch = -deg(math.asin(clamp(X.z, -1, 1)))
+	local yaw = deg(atan2(X.y, X.x))
+	local roll = deg(atan2(-rz, n.z))
+	return Angle(pitch, yaw, roll)
 end
 
 -- Turret -------------------------------------------------------------------
@@ -319,8 +415,11 @@ function ENT:NGLUpdatePose()
 	if aim then
 		local base = self.NGLAtt.base and self:GetAttachment(self.NGLAtt.base)
 		local from = base and base.Pos or (self:GetPos() + Vector(0, 0, self.EyeHeight))
-		local a = (aim - from):Angle()
-		ay, ap = AngleDiff(a.y, self:GetAngles().y), AngleDiff(a.p, 0)
+		-- In the body's frame, so the gun stays on target on slopes.
+		local d = aim - from
+		local F, R, U = self:GetForward(), self:GetRight(), self:GetUp()
+		local x, y, z = d:Dot(F), -d:Dot(R), d:Dot(U)
+		ay, ap = deg(atan2(y, x)), -deg(atan2(z, math.sqrt(x * x + y * y)))
 	end
 	local now = CurTime()
 	local dt = math.min(now - (self.NGLLastPose or now), 0.5)
@@ -427,20 +526,48 @@ function ENT:OnCombat(enemy, dist, visible)
 
 	local tPos = enemy:GetPos()
 	if dist > self.AttackRange then
+		self.NGLReposition, self.NGLBackOff = nil, nil
 		self:NGLSetMoveMode("run")
 		Core.Chase(self, now, pos, tPos, true)
 	elseif dist < self.MinRange then
 		-- Too close: back away from it (the goal is behind, so it reverses).
+		self.NGLReposition = nil
 		local away = pos - tPos
 		away.z = 0
 		away:Normalize()
-		if not self.NGLGoal or self.NGLGoal:DistToSqr(pos) < 96 * 96 then
+		if not self.NGLBackOff or not self.NGLGoal or self.NGLGoal:DistToSqr(pos) < 96 * 96 then
 			Core.StopMoving(self)
 			self:NGLSetMoveMode("run")
 			self.NGLGoal = pos + away * 500
+			self.NGLBackOff = true
 		end
-	elseif self.NGLGoal or self.NGLPath then
-		Core.StopMoving(self)
+	else
+		-- In range: every few seconds drive to another spot round the enemy,
+		-- the turret firing on the move, so it is never a sitting target.
+		if self.NGLBackOff then
+			self.NGLBackOff = nil
+			Core.StopMoving(self)
+		end
+		local R = self.NGLReposition
+		if R and (pos:DistToSqr(R) < 160 * 160 or now > (self.NGLRepositionUntil or 0)) then
+			R = nil
+			self.NGLReposition = nil
+			Core.StopMoving(self)
+		end
+		if R then
+			self:NGLSetMoveMode("walk")
+			Core.Chase(self, now, pos, R, false)
+		elseif now >= (self.NGLNextReposition or 0) then
+			local d = self.RepositionDelay or { 6, 12 }
+			self.NGLNextReposition = now + Rand(d[1], d[2])
+			local spot = self:NGLCombatSpot(pos, tPos, dist)
+			if spot then
+				self.NGLReposition = spot
+				self.NGLRepositionUntil = now + 10
+			end
+		elseif self.NGLGoal or self.NGLPath then
+			Core.StopMoving(self)
+		end
 	end
 
 	if dist < self.AttackRange * 1.2 then
@@ -454,13 +581,71 @@ function ENT:OnCombat(enemy, dist, visible)
 	return true
 end
 
--- Nothing to fight: stay behind our commander if we have one.
+-- A grid spot wide enough for the APC, or nil (any spot without a grid).
+function ENT:NGLDriveSpot(p)
+	local spot, node = NGL.Core.GridSpot(p)
+	if not spot then return nil end
+	local w = self.NavWidth
+	if node and w and w > 24 and not NGL.Nav.WideOk(node, math.ceil(w / 8) * 8) then return nil end
+	return spot
+end
+
+-- Another spot round the enemy: 25..50 degrees further round it, at about
+-- the same distance (kept between MinRange and AttackRange).
+function ENT:NGLCombatSpot(pos, tPos, dist)
+	local base = atan2(pos.y - tPos.y, pos.x - tPos.x)
+	for _ = 1, 3 do
+		local a = base + rad(Rand(25, 50)) * (math.random(2) == 1 and 1 or -1)
+		local d = clamp(dist + Rand(-200, 200), self.MinRange + 150, self.AttackRange * 0.9)
+		local spot = self:NGLDriveSpot(Vector(tPos.x + math.cos(a) * d, tPos.y + math.sin(a) * d, pos.z))
+		if spot then return spot end
+	end
+end
+
+-- On its own: drive somewhere else round where it spawned, wait, repeat.
+function ENT:NGLPatrol(now, pos)
+	local P = self.Patrol
+	if not P then return end -- parks
+	local to = self.NGLPatrolTo
+	if to then
+		if pos:DistToSqr(to) < 250 * 250 or now > (self.NGLPatrolUntil or 0) then
+			self.NGLPatrolTo = nil
+			self:StopMoving()
+			local w = P.Pause or { 6, 15 }
+			self.NGLNextPatrol = now + Rand(w[1], w[2])
+		else
+			self:MoveTo(to, false)
+		end
+		return true
+	end
+	if now < (self.NGLNextPatrol or 0) then return true end
+	self.NGLNextPatrol = now + 3 -- nowhere to go: try again soon
+	local home = self.NGLPatrolHome or pos
+	self.NGLPatrolHome = home
+	local minD, maxD = P.MinDist or 800, P.Radius or 3000
+	for _ = 1, 6 do
+		local a = Rand(0, 2 * math.pi)
+		local d = Rand(minD, maxD)
+		local spot = self:NGLDriveSpot(Vector(home.x + math.cos(a) * d, home.y + math.sin(a) * d, pos.z))
+		if spot and pos:DistToSqr(spot) > minD * minD then
+			self.NGLPatrolTo = spot
+			self.NGLPatrolUntil = now + 90
+			self:MoveTo(spot, false)
+			return true
+		end
+	end
+	return true
+end
+
+-- Nothing to fight: stay behind our commander if we have one, otherwise
+-- patrol on our own.
 function ENT:OnIdle()
 	local c = self.NGLCommander
 	if not (IsValid(c) and not c.NGLDying) then
 		self.NGLCommander = nil
-		return
+		return self:NGLPatrol(CurTime(), self:GetPos())
 	end
+	self.NGLPatrolTo = nil
 	local pos = self:GetPos()
 	local behind = c:GetPos() - c:GetForward() * 400
 	local dSqr = pos:DistToSqr(behind)

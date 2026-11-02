@@ -253,6 +253,7 @@ function ENT:Initialize()
 	self.NGLAct = nil
 	self.NGLHome = self:GetPos() -- wander around here
 	self.NGLClip = self.Weapon and self.Weapon.Clip or 0
+	self.NGLMode = NGL.PickAIMode and NGL.PickAIMode(self) or nil
 	self.NGLNextIdleSound = CurTime() + math.Rand(self.IdleSoundDelay[1], self.IdleSoundDelay[2])
 
 	NGL.Core.Add(self)
@@ -677,6 +678,16 @@ function ENT:IsBusy() return CurTime() < (self.NGLBusyUntil or 0) end
 function ENT:GiveOrder(order) return core().GiveOrder(self, order, CurTime()) end
 function ENT:GetOrder() return self.NGLOrder end
 function ENT:ClearOrder() core().EndOrder(self, "cleared") end
+
+-- AI mode (sv_aimodes.lua): "balanced", "assault", "flanker", "defender" or
+-- one registered with NGL.RegisterAIMode. Returns false for an unknown name.
+function ENT:SetAIMode(name)
+	local m = NGL.AIModes and NGL.AIModes[name]
+	if not m then return false end
+	self.NGLMode = m
+	return true
+end
+function ENT:GetAIMode() return self.NGLMode and self.NGLMode.Name or "balanced" end
 
 function ENT:GetSquad() return self.NGLSquad end
 function ENT:IsSquadLeader() return self.NGLSquad ~= nil and self.NGLSquad.leader == self end
