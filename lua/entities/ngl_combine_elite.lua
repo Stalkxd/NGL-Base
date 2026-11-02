@@ -41,7 +41,10 @@ ENT.Squad = {
 	-- Down to 3 soldiers or fewer in a fight: a dropship with 6 more, or 4
 	-- on foot from out of sight on maps with no open sky (sv_reinforce.lua;
 	-- ngl_reinforce_limit, ngl_reinforce_cooldown, ngl_dropship_max).
-	Reinforce = { Ship = "ngl_dropship", Cargo = "ngl_combine_soldier", Count = 6, OnFootCount = 4, When = 3 },
+	Reinforce = {
+		Ship = "ngl_dropship", Cargo = "ngl_combine_soldier", Count = 6, OnFootCount = 4, When = 3,
+		Vehicle = "ngl_apc", VehicleLimit = 1, VehicleThreat = 4, -- an APC instead, when the fight is heavy
+	},
 }
 
 local VO = "npc/combine_soldier/vo/"
