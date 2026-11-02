@@ -31,13 +31,22 @@ function ENT:Draw()
 		if not IsValid(wm) then
 			wm = ClientsideModel(self.WeaponModel, RENDERGROUP_OPAQUE)
 			if IsValid(wm) then
-				wm:SetParent(self)
-				wm:AddEffects(EF_BONEMERGE)
 				wm:SetNoDraw(true)
 				self.NGLWeaponEnt = wm
 			end
 		end
-		if IsValid(wm) then wm:DrawModel() end
+		if IsValid(wm) then
+			-- The parent link breaks when the NPC goes out of view (dormant) and
+			-- comes back; re-attach, or the weapon stays invisible.
+			if wm:GetParent() ~= self then
+				wm:SetParent(self)
+				wm:AddEffects(EF_BONEMERGE)
+			end
+			wm:DrawModel()
+		end
+	elseif self.NGLWeaponEnt then
+		-- Out of weapon range: free it; it's made again when we come closer.
+		self:NGLRemoveWeaponModel()
 	end
 end
 
@@ -51,3 +60,9 @@ end
 function ENT:OnRemove()
 	self:NGLRemoveWeaponModel()
 end
+
+-- Leaving this client's view (PVS): drop the weapon model; Draw makes a fresh
+-- one when the NPC is visible again.
+hook.Add("NotifyShouldTransmit", "NGL.WeaponModel", function(ent, transmit)
+	if not transmit and ent.IsNGLNPC and ent.NGLRemoveWeaponModel then ent:NGLRemoveWeaponModel() end
+end)

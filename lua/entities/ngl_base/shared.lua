@@ -29,6 +29,8 @@ ENT.WalkSpeed = 80              -- wandering, strafing while shooting
 ENT.SightRange = 4000           -- how far it looks for enemies
 ENT.AttackRange = 1200          -- closer than this it stops chasing and fights
 ENT.EyeHeight = 64
+ENT.CrouchEyeHeight = 40
+ENT.CrouchChance = 0.35         -- chance, each time it picks a new spot while fighting, to crouch and hold position instead; 0 = never
 ENT.EnemyMemory = 8             -- seconds it keeps hunting an enemy it can't see (heads to where it last saw it)
 ENT.AlertRadius = 1500          -- allies this close with nothing to do come to help when it spots an enemy; 0 = never
 ENT.WanderRadius = 600          -- idle NPCs stroll around their home spot (where they spawned or last fought); 0 = stand still
@@ -91,6 +93,10 @@ ENT.Anims = {
 	Fire    = { ACT_GESTURE_RANGE_ATTACK_SMG1, ACT_GESTURE_RANGE_ATTACK1 },
 	Reload  = { ACT_GESTURE_RELOAD_SMG1, ACT_GESTURE_RELOAD },
 	Flinch  = { ACT_GESTURE_SMALL_FLINCH, ACT_GESTURE_FLINCH_CHEST, ACT_GESTURE_FLINCH_HEAD },
+	-- Crouching (see CrouchChance). Models without these don't crouch.
+	CrouchIdle = { ACT_COVER_LOW, ACT_CROUCHIDLE, ACT_RANGE_AIM_SMG1_LOW, ACT_RANGE_AIM_AR2_LOW },
+	CrouchAim  = { ACT_RANGE_AIM_SMG1_LOW, ACT_RANGE_AIM_AR2_LOW, ACT_RANGE_AIM_LOW, ACT_COVER_LOW, ACT_CROUCHIDLE },
+	CrouchWalk = { ACT_WALK_CROUCH_AIM_RIFLE, ACT_WALK_CROUCH_RIFLE, ACT_WALK_CROUCH },
 	-- Full-body melee swing (see ENT.Melee).
 	Melee   = { ACT_MELEE_ATTACK1, ACT_MELEE_ATTACK_SWING },
 }
@@ -120,6 +126,7 @@ ENT.Anims = {
 -- Building blocks (server; call them from hooks, see the end of init.lua):
 --   Movement:  self:MoveTo(pos, run)  self:StopMoving()  self:IsMoving()
 --              self:SetRunning(bool)  self:LookAt(posOrEnt)
+--              self:SetCrouching(bool)  self:IsCrouching()
 --   Targets:   self:GetEnemy()  self:SetEnemy(ent)  self:FindEnemy()
 --              self:CanSee(ent)  self:IsEnemyVisible()  self:GetLastSeenPos()
 --              self:IsHostileTo(ent)  self:GetAllies(radius)
