@@ -6,7 +6,8 @@ An NPC base for Garry's Mod built for large battles (100+ NPCs) with minimal ser
 
 1. **Benchmark harness and entity choice** (done). Stress test on a dedicated server, 67 tick, gm_construct: NextBot held 800 NPCs, our lightweight entity 400, stock `npc_combine_s` 200. **NextBot is the foundation.**
 2. **NPC base core** (done). Central scheduler with a CPU budget, distance-based think rate, spatial grid, factions and a modding API. `ngl_combine_soldier` holds **1250** NPCs at 67 tick in the typical case (one player watching) and **800** in the worst case (every NPC thinking at 10 Hz and firing real bullets). Stock `npc_combine_s`: 200.
-3. **Custom navigation** (in progress). Our own walk grid generated per map (no navmesh, no AI nodes), path-finding spread over ticks under a CPU budget, shared and cached paths.
+3. **Custom navigation** (done). Our own walk grid generated per map (no navmesh, no AI nodes), path-finding spread over ticks under a CPU budget, shared and cached paths.
+3a. **Behaviour, animation and modding** (done). Weapon animations with level of detail, wandering, alerts, enemy memory; melee, entity-free projectiles, voice lines, and building blocks for custom behaviour. `ngl_combine_soldier` holds **800** at 67 tick with full animations (v0.4.1).
 4. **Battle test.** Two teams of 100+ soldiers on several maps, singleplayer and dedicated server, tuned against the target.
 
 **Target:** 300 NGL NPCs with real combat AI holding 67 tick (under 1% late ticks, `ngl_bench_limit`) on a local dedicated server on a normal PC. That's 3x the 100 goal, so weaker servers still manage 100+.
@@ -20,30 +21,92 @@ An NPC base for Garry's Mod built for large battles (100+ NPCs) with minimal ser
 
 ## Making an NPC
 
-Create `lua/entities/<your_class>.lua` in your own addon:
+An NPC is one file, `lua/entities/<your_class>.lua`, in your own addon. Most NPCs need only fields; hooks and building blocks are there when you want custom behaviour.
 
 ```lua
 AddCSLuaFile()
 ENT.Base = "ngl_base"
 ENT.PrintName = "My Soldier"
 
-ENT.Model = "models/combine_soldier.mdl"
+ENT.Model = { "models/combine_soldier.mdl", "models/combine_soldier_prisonguard.mdl" } -- one picked per NPC
 ENT.Faction = "combine"      -- same faction = friends, others = enemies
 ENT.StartHealth = 80
 ENT.RunSpeed = 210
 ENT.WeaponModel = "models/weapons/w_smg1.mdl"
-ENT.Weapon = { Damage = 5, Delay = 0.12, Spread = 0.04, Accuracy = 0.6, Sound = "Weapon_SMG1.NPC_Single" }
+ENT.Weapon = { Damage = 5, Delay = 0.12, Spread = 0.04, Clip = 30, ReloadTime = 2, Sound = "Weapon_SMG1.NPC_Single" }
+ENT.Melee = { Damage = 15, Range = 60, Delay = 2, HitDelay = 0.35, DamageType = DMG_CLUB }
+ENT.Sounds = {
+	Alert = "npc/combine_soldier/vo/contact.wav",
+	Pain = { "npc/combine_soldier/pain1.wav", "npc/combine_soldier/pain2.wav" },
+	Death = "npc/combine_soldier/die1.wav",
+}
 
 list.Set("NPC", "my_soldier", { Name = "My Soldier", Class = "my_soldier", Category = "My NPCs" })
-
-if SERVER then
-	function ENT:OnSeeEnemy(enemy) self:EmitSound("npc/combine_soldier/vo/contact.wav") end
-end
 ```
 
-Fields and hooks are listed in `lua/entities/ngl_base/shared.lua`. Hooks: `OnSpawned`, `OnSeeEnemy`, `OnLoseEnemy`, `OnDamaged` (return true to ignore), `OnDeath`, `OnAIThink` (return true to skip the default behaviour), `OnAlerted` (return true to stay put), `OnReload`. Relations between factions: `NGL.SetRelation("rebels", "player", D_LI)`.
+Every field, hook and building block is documented in `lua/entities/ngl_base/shared.lua`. Examples shipped (NPC tab, category "NGL Base"):
 
-`ENT.Model` can be a list; each NPC picks one at random (the rebels use this for different faces). `ENT.Anims` maps each animation state to an activity or a list of activities tried in order, so the defaults work on Combine and citizen models; override only the entries you need.
+- `ngl_combine_soldier`: SMG plus a rifle-butt melee, voice lines.
+- `ngl_rebel`: random faces, male and female voices via `SoundsByModel`, friendly to players.
+- `ngl_zombie`: melee only, no code at all.
+
+### Attacks
+
+- **Gun:** `ENT.Weapon` (damage, fire rate, spread, clip, reload). Near players it fires real bullets with tracers and sound; far away it's one silent trace with the expected damage.
+- **Projectiles:** add `Projectile = { Damage, Radius, Speed, Gravity, Model, ... }` to the weapon for rockets, grenades or spit (fields in `lua/ngl/server/sv_projectile.lua`). Projectiles are not entities: each is a table moved with one trace per tick, clients get one message when it's fired and one when it lands and draw it themselves, and far from players it lands at once without flying.
+- **Melee:** `ENT.Melee = { Damage, Range, Delay, HitDelay, DamageType, Force, Anim, HitSound, MissSound }`. With no weapon the NPC closes in and swings; with a weapon it swings when the enemy gets into reach. The blow lands `HitDelay` after the swing starts, only if the target is still in reach and in front.
+- **Custom:** `OnAttack(enemy, kind)` runs before each attack; return true and do your own with the building blocks below.
+
+### Sounds
+
+`ENT.Sounds` takes a sound or a list per kind: `Alert`, `Idle`, `Pain`, `Death`, `Reload`, `Attack` (melee swing), `Lost`. `ENT.SoundsByModel` adds overrides for models whose path contains a key (e.g. `["female"]`). Lines only play when a player is within `ngl_ai_visual_range`, never overlap (`VoiceCooldown`), and `Idle` lines come every `IdleSoundDelay` seconds.
+
+### Hooks
+
+| Hook | When | Return true to |
+| --- | --- | --- |
+| `OnSpawned()` | after spawning | |
+| `OnSeeEnemy(enemy)` / `OnLoseEnemy(old)` | enemy gained / lost | |
+| `OnAIThink(dt)` | every AI think | skip all default behaviour |
+| `OnIdle()` | thinking with no enemy | skip investigate and wander |
+| `OnCombat(enemy, dist, visible)` | thinking with an enemy | skip chase, strafe and attack |
+| `OnAttack(enemy, kind)` | before a `"ranged"` or `"melee"` attack | skip that attack |
+| `OnMeleeHit(target, hit)` | a blow landed or missed | |
+| `OnAlerted(ally, pos)` | an ally spotted an enemy | stay put |
+| `OnDamaged(dmginfo)` | taking damage | ignore the damage |
+| `OnReload()`, `OnDeath(dmginfo)` | reload started, dying | |
+
+Hooks run at the AI think rate or on events, never every tick, so a mod can't accidentally cost 67 calls a second per NPC.
+
+### Building blocks
+
+The default behaviour is built from these, so custom behaviour built from them gets the same optimizations (budgeted path-finding, grid enemy search, silent shots and no animation detail far from players).
+
+| | |
+| --- | --- |
+| Movement | `self:MoveTo(pos, run)`, `self:StopMoving()`, `self:IsMoving()`, `self:SetRunning(bool)`, `self:LookAt(posOrEnt)` |
+| Targets | `self:GetEnemy()`, `self:SetEnemy(ent)`, `self:FindEnemy()`, `self:CanSee(ent)`, `self:IsEnemyVisible()`, `self:GetLastSeenPos()`, `self:IsHostileTo(ent)`, `self:GetAllies(radius)`, `NGL.FindInRadius(pos, radius, filter)` |
+| Combat | `self:FireWeapon(ent, shots)`, `self:MeleeAttack(ent)`, `self:FireProjectile(entOrPos, def)`, `self:DealDamage(ent, amount, type, force)` |
+| Animation | `self:PlayAnim(actOrSequence, lock, rate)` (whole body, returns duration), `self:PlayGesture(actOrSequence)` |
+| Sound | `self:Speak(kindOrPath)` |
+| State | `self:IsNearPlayer()`, `self:IsDetailed()`, `self:IsBusy()` |
+
+Example: a brute that roars and charges when its enemy is far, and otherwise fights normally.
+
+```lua
+function ENT:OnCombat(enemy, dist, visible)
+	if visible and dist > 600 and CurTime() > (self.NextCharge or 0) then
+		self.NextCharge = CurTime() + 8
+		self:Speak("Alert")
+		self:PlayAnim(ACT_SIGNAL1)              -- roar; stands still and skips AI until done
+		return true
+	end
+	if self.NextCharge and CurTime() < self.NextCharge - 6 then
+		self:MoveTo(enemy:GetPos(), true)     -- charge for 2 s after the roar
+		return true
+	end
+end
+```
 
 ### Behaviour
 

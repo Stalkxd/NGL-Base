@@ -12,6 +12,8 @@ local BASE_ANIMS = ENT.Anims
 local ANIM_FALLBACK = { IdleAim = "Idle", Walk = "Run", WalkAim = "Walk", RunAim = "Run" }
 local resolvedAnims = {} -- [class .. model] = { Idle = act, ... }, shared by NPCs of a kind
 local resolvedPoses = {} -- [model] = { aim = bool, move = bool }
+local resolvedSounds = {} -- [class .. model] = { Pain = { ... }, ... }
+local Core -- NGL.Core, set on first use (entities load after the autorun files)
 
 -- Empty default hooks.
 function ENT:OnSpawned() end
@@ -22,6 +24,58 @@ function ENT:OnDeath(dmginfo) end
 function ENT:OnAIThink(interval) end
 function ENT:OnAlerted(ally, pos) end
 function ENT:OnReload() end
+function ENT:OnIdle() end
+function ENT:OnCombat(enemy, dist, visible) end
+function ENT:OnAttack(enemy, kind) end
+function ENT:OnMeleeHit(target, hit) end
+
+----------------------------------------------------------------------------
+-- Sounds
+----------------------------------------------------------------------------
+
+-- Sounds plus the SoundsByModel entries whose key is part of our model path,
+-- every entry turned into a list. Once per class and model.
+function ENT:NGLResolveSounds()
+	local model = self:GetModel()
+	local key = self:GetClass() .. model
+	local r = resolvedSounds[key]
+	if not r then
+		r = {}
+		local function add(t)
+			for kind, v in pairs(t) do
+				r[kind] = (type(v) == "table") and v or { v }
+			end
+		end
+		add(self.Sounds or {})
+		local lower = string.lower(model)
+		for pattern, t in pairs(self.SoundsByModel or {}) do
+			if string.find(lower, string.lower(pattern), 1, true) then add(t) end
+		end
+		resolvedSounds[key] = r
+	end
+	self.NGLSounds = r
+end
+
+-- Plays one of the sounds of a kind (Alert, Idle, Pain, Death, Reload,
+-- Attack, Lost). Only when a player is within ngl_ai_visual_range, and voice
+-- lines don't overlap (VoiceCooldown).
+function ENT:NGLSound(kind)
+	if not self.NGLNear then return end
+	local list = self.NGLSounds[kind]
+	if not list then return end
+	local snd = list[math.random(#list)]
+	if kind == "Death" then
+		-- The entity is about to go away; play it at the spot instead.
+		local pos = self:GetPos()
+		pos.z = pos.z + self.EyeHeight
+		sound.Play(snd, pos, self.SoundLevel, self.SoundPitch)
+		return
+	end
+	local now = CurTime()
+	if now < (self.NGLNextVoice or 0) then return end
+	self.NGLNextVoice = now + self.VoiceCooldown
+	self:EmitSound(snd, self.SoundLevel, self.SoundPitch, 1, CHAN_VOICE)
+end
 
 -- Picks, once per class and model, the first activity of each Anims entry
 -- that the model actually has.
@@ -32,7 +86,9 @@ function ENT:NGLResolveAnims()
 		r = {}
 		local own = self.Anims or BASE_ANIMS
 		for name, def in pairs(BASE_ANIMS) do
-			local list = own[name] or def
+			local list = own[name]
+			if list == nil then list = def end
+			if list == false then list = {} end -- explicitly disabled
 			if type(list) == "number" then list = { list } end
 			for i = 1, table.maxn(list) do
 				local act = list[i]
@@ -110,7 +166,9 @@ function ENT:NGLUpdatePose()
 	end
 
 	-- Feet match the ground: play the walk/run cycle at the speed we move.
-	if self.NGLMoving then
+	if self.NGLAnimUntil then
+		-- PlayAnim owns the playback rate
+	elseif self.NGLMoving then
 		local gs = self:GetSequenceGroundSpeed(self:GetSequence())
 		if gs > 1 then
 			local rate = math.Clamp(math.sqrt(speedSqr) / gs, 0.5, 2)
@@ -150,6 +208,7 @@ function ENT:Initialize()
 	if type(model) == "table" then model = model[math.random(#model)] end
 	self:SetModel(model)
 	self:NGLResolveAnims()
+	self:NGLResolveSounds()
 
 	local hp = self.NGLStartHealth or self.StartHealth
 	self:SetHealth(hp)
@@ -173,6 +232,7 @@ function ENT:Initialize()
 	self.NGLAct = nil
 	self.NGLHome = self:GetPos() -- wander around here
 	self.NGLClip = self.Weapon and self.Weapon.Clip or 0
+	self.NGLNextIdleSound = CurTime() + math.Rand(self.IdleSoundDelay[1], self.IdleSoundDelay[2])
 
 	NGL.Core.Add(self)
 	self:OnSpawned()
@@ -238,6 +298,22 @@ function ENT:BehaveUpdate(interval)
 		end
 	end
 
+	-- A one-off animation (PlayAnim, melee swing) owns the body until it ends.
+	if self.NGLAnimUntil then
+		if CurTime() < self.NGLAnimUntil then
+			if goal and not self.NGLAnimLock then self.loco:Approach(goal, 1) end
+			self.NGLMoving = goal ~= nil and not self.NGLAnimLock
+			local f = self.NGLFace
+			if f then self.loco:FaceTowards(f) end
+			local B = NGL.Bench
+			if B then B.LuaTime = B.LuaTime + (SysTime() - t0) end
+			return
+		end
+		self.NGLAnimUntil = nil
+		self.NGLAct = nil -- restart the normal activity
+		self:SetPlaybackRate(1)
+	end
+
 	-- Aimed variants (with their extra aim layers) only in full-detail range;
 	-- further away the plain cycles look the same at that size.
 	local A = self.NGLActs
@@ -271,6 +347,7 @@ function ENT:OnInjured(dmginfo)
 		self.NGLNextFlinch = now + 1
 		self:NGLGesture("Flinch")
 	end
+	self:NGLSound("Pain")
 
 	-- Fight back against whoever hurt us, if we're allowed to.
 	local attacker = dmginfo:GetAttacker()
@@ -284,6 +361,7 @@ function ENT:OnKilled(dmginfo)
 	self.NGLDying = true
 
 	hook.Run("OnNPCKilled", self, dmginfo:GetAttacker(), dmginfo:GetInflictor())
+	self:NGLSound("Death")
 	self:OnDeath(dmginfo)
 	NGL.Core.Remove(self)
 
@@ -304,3 +382,168 @@ end
 function ENT:OnRemove()
 	NGL.Core.Remove(self)
 end
+
+----------------------------------------------------------------------------
+-- Building blocks for custom behaviour
+--
+-- Call these from your hooks (OnAIThink, OnIdle, OnCombat, OnAttack...). They
+-- are what the default behaviour is made of, so a custom NPC built from them
+-- gets the same optimizations: budgeted path-finding, grid enemy search,
+-- silent shots far from players, animation detail only near players.
+----------------------------------------------------------------------------
+
+local function core()
+	Core = Core or NGL.Core
+	return Core
+end
+
+local function posOf(target)
+	if isvector(target) then return target end
+	return target:GetPos()
+end
+
+-- Movement ---------------------------------------------------------------
+
+-- Walk (or run) to `pos`, along the nav grid when needed. Calling it again
+-- with the same spot while on the way does nothing, so it's fine every think.
+function ENT:MoveTo(pos, run)
+	self:NGLSetMoveMode(run and "run" or "walk")
+	local last = self.NGLMoveToPos
+	if last and last:DistToSqr(pos) < 32 * 32 and (self.NGLPath or self.NGLGoal or self.NGLPathPending) then return end
+	self.NGLMoveToPos = Vector(pos.x, pos.y, pos.z)
+	core().StopMoving(self)
+	self.NGLDirect = nil
+	core().Chase(self, CurTime(), self:GetPos(), self.NGLMoveToPos, false)
+end
+
+function ENT:StopMoving()
+	core().StopMoving(self)
+	self.NGLMoveToPos = nil
+end
+
+function ENT:IsMoving() return self.NGLMoving == true end
+function ENT:SetRunning(run) self:NGLSetMoveMode(run and "run" or "walk") end
+
+-- Turn towards a position or entity (nil: face where we walk). The default
+-- behaviour sets this every think, so set it from a hook that returns true.
+function ENT:LookAt(target)
+	self.NGLFace = target and posOf(target) or nil
+end
+
+-- Targets ----------------------------------------------------------------
+
+function ENT:GetEnemy() return self.NGLEnemy end
+function ENT:SetEnemy(ent) core().SetEnemy(self, ent) end
+function ENT:FindEnemy() return core().FindEnemy(self, self:GetPos()) end -- nearest visible hostile, or nil
+function ENT:CanSee(ent) return core().CanSee(self, ent) end              -- one trace from our eyes
+function ENT:IsEnemyVisible() return self.NGLEnemy ~= nil and self.NGLEnemyVisible == true end
+function ENT:GetLastSeenPos() return self.NGLLastSeenPos end
+function ENT:IsHostileTo(ent) return core().IsHostile(self, ent) end
+
+-- Friendly NGL NPCs within `radius` (spatial grid, cheap).
+function ENT:GetAllies(radius)
+	local faction = self.Faction
+	return core().FindInRadius(self:GetPos(), radius, function(e)
+		return e ~= self and NGL.GetRelation(faction, e.Faction) == D_LI
+	end)
+end
+
+-- Combat -----------------------------------------------------------------
+
+-- Fire the NPC's Weapon at an entity: bullets, or projectiles if the weapon
+-- has a Projectile table. Far from players it's one silent trace.
+function ENT:FireWeapon(target, shots)
+	if not self.Weapon or not IsValid(target) then return false end
+	core().Fire(self, target, shots or 1, self.NGLNear)
+	return true
+end
+
+-- Start a melee swing at `target` using the Melee table (ignores the cooldown).
+function ENT:MeleeAttack(target)
+	return core().StartMelee(self, target, CurTime())
+end
+
+-- Launch a projectile (see sv_projectile.lua for the fields of `def`) at an
+-- entity or position. `def` defaults to the weapon's Projectile.
+function ENT:FireProjectile(target, def)
+	def = def or (self.Weapon and self.Weapon.Projectile)
+	if not def then return false end
+	local src = self:GetPos()
+	src.z = src.z + self.EyeHeight
+	local dst = isvector(target) and target or target:WorldSpaceCenter()
+	NGL.Proj.Fire(self, def, src, dst, self.NGLNear)
+	return true
+end
+
+function ENT:DealDamage(target, amount, dmgType, force)
+	core().Damage(self, target, amount, dmgType, nil, force)
+end
+
+-- Animation --------------------------------------------------------------
+
+-- Play an activity (ACT_*) or sequence name once over the whole body.
+-- lock (default true): stand still and skip AI decisions until it ends.
+-- Returns its duration in seconds, or false if the model doesn't have it.
+function ENT:PlayAnim(anim, lock, rate)
+	rate = rate or 1
+	local seq = isstring(anim) and self:LookupSequence(anim) or self:SelectWeightedSequence(anim)
+	if not seq or seq < 0 then return false end
+	self:SetSequence(seq)
+	self:ResetSequenceInfo()
+	self:SetCycle(0)
+	self:SetPlaybackRate(rate)
+	local dur = self:SequenceDuration(seq) / rate
+	local now = CurTime()
+	self.NGLAnimUntil = now + dur
+	self.NGLAnimLock = lock ~= false
+	if self.NGLAnimLock then
+		core().StopMoving(self)
+		self.NGLBusyUntil = math.max(self.NGLBusyUntil or 0, now + dur)
+	end
+	return dur
+end
+
+-- Play an activity (ACT_GESTURE_*) or sequence name over the current
+-- animation. Skipped outside ngl_anim_detail_range, like built-in gestures.
+function ENT:PlayGesture(anim)
+	if not self.NGLDetail then return false end
+	if isstring(anim) then
+		local seq = self:LookupSequence(anim)
+		if not seq or seq < 0 then return false end
+		self:AddGestureSequence(seq)
+	else
+		self:RestartGesture(anim)
+	end
+	return true
+end
+
+-- The melee swing animation: Melee.Anim (or Anims.Melee). Full body unless
+-- Melee.Gesture is true. Returns the duration for a full-body swing.
+function ENT:NGLPlayMeleeAnim()
+	local m = self.Melee
+	local act = m.Anim or self.NGLActs.Melee
+	if not act then return nil end
+	if m.Gesture then
+		self:PlayGesture(act)
+		return nil
+	end
+	local dur = self:PlayAnim(act, true, m.AnimRate)
+	return dur or nil
+end
+
+-- Sound ------------------------------------------------------------------
+
+-- Say a line: a kind from ENT.Sounds ("Alert", "Pain", ...) or a sound path.
+function ENT:Speak(what)
+	if self.NGLSounds[what] then
+		self:NGLSound(what)
+	elseif self.NGLNear then
+		self:EmitSound(what, self.SoundLevel, self.SoundPitch, 1, CHAN_VOICE)
+	end
+end
+
+-- State ------------------------------------------------------------------
+
+function ENT:IsNearPlayer() return self.NGLNear == true end  -- within ngl_ai_visual_range
+function ENT:IsDetailed() return self.NGLDetail == true end  -- within ngl_anim_detail_range
+function ENT:IsBusy() return CurTime() < (self.NGLBusyUntil or 0) end
