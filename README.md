@@ -41,13 +41,23 @@ if SERVER then
 end
 ```
 
-Fields and hooks are listed in `lua/entities/ngl_base/shared.lua`. Hooks: `OnSpawned`, `OnSeeEnemy`, `OnLoseEnemy`, `OnDamaged` (return true to ignore), `OnDeath`, `OnAIThink` (return true to skip the default behaviour). Relations between factions: `NGL.SetRelation("rebels", "player", D_LI)`.
+Fields and hooks are listed in `lua/entities/ngl_base/shared.lua`. Hooks: `OnSpawned`, `OnSeeEnemy`, `OnLoseEnemy`, `OnDamaged` (return true to ignore), `OnDeath`, `OnAIThink` (return true to skip the default behaviour), `OnAlerted` (return true to stay put), `OnReload`. Relations between factions: `NGL.SetRelation("rebels", "player", D_LI)`.
+
+`ENT.Model` can be a list; each NPC picks one at random (the rebels use this for different faces). `ENT.Anims` maps each animation state to an activity or a list of activities tried in order, so the defaults work on Combine and citizen models; override only the entries you need.
+
+### Behaviour
+
+- **Idle:** strolls around its home spot (where it spawned or last fought) every few seconds at walking pace, with relaxed weapon animations (`WanderRadius`, `WanderDelay`, `WalkSpeed`; `WanderRadius = 0` stands still).
+- **Alerted:** when an NPC spots an enemy, allies within `AlertRadius` (1500) that have nothing to do run over to look.
+- **Fighting:** runs at the enemy with the weapon raised until in `AttackRange`, then strafes at walking pace and shoots. Reloads after `Weapon.Clip` shots (`Weapon.ReloadTime` seconds without firing).
+- **Enemy out of sight:** heads for where it last saw the enemy (no seeing through walls), and gives up after `EnemyMemory` seconds or once it gets there and finds nobody.
+- **Animations:** idle, alert idle, walk, run, aimed walk and aimed run picked per state; firing, reload and flinch gestures; upper body aims at the enemy and legs follow the strafe direction; walk/run cycles play at the speed the NPC actually moves. Gestures and poses only run for NPCs within `ngl_ai_visual_range` of a player, at the AI think rate, so far-away NPCs cost nothing extra.
 
 Examples shipped: `ngl_combine_soldier` and `ngl_rebel` (NPC tab, category "NGL Base").
 
 ### How the core keeps it cheap
 
-- **Per tick**, each NPC only steers towards its current goal (`BehaveUpdate`: one `Approach`, one `FaceTowards`). The stock NextBot coroutine is not used.
+- **Per tick**, each NPC only steers towards its current goal (`BehaveUpdate`: one `Approach`, one `FaceTowards`) and advances its animation. The stock NextBot coroutine is not used. Aim and strafe poses update at the think rate, near players only.
 - **Decisions** (targets, chase or strafe, shooting) run in one central hook under a CPU budget (`ngl_ai_budget`, default 3 ms per tick). NPCs that don't fit think on the next tick.
 - **Think rate depends on the nearest player**: every 0.1 s within 1500 units, 0.3 s within 4000, 1 s further away (`ngl_ai_near`, `ngl_ai_mid`, `ngl_ai_rate_*`).
 - **Enemy search uses a 1024-unit spatial grid**, so cost depends on nearby NPCs, not all of them. Line of sight is checked for at most the 3 closest candidates, once per second.
@@ -71,7 +81,7 @@ How NPCs use it:
 - Waypoints advance in the per-tick steering, so far-away NPCs that think once a second still walk paths smoothly.
 - An NPC that hasn't moved for 2 s drops its path and decides again. If it got stuck walking straight, it uses the grid for the next 5 s even with the enemy in view.
 - No grid for the map: NPCs fall back to straight lines.
-- NPCs only move when they have an enemy. There is no idle wandering yet, so NPCs that can't see anyone hostile stay where they were spawned.
+- Idle NPCs stroll along the grid with a random walk (a few table reads, no path search).
 - Generating the grid takes effect at once; no restart needed.
 
 | Command / ConVar | Meaning |

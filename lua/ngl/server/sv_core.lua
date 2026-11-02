@@ -218,20 +218,60 @@ local function findEnemy(npc, pos)
 	return found
 end
 
+-- Allies near `npc` with nothing to do come and look at `pos`.
+local function alertAllies(npc, pos, now)
+	local radius = npc.AlertRadius or 0
+	if radius <= 0 or now < (npc.NGLNextAlert or 0) then return end
+	npc.NGLNextAlert = now + 3
+	local rSqr = radius * radius
+	local myPos = npc:GetPos()
+	local faction = npc.Faction
+	local r = math.ceil(radius / CELL)
+	local cx, cy = floor(myPos.x / CELL) + OFFSET, floor(myPos.y / CELL) + OFFSET
+	for x = cx - r, cx + r do
+		local base = x * 4096
+		for y = cy - r, cy + r do
+			local c = cells[base + y]
+			if c then
+				for ally in pairs(c) do
+					if ally ~= npc and ally.NGLEnemy == nil and not ally.NGLInvestigate and not ally.NGLDying
+						and NGL.GetRelation(faction, ally.Faction) == D_LI
+						and myPos:DistToSqr(ally:GetPos()) < rSqr
+						and ally:OnAlerted(npc, pos) ~= true then
+						ally.NGLInvestigate = pos
+						ally.NGLInvestigateUntil = now + 20
+					end
+				end
+			end
+		end
+	end
+end
+
 function Core.SetEnemy(npc, enemy)
 	local old = npc.NGLEnemy
 	if old == enemy then return end
+	local now = CurTime()
 	npc.NGLEnemy = enemy
 	npc.NGLFireAccum = 0
 	npc.NGLPath = nil
 	npc.NGLPathPending = false
 	npc.NGLPathReq = (npc.NGLPathReq or 0) + 1 -- a path to the old enemy is no use
 	npc.NGLEnemyVisible = true -- found by sight (or it just shot us); rechecked shortly
-	npc.NGLNextVis = CurTime() + 0.5
+	npc.NGLNextVis = now + 0.5
 	if IsValid(enemy) then
+		local ePos = enemy:GetPos()
+		npc.NGLLastSeenPos, npc.NGLLastSeenT = ePos, now
+		npc.NGLInvestigate = nil
+		npc:NGLSetMoveMode("run")
+		if not IsValid(old) then alertAllies(npc, ePos, now) end
 		npc:OnSeeEnemy(enemy)
-	elseif IsValid(old) then
-		npc:OnLoseEnemy(old)
+	else
+		npc.NGLEnemy = nil
+		npc.NGLGoal = nil
+		npc.NGLFace = nil
+		npc.NGLHome = npc:GetPos() -- wander around where the fight ended
+		npc.NGLNextWander = now + Rand(1, 3)
+		if IsValid(old) then npc:OnLoseEnemy(old) end
 	end
 end
 
@@ -249,6 +289,7 @@ local function fire(npc, enemy, shots, visual)
 	local dst = enemy:WorldSpaceCenter()
 
 	if visual then
+		npc:NGLGesture("Fire")
 		local dir = dst - src
 		dir:Normalize()
 		npc:FireBullets({
@@ -360,8 +401,63 @@ local function chase(npc, now, pos, tPos, visible)
 	end
 end
 
+local INVESTIGATE_DONE_SQR = 128 * 128
+local LAST_SEEN_DONE_SQR = 96 * 96
+
+local function stopMoving(npc)
+	npc.NGLPath, npc.NGLGoal = nil, nil
+	npc.NGLPathPending = false
+	npc.NGLPathReq = (npc.NGLPathReq or 0) + 1
+end
+
+-- No enemy: go and look where an ally saw one, otherwise stroll around home.
+local function idle(npc, now, pos)
+	npc.NGLFace = nil
+
+	local inv = npc.NGLInvestigate
+	if inv then
+		if now > npc.NGLInvestigateUntil or pos:DistToSqr(inv) < INVESTIGATE_DONE_SQR then
+			npc.NGLInvestigate = nil
+			npc.NGLHome = pos
+			npc.NGLNextWander = now + Rand(1, 3)
+			stopMoving(npc)
+		else
+			npc:NGLSetMoveMode("run")
+			chase(npc, now, pos, inv, false)
+			return
+		end
+	end
+
+	local radius = npc.WanderRadius or 0
+	if radius <= 0 then
+		npc.NGLGoal, npc.NGLPath = nil, nil
+		return
+	end
+	if npc.NGLPath or npc.NGLGoal or npc.NGLPathPending then return end -- still strolling
+	npc:NGLSetMoveMode("walk")
+	npc.NGLDirect = nil
+	if now < (npc.NGLNextWander or 0) then return end
+
+	local delay = npc.WanderDelay
+	npc.NGLNextWander = now + Rand(delay[1], delay[2])
+	local home = npc.NGLHome or pos
+	local nav = NGL.Nav
+	local path = nav and nav.Loaded and nav.RandomWalk(pos, home, radius, random(3, 8))
+	if path and #path > 0 then
+		npc.NGLPath = path
+		npc.NGLPathIdx = 1
+		npc.NGLGoal = nil
+	else
+		-- No grid here: a random spot; if it's inside a wall the stuck check gives up.
+		local a = Rand(0, 2 * math.pi)
+		local d = Rand(radius * 0.3, radius)
+		npc.NGLGoal = Vector(home.x + math.cos(a) * d, home.y + math.sin(a) * d, pos.z)
+	end
+end
+
 -- One AI decision for one NPC. `dt` is the time since its last think.
 local function think(npc, now, dt, nearestPlayerSqr)
+	npc.NGLNear = nearestPlayerSqr < cvVisual:GetFloat() ^ 2
 	if npc:OnAIThink(dt) == true then return end
 
 	local pos = npc:GetPos()
@@ -376,9 +472,8 @@ local function think(npc, now, dt, nearestPlayerSqr)
 		elseif now - npc.NGLStuckT > 2 then
 			-- Walking straight into something: use the grid for a while.
 			if npc.NGLDirect then npc.NGLForcePathUntil = now + FORCE_PATH end
-			npc.NGLPath, npc.NGLGoal, npc.NGLStuckPos = nil, nil, nil
-			npc.NGLPathPending = false
-			npc.NGLPathReq = (npc.NGLPathReq or 0) + 1 -- forget any answer in flight
+			stopMoving(npc)
+			npc.NGLStuckPos = nil
 			npc.NGLPathFailUntil = 0
 			npc.NGLRepathAt, npc.NGLNextStrafe = 0, 0
 		end
@@ -391,65 +486,109 @@ local function think(npc, now, dt, nearestPlayerSqr)
 
 	if not enemyOk or now >= npc.NGLNextRetarget then
 		npc.NGLNextRetarget = now + Rand(0.8, 1.2)
-		Core.SetEnemy(npc, findEnemy(npc, pos))
+		local found = findEnemy(npc, pos)
+		if found then
+			Core.SetEnemy(npc, found)
+			npc.NGLLastSeenPos, npc.NGLLastSeenT = found:GetPos(), now
+		elseif not enemyOk or now - (npc.NGLLastSeenT or 0) > npc.EnemyMemory then
+			-- Dead, gone, or out of sight for too long.
+			Core.SetEnemy(npc, nil)
+		end
 		enemy = npc.NGLEnemy
 		enemyOk = IsValid(enemy)
 	end
 
 	if not enemyOk then
-		npc.NGLGoal = nil
-		npc.NGLFace = nil
-		npc.NGLPath = nil
+		idle(npc, now, pos)
 		return
 	end
 
 	local tPos = enemy:GetPos()
-	local distSqr = pos:DistToSqr(tPos)
-	local range = npc.AttackRange
-	local rangeSqr = range * range
 
 	-- Line of sight to the current enemy, rechecked at most twice a second.
 	if now >= (npc.NGLNextVis or 0) then
 		npc.NGLNextVis = now + 0.5
 		npc.NGLEnemyVisible = canSee(npc, pos + Vector(0, 0, npc.EyeHeight), enemy)
+		if npc.NGLEnemyVisible then npc.NGLLastSeenPos, npc.NGLLastSeenT = tPos, now end
 	end
 	local visible = npc.NGLEnemyVisible
 
-	if distSqr > rangeSqr * ATTACK_KEEP_SQR_PAD or not visible then
-		chase(npc, now, pos, tPos, visible)
+	-- Out of sight: hunt it down where we last saw it (no seeing through walls).
+	if not visible then
+		local last = npc.NGLLastSeenPos or tPos
+		if pos:DistToSqr(last) < LAST_SEEN_DONE_SQR then
+			Core.SetEnemy(npc, nil) -- it's not here; look around from here
+			idle(npc, now, pos)
+			return
+		end
+		npc:NGLSetMoveMode("run")
+		chase(npc, now, pos, last, false)
 		npc.NGLNextStrafe = 0
 		npc.NGLFireAccum = 0
-		npc.NGLFace = visible and tPos or nil -- look where we walk when it's out of sight
+		npc.NGLFace = nil -- look where we walk
 		return
-	else
-		npc.NGLPath = nil
-		npc.NGLDirect = nil
-		if now >= npc.NGLNextStrafe then
-			npc.NGLNextStrafe = now + Rand(2, 3.5)
-			local dir = tPos - pos
-			dir.z = 0
-			dir:Normalize()
-			local side = (random(2) == 1) and 1 or -1
-			npc.NGLGoal = pos + Vector(-dir.y, dir.x, 0) * (side * Rand(100, 250))
-		end
-
-		-- Shots owed since the last think. Far-away NPCs think rarely but
-		-- still deal the same damage over time.
-		local w = npc.Weapon
-		local acc = npc.NGLFireAccum + dt
-		local shots = w and floor(acc / w.Delay) or 0
-		if not w then
-			npc.NGLFireAccum = 0
-		elseif shots > 0 then
-			npc.NGLFireAccum = acc - shots * w.Delay
-			local visual = nearestPlayerSqr < cvVisual:GetFloat() ^ 2
-			fire(npc, enemy, min(shots, visual and 3 or 30), visual)
-		else
-			npc.NGLFireAccum = acc
-		end
 	end
 
+	local distSqr = pos:DistToSqr(tPos)
+	local range = npc.AttackRange
+	if distSqr > range * range * ATTACK_KEEP_SQR_PAD then
+		npc:NGLSetMoveMode("run")
+		chase(npc, now, pos, tPos, true)
+		npc.NGLNextStrafe = 0
+		npc.NGLFireAccum = 0
+		npc.NGLFace = tPos
+		return
+	end
+
+	-- In range and in view: strafe and shoot.
+	npc.NGLPath = nil
+	npc.NGLDirect = nil
+	npc:NGLSetMoveMode("walk")
+	if now >= npc.NGLNextStrafe then
+		npc.NGLNextStrafe = now + Rand(2, 3.5)
+		local dir = tPos - pos
+		dir.z = 0
+		dir:Normalize()
+		local side = (random(2) == 1) and 1 or -1
+		npc.NGLGoal = pos + Vector(-dir.y, dir.x, 0) * (side * Rand(100, 250))
+	end
 	npc.NGLFace = tPos
+
+	local w = npc.Weapon
+	if not w then
+		npc.NGLFireAccum = 0
+		return
+	end
+	if now < (npc.NGLReloadUntil or 0) then
+		npc.NGLFireAccum = 0
+		return
+	end
+
+	-- Shots owed since the last think. Far-away NPCs think rarely but
+	-- still deal the same damage over time.
+	local acc = npc.NGLFireAccum + dt
+	local shots = floor(acc / w.Delay)
+	if shots <= 0 then
+		npc.NGLFireAccum = acc
+		return
+	end
+	npc.NGLFireAccum = acc - shots * w.Delay
+
+	local clipSize = w.Clip or 0
+	if clipSize > 0 then
+		shots = min(shots, npc.NGLClip)
+		npc.NGLClip = npc.NGLClip - shots
+	end
+	local visual = npc.NGLNear
+	if shots > 0 then fire(npc, enemy, min(shots, visual and 3 or 30), visual) end
+
+	if clipSize > 0 and npc.NGLClip <= 0 then
+		npc.NGLClip = clipSize
+		npc.NGLReloadUntil = now + (w.ReloadTime or 2)
+		npc.NGLFireAccum = 0
+		npc:NGLGesture("Reload")
+		npc:OnReload()
+	end
 end
 
 ----------------------------------------------------------------------------
@@ -498,6 +637,7 @@ hook.Add("Tick", "NGL.Core.Scheduler", function()
 				npc.NGLNextThink = now + interval * Rand(0.9, 1.1)
 
 				think(npc, now, dt, best)
+				if npc.NGLNear and not npc.NGLDying then npc:NGLUpdatePose() end
 			end
 
 			if SysTime() - start > budget then
