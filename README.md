@@ -8,6 +8,7 @@ An NPC base for Garry's Mod built for large battles (100+ NPCs) with minimal ser
 2. **NPC base core** (done). Central scheduler with a CPU budget, distance-based think rate, spatial grid, factions and a modding API. `ngl_combine_soldier` holds **1250** NPCs at 67 tick in the typical case (one player watching) and **800** in the worst case (every NPC thinking at 10 Hz and firing real bullets). Stock `npc_combine_s`: 200.
 3. **Custom navigation** (done). Our own walk grid generated per map (no navmesh, no AI nodes), path-finding spread over ticks under a CPU budget, shared and cached paths.
 3a. **Behaviour, animation and modding** (done). Weapon animations with level of detail, wandering, alerts, enemy memory; melee, entity-free projectiles, voice lines, and building blocks for custom behaviour. `ngl_combine_soldier` holds **800** at 67 tick with full animations (v0.4.1).
+3b. **Squads, elite Combine, APC and dropship** (in progress). Squads and orders (v0.6.0); next the elite Combine squad leader, the APC, flying navigation and the dropship.
 4. **Battle test.** Two teams of 100+ soldiers on several maps, singleplayer and dedicated server, tuned against the target.
 
 **Target:** 300 NGL NPCs with real combat AI holding 67 tick (under 1% late ticks, `ngl_bench_limit`) on a local dedicated server on a normal PC. That's 3x the 100 goal, so weaker servers still manage 100+.
@@ -90,6 +91,8 @@ The default behaviour is built from these, so custom behaviour built from them g
 | Animation | `self:PlayAnim(actOrSequence, lock, rate)` (whole body, returns duration), `self:PlayGesture(actOrSequence)` |
 | Sound | `self:Speak(kindOrPath)` |
 | State | `self:IsNearPlayer()`, `self:IsDetailed()`, `self:IsBusy()` |
+| Orders | `self:GiveOrder(order)`, `self:GetOrder()`, `self:ClearOrder()` |
+| Squads | `self:MakeSquad(max)`, `self:GetSquad()`, `self:IsSquadLeader()`, `self:LeaveSquad()`, `squad:Add(npc)`, `squad:Order(who, order)`, `squad:Nearest(pos, n)`, `squad:Members()` |
 
 Example: a brute that roars and charges when its enemy is far, and otherwise fights normally.
 
@@ -108,20 +111,43 @@ function ENT:OnCombat(enemy, dist, visible)
 end
 ```
 
+### Squads and orders
+
+A squad is a leader plus members (`max` counts the leader). Members keep a wedge formation behind the leader when there's nothing to fight, and when one of them spots an enemy the others go to look, however far away they are. A squad is a plain table, not an entity: it adds no per-tick work, members follow and obey inside their normal think.
+
+An order takes over an NPC's behaviour until it ends (`time` seconds, or a default per kind):
+
+| Order | Fields | What the NPC does |
+| --- | --- | --- |
+| `hold` | `face`, `crouch = false` to stand | Stays put (crouched if it can), watches `face`, fights back from there |
+| `move` | `pos`, `run`, `radius`, `hold = true` | Goes to `pos`, shooting what it sees on the way, then holds there if `hold` |
+| `search` | `pos`, `radius` (400), `run = false` | Goes to `pos` and sweeps around it; seeing an enemy ends the order |
+| `fire_at` | `pos`, `spread` (150) | Shoots at the area, seen or not |
+
+Every order can carry `onDone = function(npc, order, reason)`; `OnOrderDone(order, reason)` gets the same reasons (`timeout`, `done`, `contact`, `replaced`, `cleared`). `OnOrder(order)` returning true means the NPC handles it itself. Extra kinds go in `ENT.OrderKinds = { mykind = true }` and run in your `OnAIThink`.
+
+```lua
+local sq = leader:MakeSquad(10)
+for _, ally in ipairs(leader:GetAllies(1500)) do sq:Add(ally) end
+sq:Order(sq:Nearest(lastSeen, 3), { kind = "search", pos = lastSeen, time = 20 })
+```
+
+Testing in game (superadmin): `ngl_squad_make [size]` makes the NGL NPC you look at lead the nearest allies; `ngl_squad_order <hold|move|search|fire_at> [n]` orders that squad (or only the `n` nearest) at the spot you look at; `ngl_squad_info` lists squads.
+
 ### Behaviour
 
 - **Idle:** strolls around its home spot (where it spawned or last fought) every few seconds at walking pace, with relaxed weapon animations (`WanderRadius`, `WanderDelay`, `WalkSpeed`; `WanderRadius = 0` stands still).
 - **Alerted:** when an NPC spots an enemy, allies within `AlertRadius` (1500) that have nothing to do run over to look.
 - **Fighting:** runs at the enemy with the weapon raised until in `AttackRange`, then strafes at walking pace and shoots, or now and then crouches and holds the spot (`CrouchChance`, 0.35; crouched it sees and shoots from `CrouchEyeHeight`). Reloads after `Weapon.Clip` shots (`Weapon.ReloadTime` seconds without firing).
 - **Enemy out of sight:** heads for where it last saw the enemy (no seeing through walls), and gives up after `EnemyMemory` seconds or once it gets there and finds nobody.
-- **Animations:** idle, alert idle, walk, run, aimed walk and aimed run, crouched idle, aim and walk picked per state; firing, reload and flinch gestures; upper body aims at the enemy. Strafing keeps the body on the target while the legs swing smoothly (every tick, eased) to the direction of travel; running always faces where the NPC goes, with the gun raised only when the target is ahead. Walk/run cycles play at the speed the NPC actually moves. Models without crouch animations simply don't crouch. See the level of detail below.
-- **Animation level of detail:** within `ngl_anim_detail_range` (1500) of a player, NPCs get everything above. Further out they play only the plain idle, walk and run cycles: no aim or strafe poses, no gestures, no aimed variants with their extra aim layers, and their poses are reset once when they leave the range. This saves server time and, more importantly, drawing time on every client. Clients also skip drawing NPC weapons beyond `ngl_cl_weapon_range` (4000, client setting; 0 = always).
+- **Animations:** idle, alert idle, walk, run, aimed walk and aimed run, crouched idle, aim and walk picked per state; firing, reload and flinch gestures; upper body aims at the enemy. Strafing keeps the body on the target while the legs swing smoothly (every tick, eased) to the direction of travel, anywhere a player can see the NPC (`ngl_ai_visual_range`); standing or crouched, the upper body aims and the feet stay planted until the target is more than 45° off; running always faces where the NPC goes, with the gun raised only when the target is ahead. Walk/run cycles play at the speed the NPC actually moves. Models without crouch animations simply don't crouch. See the level of detail below.
+- **Animation level of detail:** within `ngl_anim_detail_range` (1500) of a player, NPCs get everything above. Further out they play only the plain idle, walk and run cycles: no aim pose, no gestures, no aimed variants with their extra aim layers, and their poses are reset once when they leave the range. This saves server time and, more importantly, drawing time on every client. Clients also skip drawing NPC weapons beyond `ngl_cl_weapon_range` (4000, client setting; 0 = always).
 
 Examples shipped: `ngl_combine_soldier` and `ngl_rebel` (NPC tab, category "NGL Base").
 
 ### How the core keeps it cheap
 
-- **Per tick**, each NPC only steers towards its current goal (`BehaveUpdate`: one `Approach`, one `FaceTowards`) and advances its animation. The stock NextBot coroutine is not used. The aim pose updates at the think rate and the leg (strafe) pose every tick, both only within `ngl_anim_detail_range` of a player.
+- **Per tick**, each NPC only steers towards its current goal (`BehaveUpdate`: one `Approach`, one `FaceTowards`) and advances its animation. The stock NextBot coroutine is not used. The aim pose updates at the think rate within `ngl_anim_detail_range`; the leg (strafe) pose every tick within `ngl_ai_visual_range`. Beyond that NPCs face where they walk, so their legs need no pose.
 - **Decisions** (targets, chase or strafe, shooting) run in one central hook under a CPU budget (`ngl_ai_budget`, default 3 ms per tick). NPCs that don't fit think on the next tick.
 - **Think rate depends on the nearest player**: every 0.1 s within 1500 units, 0.3 s within 4000, 1 s further away (`ngl_ai_near`, `ngl_ai_mid`, `ngl_ai_rate_*`).
 - **Enemy search uses a 1024-unit spatial grid**, so cost depends on nearby NPCs, not all of them. Line of sight is checked for at most the 3 closest candidates, once per second.

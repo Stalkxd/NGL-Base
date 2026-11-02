@@ -28,6 +28,8 @@ function ENT:OnIdle() end
 function ENT:OnCombat(enemy, dist, visible) end
 function ENT:OnAttack(enemy, kind) end
 function ENT:OnMeleeHit(target, hit) end
+function ENT:OnOrder(order) end
+function ENT:OnOrderDone(order, reason) end
 
 ----------------------------------------------------------------------------
 -- Sounds
@@ -173,10 +175,6 @@ function ENT:NGLResetPose()
 		self:SetPoseParameter("aim_yaw", 0)
 		self:SetPoseParameter("aim_pitch", 0)
 	end
-	if p.move and (self.NGLMoveYaw or 0) ~= 0 then
-		self.NGLMoveYaw = 0
-		self:SetPoseParameter("move_yaw", 0)
-	end
 	if self:GetPlaybackRate() ~= 1 then self:SetPlaybackRate(1) end
 end
 
@@ -233,27 +231,38 @@ end
 -- it handles every movement activity (the stock one only knows ACT_WALK and
 -- ACT_RUN). Outside full-detail range the cheaper FrameAdvance is enough.
 function ENT:BodyUpdate()
-	if self.NGLDetail then
-		self:NGLUpdateMoveYaw()
-		if self.NGLMoving then
-			self:BodyMoveXY() -- also advances the frame
-			return
-		end
+	self:NGLUpdateMoveYaw()
+	if self.NGLMoving and self.NGLDetail then
+		self:BodyMoveXY() -- also advances the frame
+	else
+		self:FrameAdvance()
 	end
-	self:FrameAdvance()
 end
 
 -- Legs follow the direction we actually move in (strafing, or walking while
--- the body is still turning), every tick and eased, so they never lag a
--- tenth of a second behind or snap. Full-detail range only.
+-- the body is still turning), every tick and eased, so they never lag behind
+-- or snap. Anywhere a player can see the NPC (ngl_ai_visual_range), not only
+-- in full-detail range: a strafing NPC at 2000 units with its legs pointing
+-- forward looks wrong. Further out the legs are put straight, and those NPCs
+-- face where they walk (BehaveUpdate), so straight legs are right there.
 local MOVE_YAW_RATE = 720 -- degrees per second the legs can swing
 function ENT:NGLUpdateMoveYaw()
 	if not self.NGLPoses.move then return end
 	local target = 0
-	if self.NGLMoving then
+	if self.NGLMoving and self.NGLNear then
 		local v = self.loco:GetVelocity()
-		if v.x * v.x + v.y * v.y > 400 then
-			target = AngleDiff(deg(atan2(v.y, v.x)), self:GetAngles().y)
+		local dx, dy = v.x, v.y
+		if dx * dx + dy * dy < 400 then
+			-- Just starting (or pushing against something): the velocity is
+			-- too small to trust, use where we are heading instead.
+			local g = self.NGLSteer
+			if g then
+				local pos = self:GetPos()
+				dx, dy = g.x - pos.x, g.y - pos.y
+			end
+		end
+		if dx * dx + dy * dy > 1 then
+			target = AngleDiff(deg(atan2(dy, dx)), self:GetAngles().y)
 		end
 	end
 	local cur = self.NGLMoveYaw or 0
@@ -313,6 +322,7 @@ function ENT:BehaveUpdate(interval)
 		if CurTime() < self.NGLAnimUntil then
 			if goal and not self.NGLAnimLock then self.loco:Approach(goal, 1) end
 			self.NGLMoving = goal ~= nil and not self.NGLAnimLock
+			self.NGLSteer = self.NGLMoving and goal or nil
 			local f = self.NGLFace
 			if f then self.loco:FaceTowards(f) end
 			local B = NGL.Bench
@@ -359,10 +369,24 @@ function ENT:BehaveUpdate(interval)
 	-- Walking (strafing) keeps the body on the target while the legs step
 	-- sideways; running sideways or backwards looks broken, so a running NPC
 	-- turns to where it goes.
+	-- Out of every player's sight the legs stay straight (NGLUpdateMoveYaw),
+	-- so walk where we face there too.
+	self.NGLSteer = goal
 	local face = self.NGLFace
-	if goal and (not face or self.NGLMoveMode ~= "walk") then face = goal end
+	if goal and (not face or self.NGLMoveMode ~= "walk" or not self.NGLNear) then face = goal end
 	if face then
-		self.loco:FaceTowards(face)
+		if goal then
+			self.NGLTurning = nil
+			self.loco:FaceTowards(face)
+		else
+			-- Standing or crouched: the upper body aims (aim_yaw) and the feet
+			-- stay planted; the whole body only turns once the target is well
+			-- off to the side, then all the way round. Turning in place every
+			-- tick made the feet slide and twist.
+			local off = math.abs(AngleDiff(deg(atan2(face.y - pos.y, face.x - pos.x)), self:GetAngles().y))
+			if off > 45 then self.NGLTurning = true elseif off < 8 then self.NGLTurning = nil end
+			if self.NGLTurning then self.loco:FaceTowards(face) end
+		end
 	end
 
 	local B = NGL.Bench
@@ -580,3 +604,25 @@ end
 function ENT:IsNearPlayer() return self.NGLNear == true end  -- within ngl_ai_visual_range
 function ENT:IsDetailed() return self.NGLDetail == true end  -- within ngl_anim_detail_range
 function ENT:IsBusy() return CurTime() < (self.NGLBusyUntil or 0) end
+
+-- Orders and squads (sv_core.lua, sv_squad.lua) ---------------------------
+
+-- order = { kind = "hold" | "move" | "search" | "fire_at" (or one of
+-- ENT.OrderKinds), time = seconds, plus per kind:
+--   hold:    face = pos, crouch = false to stand
+--   move:    pos, run = bool, radius = arrive distance, hold = true to hold
+--            there afterwards (holdTime)
+--   search:  pos, radius (400), run = false to walk there
+--   fire_at: pos, spread (150)
+--   any:     onDone = function(npc, order, reason) }
+-- reason passed to OnOrderDone/onDone: "timeout", "done", "contact",
+-- "replaced", "cleared".
+function ENT:GiveOrder(order) return core().GiveOrder(self, order, CurTime()) end
+function ENT:GetOrder() return self.NGLOrder end
+function ENT:ClearOrder() core().EndOrder(self, "cleared") end
+
+function ENT:GetSquad() return self.NGLSquad end
+function ENT:IsSquadLeader() return self.NGLSquad ~= nil and self.NGLSquad.leader == self end
+-- A new squad led by this NPC (leaves its old one). maxSize counts the leader.
+function ENT:MakeSquad(maxSize) return NGL.NewSquad(self, maxSize or 10) end
+function ENT:LeaveSquad() if self.NGLSquad then self.NGLSquad:Remove(self) end end
