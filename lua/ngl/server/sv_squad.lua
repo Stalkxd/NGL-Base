@@ -27,12 +27,25 @@ function NGL.NewSquad(leader, maxSize)
 		slots = {},   -- [npc] = formation slot (1..), leader has none
 		assets = {},  -- [vehicle] = true: Commandable NPCs taking the leader's orders (not members)
 		max = maxSize or 10,
+		formation = NGL.Squad.RandomFormation(leader),
 	}, Squad)
 	if IsValid(leader) then
 		s:Add(leader)
 		s.leader = leader
 	end
 	return s
+end
+
+-- "wedge", "line" or "column" (Core.Formations): one of the leader's
+-- ENT.Squad.Formations, or of all three, at random.
+function NGL.Squad.RandomFormation(leader)
+	local cfg = IsValid(leader) and leader.Squad
+	local list = cfg and cfg.Formations or { "wedge", "line", "column" }
+	return list[math.random(#list)]
+end
+
+function Squad:SetFormation(name)
+	if NGL.Core.Formations[name] then self.formation = name end
 end
 
 -- Drops dead and removed members. Called by everything that reads the list,
@@ -150,11 +163,20 @@ function Squad:Order(who, order)
 			if who == "everyone" or npc ~= self.leader then list[#list + 1] = npc end
 		end
 	end
-	local n = 0
+	local n, first = 0, nil
 	for _, npc in ipairs(list) do
 		local copy = {}
 		for k, v in pairs(order) do copy[k] = v end
-		if npc:GiveOrder(copy) then n = n + 1 end
+		if npc:GiveOrder(copy) then
+			n = n + 1
+			if npc ~= self.leader and not first then first = npc end
+		end
+	end
+	-- One of them answers over the radio, a moment after the order.
+	if first and first.NGLSounds and first.NGLSounds.Ack then
+		timer.Simple(0.8, function()
+			if IsValid(first) and not first.NGLDying then first:NGLSound("Ack") end
+		end)
 	end
 	return n
 end
@@ -211,7 +233,7 @@ end
 
 local function signal(npc, kind)
 	if npc.NGLSignal then npc:NGLSignal(kind) end
-	npc:NGLSound(kind)
+	npc:NGLSound(kind, true)
 end
 
 -- Something to do SIGNAL_DELAY after a hand signal (one at a time).

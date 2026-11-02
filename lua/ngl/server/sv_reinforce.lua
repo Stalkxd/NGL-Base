@@ -1,7 +1,8 @@
 -- NGL reinforcements: a squad leader that is down to a few men (ENT.Squad
 -- with Reinforce) calls more. On maps with open sky a dropship brings them
--- (sv_air.lua, ngl_dropship); on maps without, they arrive on foot from a
--- spot neither the enemy nor any player can see.
+-- (sv_air.lua, ngl_dropship); indoors, where it can't land near the leader,
+-- and on maps without sky, they arrive on foot from a spot neither the
+-- enemy nor any player can see.
 --
 --   ENT.Squad.Reinforce = {
 --   	Ship = "ngl_dropship", Cargo = "ngl_combine_soldier",
@@ -131,18 +132,31 @@ function R.OnFoot(npc, sq, enemy, rc, vehicle)
 end
 
 -- Tries to get reinforcements to the leader now. True if they're coming.
--- `vehicle` = class to bring instead of soldiers.
+-- Under a roof (no sky straight above the leader)?
+local upTrace = { mask = MASK_SOLID_BRUSHONLY }
+local upResult = {}
+upTrace.output = upResult
+function R.Indoors(npc)
+	local p = npc:GetPos()
+	upTrace.start = p + Vector(0, 0, 64)
+	upTrace.endpos = p + Vector(0, 0, 3000)
+	util.TraceLine(upTrace)
+	return upResult.Hit and not upResult.HitSky
+end
+
+-- `vehicle` = class to bring instead of soldiers. The dropship comes when
+-- there is open sky and a place to land near the leader; indoors, in
+-- narrow streets and on maps with no sky they come on foot instead.
 function R.Call(npc, sq, enemy, now, rc, vehicle)
 	local Air = NGL.Air
 	if not (Air and Air.Ready) then return false end -- still building: try later
-	if Air.Count == 0 then return R.OnFoot(npc, sq, enemy, rc, vehicle) end
+	if Air.Count == 0 or R.Indoors(npc) then return R.OnFoot(npc, sq, enemy, rc, vehicle) end
 
 	if R.CountShips() >= cvShips:GetInt() then return false end
 	local ePos = enemy:GetPos()
 	local ground, top = Air.FindLanding(npc:GetPos(), ePos, rc.ShipRadius)
-	if not ground then return false end -- nowhere to land right now
-	local entry = Air.EntryPoint(top, ePos)
-	if not entry then return false end
+	local entry = ground and Air.EntryPoint(top, ePos)
+	if not entry then return R.OnFoot(npc, sq, enemy, rc, vehicle) end -- nowhere to land nearby
 	local ship = ents.Create(rc.Ship or "ngl_dropship")
 	if not IsValid(ship) then return false end
 	ship:SetPos(entry)
@@ -178,8 +192,8 @@ function R.Think(npc, now, sq, cfg)
 		npc.NGLReinforced = (npc.NGLReinforced or 0) + 1
 		if vehicle then npc.NGLVehiclesCalled = (npc.NGLVehiclesCalled or 0) + 1 end
 		npc.NGLNextReinforce = now + cvCooldown:GetFloat()
-		if npc.NGLSignal then npc:NGLSignal("Halt") end
-		npc:NGLSound("Reinforce")
+		if npc.NGLSignal then npc:NGLSignal("Reinforce") end
+		npc:NGLSound("Reinforce", true)
 		return true
 	end
 end

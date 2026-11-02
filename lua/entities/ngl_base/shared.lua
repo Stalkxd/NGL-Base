@@ -75,9 +75,13 @@ ENT.Melee = nil
 
 -- Voice. Each kind is a sound or a list (one picked at random). Kinds:
 -- Alert (new enemy), Idle (now and then when idle), Pain, Death, Reload,
--- Attack (melee swing), Lost (gave up on an enemy). Only played when a player
--- is within ngl_ai_visual_range; lines don't overlap (VoiceCooldown).
+-- Attack (melee swing), Lost (gave up on an enemy), Kill (its enemy died),
+-- Ack (answering a squad order); squad leaders also Halt, Search, Engage,
+-- StandDown, Reinforce, CallFire. Only played when a player is within
+-- ngl_ai_visual_range; lines don't overlap (VoiceCooldown).
 ENT.Sounds = {}
+-- Radio clicks around voice lines: { On = { ... }, Off = { ... } } or nil.
+ENT.Radio = nil
 -- Extra Sounds for some models, matched by part of the model path:
 -- ENT.SoundsByModel = { ["female"] = { Pain = { ... } } }
 ENT.SoundsByModel = nil
@@ -112,6 +116,7 @@ ENT.Anims = {
 	SignalSearch    = { ACT_GESTURE_SIGNAL_FORWARD, ACT_SIGNAL_FORWARD },
 	SignalEngage    = { ACT_GESTURE_SIGNAL_ADVANCE, ACT_SIGNAL_ADVANCE },
 	SignalStandDown = { ACT_GESTURE_SIGNAL_GROUP, ACT_SIGNAL_GROUP },
+	SignalReinforce = { ACT_GESTURE_SIGNAL_GROUP, ACT_SIGNAL_GROUP },
 }
 
 ----------------------------------------------------------------------------
@@ -155,7 +160,7 @@ ENT.Anims = {
 --   Sound:     self:Speak(kindOrPath)
 --   State:     self:IsNearPlayer()  self:IsDetailed()  self:IsBusy()
 --   Orders:    self:GiveOrder(order)  self:GetOrder()  self:ClearOrder()
---   Signals:   self:NGLSignal("Halt" | "Search" | "Engage" | "StandDown")
+--   Signals:   self:NGLSignal("Halt" | "Search" | "Engage" | "StandDown" | "Reinforce")
 --   Squads:    self:MakeSquad(max)  self:GetSquad()  self:IsSquadLeader()
 --              self:LeaveSquad()  squad:Add(npc)  squad:Order(who, order)
 --              squad:Nearest(pos, n)  squad:Members()  NGL.NewSquad(leader, max)
