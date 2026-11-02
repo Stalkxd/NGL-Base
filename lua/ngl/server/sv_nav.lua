@@ -147,6 +147,47 @@ function Nav.Nearest(pos)
 	return nil
 end
 
+-- A short stroll along the grid for idle NPCs: walk up to `cells` points in
+-- a random direction, turning (at most twice) at walls or where the walk
+-- would leave `radius` around `home`. Costs a few table reads, no search.
+-- Returns a list of waypoints, or nil off the grid.
+function Nav.RandomWalk(pos, home, radius, cells)
+	local cur = Nav.Nearest(pos)
+	if not cur then return nil end
+	local NX, NY, NB, S = Nav.NX, Nav.NY, Nav.NB, Nav.S
+	local hx, hy = home.x / S, home.y / S
+	local r2 = (radius / S) ^ 2
+	local d = DIRS[math.random(8)]
+	local pts = {}
+	local turns, corner = 0, nil
+	for _ = 1, cells do
+		local nxt
+		local nb = NB[cur]
+		local x, y = NX[cur], NY[cur]
+		for k = 1, #nb, 2 do
+			local j = nb[k]
+			if NX[j] - x == d[1] and NY[j] - y == d[2] then
+				local ex, ey = NX[j] - hx, NY[j] - hy
+				if ex * ex + ey * ey <= r2 then nxt = j end
+				break
+			end
+		end
+		if nxt then
+			cur = nxt
+		else
+			if turns >= 2 then break end
+			turns = turns + 1
+			if cur ~= corner then
+				pts[#pts + 1] = nodePos(cur)
+				corner = cur
+			end
+			d = DIRS[math.random(8)]
+		end
+	end
+	if cur ~= corner then pts[#pts + 1] = nodePos(cur) end
+	return pts
+end
+
 ----------------------------------------------------------------------------
 -- Save / load
 ----------------------------------------------------------------------------
