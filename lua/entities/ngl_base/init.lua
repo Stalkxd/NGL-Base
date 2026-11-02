@@ -335,7 +335,8 @@ function ENT:BehaveUpdate(interval)
 		local wp = path[idx]
 		if wp then
 			local dx, dy = wp.x - pos.x, wp.y - pos.y
-			if dx * dx + dy * dy < WAYPOINT_SQR then
+			local reach = self.WaypointRadius
+			if dx * dx + dy * dy < (reach and reach * reach or WAYPOINT_SQR) then
 				idx = idx + 1
 				self.NGLPathIdx = idx
 				wp = path[idx]
@@ -350,7 +351,8 @@ function ENT:BehaveUpdate(interval)
 
 	if not goal then
 		goal = self.NGLGoal
-		if goal and pos:DistToSqr(goal) < NEAR_GOAL_SQR then
+		local reach = self.WaypointRadius
+		if goal and pos:DistToSqr(goal) < (reach and reach * reach or NEAR_GOAL_SQR) then
 			goal = nil
 			self.NGLGoal = nil
 		end
@@ -371,6 +373,16 @@ function ENT:BehaveUpdate(interval)
 		self.NGLAnimUntil = nil
 		self.NGLAct = nil -- restart the normal activity
 		self:SetPlaybackRate(1)
+	end
+
+	-- Vehicles steer and drive themselves (ENT:NGLDrive, see ngl_apc.lua):
+	-- no animations, no turning on the spot.
+	if self.NGLDrive then
+		self:NGLDrive(goal, interval)
+		self.NGLSteer = goal
+		local B = NGL.Bench
+		if B then B.LuaTime = B.LuaTime + (SysTime() - t0) end
+		return
 	end
 
 	-- Aimed variants (with their extra aim layers) only in full-detail range;

@@ -19,6 +19,15 @@
 --   DamageType  for direct hits (DMG_BULLET); blasts use DMG_BLAST
 --   Effect      util.Effect name played on explosion ("Explosion"); false for none
 --   HitSound    sound or list of sounds played where it lands
+--   Homing      a guided rocket like HL2's APC missile: { Delay = 0.3 (seconds
+--               coasting after launch), Turn = 90 (degrees per second it can
+--               turn), Speed = 1500 (speed once lit), Accel = 2000 }. Fired
+--               with opts.target it follows that entity, otherwise `dst`.
+--   Trail       true: clients draw a smoke trail once it is lit
+--
+-- Proj.Fire(attacker, def, src, dst, visual, opts): opts.dir launches it in
+-- that direction instead of straight at `dst`, opts.target is what a homing
+-- projectile follows.
 
 NGL.Proj = NGL.Proj or {}
 local Proj = NGL.Proj
@@ -60,7 +69,7 @@ end
 
 -- Fires `def` from `src` towards the world position `dst`. `visual` = a
 -- player is close enough to see it (otherwise it resolves at once).
-function Proj.Fire(attacker, def, src, dst, visual)
+function Proj.Fire(attacker, def, src, dst, visual, opts)
 	if not visual then
 		if math.random() < (def.Accuracy or 0.6) then
 			trace.start, trace.endpos, trace.filter = src, dst, attacker
@@ -71,8 +80,9 @@ function Proj.Fire(attacker, def, src, dst, visual)
 	end
 
 	local speed = def.Speed or 1500
-	local dir = dst - src
-	local dist = dir:Length()
+	local dir = (opts and opts.dir) or (dst - src)
+	local dist = (dst - src):Length()
+	dir = Vector(dir.x, dir.y, dir.z)
 	dir:Normalize()
 	local spread = def.Spread or 0.02
 	if spread > 0 then
@@ -85,9 +95,14 @@ function Proj.Fire(attacker, def, src, dst, visual)
 
 	nextId = (nextId + 1) % 65536
 	local life = def.Life or 5
+	local now = CurTime()
+	local H = def.Homing
+	local target = opts and opts.target
 	list[#list + 1] = {
 		id = nextId, pos = Vector(src.x, src.y, src.z), vel = vel, g = g,
-		def = def, attacker = attacker, die = CurTime() + life,
+		def = def, attacker = attacker, die = now + life,
+		home = H, lit = H and now + (H.Delay or 0.3), target = IsValid(target) and target or nil,
+		dst = Vector(dst.x, dst.y, dst.z),
 	}
 
 	net.Start("ngl_proj")
@@ -97,8 +112,39 @@ function Proj.Fire(attacker, def, src, dst, visual)
 	net.WriteFloat(g)
 	net.WriteString(def.Model or "")
 	net.WriteFloat(life)
+	net.WriteBool(H ~= nil)
+	if H then
+		net.WriteFloat(H.Delay or 0.3)
+		net.WriteFloat(H.Turn or 90)
+		net.WriteFloat(H.Speed or 1500)
+		net.WriteFloat(H.Accel or 2000)
+		net.WriteVector(dst)
+		net.WriteEntity(IsValid(target) and target or NULL)
+		net.WriteBool(def.Trail == true)
+	end
 	net.SendPVS(src)
 end
+
+-- Turns velocity `vel` towards `goal` by at most `turn` degrees and moves
+-- its speed towards `speed`. Shared idea with the client (cl_projectile.lua).
+local function steer(vel, from, goal, turn, speed, accel, dt)
+	local cur = vel:Length()
+	local dir = vel / math.max(cur, 0.001)
+	local want = goal - from
+	want:Normalize()
+	local cosA = math.Clamp(dir:Dot(want), -1, 1)
+	local a = math.acos(cosA)
+	local step = math.rad(turn) * dt
+	if a > step and a > 1e-4 then
+		local s = math.sin(a)
+		dir = dir * (math.sin(a - step) / s) + want * (math.sin(step) / s)
+	else
+		dir = want
+	end
+	cur = cur < speed and math.min(speed, cur + accel * dt) or speed
+	return dir * cur
+end
+Proj.Steer = steer
 
 function Proj.Count() return #list end
 
@@ -113,6 +159,13 @@ hook.Add("Tick", "NGL.Proj", function()
 		local p = list[i]
 		local vel = p.vel
 		if p.g ~= 0 then vel.z = vel.z - p.g * dt end
+		if p.home and now >= p.lit then
+			local t = p.target
+			local goal = (IsValid(t) and not t.NGLDying) and t:WorldSpaceCenter() or p.dst
+			local H = p.home
+			vel = steer(vel, p.pos, goal, H.Turn or 90, H.Speed or 1500, H.Accel or 2000, dt)
+			p.vel = vel
+		end
 		local from = p.pos
 		local to = from + vel * dt
 		trace.start, trace.endpos = from, to

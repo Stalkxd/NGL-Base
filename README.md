@@ -50,7 +50,7 @@ Every field, hook and building block is documented in `lua/entities/ngl_base/sha
 - `ngl_combine_soldier`: SMG plus a rifle-butt melee, voice lines.
 - `ngl_rebel`: random faces, male and female voices via `SoundsByModel`, friendly to players.
 - `ngl_zombie`: melee only, no code at all.
-- `ngl_apc`: a vehicle NPC. Turret machine gun plus rockets, keeps its distance, takes the elite's orders when one is near, its own decisions otherwise (`DriveLikeVehicle`, `NavWidth`, `Commandable`).
+- `ngl_apc`: a vehicle NPC that drives like a car: it speeds up and brakes, steers with its front wheels (a bicycle model with `WheelBase` and `MaxSteer`), can't turn on the spot, and backs up to get round tight corners, away from enemies that get too close, or out of a wall it is stuck on. Wheels spin and steer on clients from how it moves (nothing extra networked), with HL2's APC engine loops. The turret machine gun fires from the barrel (`muzzle` attachment) with HL2's helicopter tracers and muzzle flash; rockets go up out of the launcher (`cannon_muzzle`) at HL2's launch angles, light after 0.3 s and curve onto the target, with a smoke trail. Takes the elite's orders when one is near, its own decisions otherwise. Any vehicle NPC can drive itself with `ENT:NGLDrive(goal, dt)`; `ENT:NGLMuzzle()` sets where any NPC's shots start; projectiles can be guided (`Homing`, `Trail`).
 - `ngl_combine_elite`: the first hard NPC. Super soldier model, AR2, tougher and more accurate, and leads up to 9 Combine soldiers with hand signals (`ENT.Squad`, see Squads and orders). Still no code beyond fields.
 
 ### Attacks

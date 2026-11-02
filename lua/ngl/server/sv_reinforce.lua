@@ -103,7 +103,8 @@ function R.OnFoot(npc, sq, enemy, rc, vehicle)
 		local a = base + ((try % 2 == 0) and 1 or -1) * math.floor((try + 1) / 2) * 0.5
 		local dist = 1200 + 300 * (try % 5)
 		local g = Nav.Nearest(Vector(pos.x + math.cos(a) * dist, pos.y + math.sin(a) * dist, pos.z))
-		local width = vehicle and (scripted_ents.Get(vehicle) or {}).NavWidth
+		local vt = vehicle and scripted_ents.Get(vehicle) or {}
+		local width = vt.NavWidth
 		if g and width and width > 24 and not Nav.WideOk(g, math.ceil(width / 8) * 8) then g = nil end
 		if g then
 			local gp = Nav.NodePos(g)
@@ -112,7 +113,8 @@ function R.OnFoot(npc, sq, enemy, rc, vehicle)
 				if hidden and ply:Alive() and seenBy(ply, gp) then hidden = false end
 			end
 			if hidden and vehicle then
-				local v = R.Spawn(vehicle, gp + Vector(0, 0, 8), npc, nil, math.deg(base) + 180)
+				-- Facing the leader (vehicle models may face +Y: HeadingOffset).
+				local v = R.Spawn(vehicle, gp + Vector(0, 0, 8), npc, nil, math.deg(base) + 180 - (vt.HeadingOffset or 0))
 				if not IsValid(v) then return false end
 				R.AttachVehicle(v, npc, sq)
 				if v.MoveTo then v:MoveTo(pos, true) end

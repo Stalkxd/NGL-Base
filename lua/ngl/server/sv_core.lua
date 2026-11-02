@@ -343,9 +343,13 @@ function Core.Damage(attacker, target, amount, dmgType, pos, force)
 end
 
 -- `enemy` may be nil when shooting at an area (`dst`, e.g. a fire_at order).
+-- ENT:NGLMuzzle() (optional) returns where shots start and the attachment
+-- for the muzzle flash, e.g. a vehicle's gun barrel.
 local function fire(npc, enemy, shots, visual, dst)
 	local w = npc.Weapon
-	local src = npc:GetPos() + Vector(0, 0, eyeHeight(npc))
+	local src, att
+	if visual and npc.NGLMuzzle then src, att = npc:NGLMuzzle() end
+	src = src or npc:GetPos() + Vector(0, 0, eyeHeight(npc))
 	dst = dst or enemy:WorldSpaceCenter()
 
 	-- Projectile weapon (rockets, grenades...): see sv_projectile.lua.
@@ -369,9 +373,19 @@ local function fire(npc, enemy, shots, visual, dst)
 			Num = shots,
 			Damage = w.Damage,
 			Tracer = 1,
+			TracerName = w.Tracer,
 			Attacker = npc,
 			IgnoreEntity = npc,
 		})
+		if w.MuzzleEffect then
+			local ed = EffectData()
+			ed:SetEntity(npc)
+			ed:SetAttachment(att or 1)
+			ed:SetOrigin(src)
+			ed:SetAngles(dir:Angle())
+			ed:SetScale(1)
+			util.Effect(w.MuzzleEffect, ed)
+		end
 		if w.Sound then npc:EmitSound(w.Sound) end
 		return
 	end
