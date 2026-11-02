@@ -9,7 +9,7 @@ local NEAR_GOAL_SQR = 32 * 32
 local WAYPOINT_SQR = 40 * 40
 
 local BASE_ANIMS = ENT.Anims
-local ANIM_FALLBACK = { IdleAim = "Idle", Walk = "Run", WalkAim = "Walk", RunAim = "Run" }
+local ANIM_FALLBACK = { IdleAim = "Idle", Walk = "Run", WalkAim = "Walk", RunAim = "Run", CrouchAim = "CrouchIdle", CrouchIdle = "CrouchAim" }
 local resolvedAnims = {} -- [class .. model] = { Idle = act, ... }, shared by NPCs of a kind
 local resolvedPoses = {} -- [model] = { aim = bool, move = bool }
 local resolvedSounds = {} -- [class .. model] = { Pain = { ... }, ... }
@@ -100,7 +100,7 @@ function ENT:NGLResolveAnims()
 		end
 		r.Idle = r.Idle or ACT_IDLE
 		r.Run = r.Run or ACT_RUN
-		for _, name in ipairs({ "IdleAim", "Walk", "WalkAim", "RunAim" }) do
+		for _, name in ipairs({ "IdleAim", "Walk", "WalkAim", "RunAim", "CrouchAim", "CrouchIdle" }) do
 			r[name] = r[name] or r[ANIM_FALLBACK[name]]
 		end
 		resolvedAnims[key] = r
@@ -143,7 +143,7 @@ function ENT:NGLUpdatePose()
 		local enemy = self.NGLEnemy
 		if enemy and self.NGLEnemyVisible and IsValid(enemy) then
 			local eye = self:GetPos()
-			eye.z = eye.z + self.EyeHeight
+			eye.z = eye.z + (self.NGLCrouch and self.CrouchEyeHeight or self.EyeHeight)
 			local a = (enemy:WorldSpaceCenter() - eye):Angle()
 			ay, ap = AngleDiff(a.y, yaw), AngleDiff(a.p, 0)
 		end
@@ -154,26 +154,10 @@ function ENT:NGLUpdatePose()
 		end
 	end
 
-	local v = self.loco:GetVelocity()
-	local speedSqr = v.x * v.x + v.y * v.y
-	if p.move then
-		local my = 0
-		if self.NGLMoving and speedSqr > 400 then my = AngleDiff(deg(atan2(v.y, v.x)), yaw) end
-		if math.abs(my - (self.NGLMoveYaw or 0)) > 5 then
-			self.NGLMoveYaw = my
-			self:SetPoseParameter("move_yaw", my)
-		end
-	end
-
-	-- Feet match the ground: play the walk/run cycle at the speed we move.
-	if self.NGLAnimUntil then
-		-- PlayAnim owns the playback rate
-	elseif self.NGLMoving then
-		local gs = self:GetSequenceGroundSpeed(self:GetSequence())
-		if gs > 1 then
-			local rate = math.Clamp(math.sqrt(speedSqr) / gs, 0.5, 2)
-			if math.abs(rate - self:GetPlaybackRate()) > 0.05 then self:SetPlaybackRate(rate) end
-		end
+	-- Feet match the ground. While moving, BodyMoveXY (BodyUpdate) sets the
+	-- playback rate every tick; setting it here too made the cycle stutter.
+	if self.NGLAnimUntil or self.NGLMoving then
+		-- PlayAnim / BodyMoveXY own the playback rate
 	elseif self:GetPlaybackRate() ~= 1 then
 		self:SetPlaybackRate(1)
 	end
@@ -249,11 +233,37 @@ end
 -- it handles every movement activity (the stock one only knows ACT_WALK and
 -- ACT_RUN). Outside full-detail range the cheaper FrameAdvance is enough.
 function ENT:BodyUpdate()
-	if self.NGLMoving and self.NGLDetail then
-		self:BodyMoveXY() -- also advances the frame
-	else
-		self:FrameAdvance()
+	if self.NGLDetail then
+		self:NGLUpdateMoveYaw()
+		if self.NGLMoving then
+			self:BodyMoveXY() -- also advances the frame
+			return
+		end
 	end
+	self:FrameAdvance()
+end
+
+-- Legs follow the direction we actually move in (strafing, or walking while
+-- the body is still turning), every tick and eased, so they never lag a
+-- tenth of a second behind or snap. Full-detail range only.
+local MOVE_YAW_RATE = 720 -- degrees per second the legs can swing
+function ENT:NGLUpdateMoveYaw()
+	if not self.NGLPoses.move then return end
+	local target = 0
+	if self.NGLMoving then
+		local v = self.loco:GetVelocity()
+		if v.x * v.x + v.y * v.y > 400 then
+			target = AngleDiff(deg(atan2(v.y, v.x)), self:GetAngles().y)
+		end
+	end
+	local cur = self.NGLMoveYaw or 0
+	local diff = AngleDiff(target, cur)
+	if diff == 0 then return end
+	local step = MOVE_YAW_RATE * engine.TickInterval()
+	if diff > step then diff = step elseif diff < -step then diff = -step end
+	cur = math.NormalizeAngle(cur + diff)
+	self.NGLMoveYaw = cur
+	self:SetPoseParameter("move_yaw", cur)
 end
 
 -- The stock NextBot runs RunBehaviour as a coroutine every tick. We skip that
@@ -318,21 +328,39 @@ function ENT:BehaveUpdate(interval)
 	-- further away the plain cycles look the same at that size.
 	local A = self.NGLActs
 	local fighting = self.NGLDetail and self.NGLEnemy ~= nil
+	local crouch = self.NGLCrouch
 	if goal then
 		self.loco:Approach(goal, 1)
 		self.NGLMoving = true
-		local aim = fighting and self.NGLFace ~= nil
-		if self.NGLMoveMode == "walk" then
+		local f = self.NGLFace
+		local aim = fighting and f ~= nil
+		if aim and self.NGLMoveMode ~= "walk" then
+			-- Running faces the way we go (see below); the aimed run only
+			-- when the target is roughly ahead, the gun can't point backwards.
+			local dx, dy, ex, ey = goal.x - pos.x, goal.y - pos.y, f.x - pos.x, f.y - pos.y
+			local dot = dx * ex + dy * ey
+			aim = dot > 0 and dot * dot > 0.25 * (dx * dx + dy * dy) * (ex * ex + ey * ey)
+		end
+		if crouch and A.CrouchWalk then
+			self:NGLSetAct(A.CrouchWalk)
+		elseif self.NGLMoveMode == "walk" then
 			self:NGLSetAct(aim and A.WalkAim or A.Walk)
 		else
 			self:NGLSetAct(aim and A.RunAim or A.Run)
 		end
+	elseif crouch and A.CrouchIdle then
+		self.NGLMoving = false
+		self:NGLSetAct(fighting and A.CrouchAim or A.CrouchIdle)
 	else
 		self.NGLMoving = false
 		self:NGLSetAct(fighting and A.IdleAim or A.Idle)
 	end
 
-	local face = self.NGLFace or goal
+	-- Walking (strafing) keeps the body on the target while the legs step
+	-- sideways; running sideways or backwards looks broken, so a running NPC
+	-- turns to where it goes.
+	local face = self.NGLFace
+	if goal and (not face or self.NGLMoveMode ~= "walk") then face = goal end
 	if face then
 		self.loco:FaceTowards(face)
 	end
@@ -422,6 +450,11 @@ function ENT:StopMoving()
 end
 
 function ENT:IsMoving() return self.NGLMoving == true end
+
+-- Crouch (lower eyes and shots; crouched animations). The default combat
+-- behaviour crouches on its own (CrouchChance) and stands up to move.
+function ENT:SetCrouching(crouch) self.NGLCrouch = crouch and self.NGLActs.CrouchIdle ~= nil or false end
+function ENT:IsCrouching() return self.NGLCrouch == true end
 function ENT:SetRunning(run) self:NGLSetMoveMode(run and "run" or "walk") end
 
 -- Turn towards a position or entity (nil: face where we walk). The default

@@ -273,9 +273,15 @@ function Core.FindInRadius(pos, radius, filter)
 end
 NGL.FindInRadius = Core.FindInRadius
 
+-- Eye height, lower while crouched.
+local function eyeHeight(npc)
+	return npc.NGLCrouch and npc.CrouchEyeHeight or npc.EyeHeight
+end
+Core.EyeHeight = eyeHeight
+
 function Core.CanSee(npc, ent)
 	local from = npc:GetPos()
-	from.z = from.z + npc.EyeHeight
+	from.z = from.z + eyeHeight(npc)
 	return canSee(npc, from, ent)
 end
 Core.FindEnemy = findEnemy
@@ -336,7 +342,7 @@ end
 
 local function fire(npc, enemy, shots, visual)
 	local w = npc.Weapon
-	local src = npc:GetPos() + Vector(0, 0, npc.EyeHeight)
+	local src = npc:GetPos() + Vector(0, 0, eyeHeight(npc))
 	local dst = enemy:WorldSpaceCenter()
 
 	-- Projectile weapon (rockets, grenades...): see sv_projectile.lua.
@@ -403,6 +409,7 @@ function Core.StartMelee(npc, target, now)
 	npc.NGLMeleeTarget = target
 	npc.NGLMeleeHitAt = now + (m.HitDelay or 0.4)
 	Core.StopMoving(npc)
+	npc.NGLCrouch = false
 	npc.NGLFace = target:GetPos()
 	local dur = npc:NGLPlayMeleeAnim() or m.Duration or 1
 	npc.NGLBusyUntil = max(npc.NGLBusyUntil or 0, now + dur)
@@ -534,6 +541,7 @@ local function idle(npc, now, pos)
 	end
 	if npc:OnIdle() == true then return end
 	npc.NGLFace = nil
+	npc.NGLCrouch = false
 
 	local inv = npc.NGLInvestigate
 	if inv then
@@ -636,7 +644,7 @@ local function think(npc, now, dt, nearestPlayerSqr)
 	-- Line of sight to the current enemy, rechecked at most twice a second.
 	if now >= (npc.NGLNextVis or 0) then
 		npc.NGLNextVis = now + 0.5
-		npc.NGLEnemyVisible = canSee(npc, pos + Vector(0, 0, npc.EyeHeight), enemy)
+		npc.NGLEnemyVisible = canSee(npc, pos + Vector(0, 0, eyeHeight(npc)), enemy)
 		if npc.NGLEnemyVisible then npc.NGLLastSeenPos, npc.NGLLastSeenT = tPos, now end
 	end
 	local visible = npc.NGLEnemyVisible
@@ -652,6 +660,7 @@ local function think(npc, now, dt, nearestPlayerSqr)
 			return
 		end
 		npc:NGLSetMoveMode("run")
+		npc.NGLCrouch = false
 		chase(npc, now, pos, last, false)
 		npc.NGLNextStrafe = 0
 		npc.NGLFireAccum = 0
@@ -684,6 +693,7 @@ local function think(npc, now, dt, nearestPlayerSqr)
 	local range = npc.AttackRange
 	if distSqr > range * range * ATTACK_KEEP_SQR_PAD then
 		npc:NGLSetMoveMode("run")
+		npc.NGLCrouch = false
 		chase(npc, now, pos, tPos, true)
 		npc.NGLNextStrafe = 0
 		npc.NGLFireAccum = 0
@@ -696,12 +706,21 @@ local function think(npc, now, dt, nearestPlayerSqr)
 	npc.NGLDirect = nil
 	npc:NGLSetMoveMode("walk")
 	if now >= npc.NGLNextStrafe then
-		npc.NGLNextStrafe = now + Rand(2, 3.5)
-		local dir = tPos - pos
-		dir.z = 0
-		dir:Normalize()
-		local side = (random(2) == 1) and 1 or -1
-		npc.NGLGoal = pos + Vector(-dir.y, dir.x, 0) * (side * Rand(100, 250))
+		local cc = npc.CrouchChance or 0
+		if cc > 0 and npc.NGLActs.CrouchIdle and random() < cc then
+			-- Crouch and hold this spot for a while.
+			npc.NGLNextStrafe = now + Rand(2.5, 5)
+			npc.NGLCrouch = true
+			npc.NGLGoal = nil
+		else
+			npc.NGLNextStrafe = now + Rand(2, 3.5)
+			npc.NGLCrouch = false
+			local dir = tPos - pos
+			dir.z = 0
+			dir:Normalize()
+			local side = (random(2) == 1) and 1 or -1
+			npc.NGLGoal = pos + Vector(-dir.y, dir.x, 0) * (side * Rand(100, 250))
+		end
 	end
 	npc.NGLFace = tPos
 

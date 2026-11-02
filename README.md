@@ -84,7 +84,7 @@ The default behaviour is built from these, so custom behaviour built from them g
 
 | | |
 | --- | --- |
-| Movement | `self:MoveTo(pos, run)`, `self:StopMoving()`, `self:IsMoving()`, `self:SetRunning(bool)`, `self:LookAt(posOrEnt)` |
+| Movement | `self:MoveTo(pos, run)`, `self:StopMoving()`, `self:IsMoving()`, `self:SetRunning(bool)`, `self:LookAt(posOrEnt)`, `self:SetCrouching(bool)`, `self:IsCrouching()` |
 | Targets | `self:GetEnemy()`, `self:SetEnemy(ent)`, `self:FindEnemy()`, `self:CanSee(ent)`, `self:IsEnemyVisible()`, `self:GetLastSeenPos()`, `self:IsHostileTo(ent)`, `self:GetAllies(radius)`, `NGL.FindInRadius(pos, radius, filter)` |
 | Combat | `self:FireWeapon(ent, shots)`, `self:MeleeAttack(ent)`, `self:FireProjectile(entOrPos, def)`, `self:DealDamage(ent, amount, type, force)` |
 | Animation | `self:PlayAnim(actOrSequence, lock, rate)` (whole body, returns duration), `self:PlayGesture(actOrSequence)` |
@@ -112,16 +112,16 @@ end
 
 - **Idle:** strolls around its home spot (where it spawned or last fought) every few seconds at walking pace, with relaxed weapon animations (`WanderRadius`, `WanderDelay`, `WalkSpeed`; `WanderRadius = 0` stands still).
 - **Alerted:** when an NPC spots an enemy, allies within `AlertRadius` (1500) that have nothing to do run over to look.
-- **Fighting:** runs at the enemy with the weapon raised until in `AttackRange`, then strafes at walking pace and shoots. Reloads after `Weapon.Clip` shots (`Weapon.ReloadTime` seconds without firing).
+- **Fighting:** runs at the enemy with the weapon raised until in `AttackRange`, then strafes at walking pace and shoots, or now and then crouches and holds the spot (`CrouchChance`, 0.35; crouched it sees and shoots from `CrouchEyeHeight`). Reloads after `Weapon.Clip` shots (`Weapon.ReloadTime` seconds without firing).
 - **Enemy out of sight:** heads for where it last saw the enemy (no seeing through walls), and gives up after `EnemyMemory` seconds or once it gets there and finds nobody.
-- **Animations:** idle, alert idle, walk, run, aimed walk and aimed run picked per state; firing, reload and flinch gestures; upper body aims at the enemy and legs follow the strafe direction; walk/run cycles play at the speed the NPC actually moves. See the level of detail below.
+- **Animations:** idle, alert idle, walk, run, aimed walk and aimed run, crouched idle, aim and walk picked per state; firing, reload and flinch gestures; upper body aims at the enemy. Strafing keeps the body on the target while the legs swing smoothly (every tick, eased) to the direction of travel; running always faces where the NPC goes, with the gun raised only when the target is ahead. Walk/run cycles play at the speed the NPC actually moves. Models without crouch animations simply don't crouch. See the level of detail below.
 - **Animation level of detail:** within `ngl_anim_detail_range` (1500) of a player, NPCs get everything above. Further out they play only the plain idle, walk and run cycles: no aim or strafe poses, no gestures, no aimed variants with their extra aim layers, and their poses are reset once when they leave the range. This saves server time and, more importantly, drawing time on every client. Clients also skip drawing NPC weapons beyond `ngl_cl_weapon_range` (4000, client setting; 0 = always).
 
 Examples shipped: `ngl_combine_soldier` and `ngl_rebel` (NPC tab, category "NGL Base").
 
 ### How the core keeps it cheap
 
-- **Per tick**, each NPC only steers towards its current goal (`BehaveUpdate`: one `Approach`, one `FaceTowards`) and advances its animation. The stock NextBot coroutine is not used. Aim and strafe poses update at the think rate, and only within `ngl_anim_detail_range` of a player.
+- **Per tick**, each NPC only steers towards its current goal (`BehaveUpdate`: one `Approach`, one `FaceTowards`) and advances its animation. The stock NextBot coroutine is not used. The aim pose updates at the think rate and the leg (strafe) pose every tick, both only within `ngl_anim_detail_range` of a player.
 - **Decisions** (targets, chase or strafe, shooting) run in one central hook under a CPU budget (`ngl_ai_budget`, default 3 ms per tick). NPCs that don't fit think on the next tick.
 - **Think rate depends on the nearest player**: every 0.1 s within 1500 units, 0.3 s within 4000, 1 s further away (`ngl_ai_near`, `ngl_ai_mid`, `ngl_ai_rate_*`).
 - **Enemy search uses a 1024-unit spatial grid**, so cost depends on nearby NPCs, not all of them. Line of sight is checked for at most the 3 closest candidates, once per second.
