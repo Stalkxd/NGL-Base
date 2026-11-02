@@ -571,15 +571,39 @@ local function firstWaypoint(path, pos)
 	return best
 end
 
+-- Can we walk straight there? Asked of the nav grid (table lookups, no
+-- traces), at most once a second per NPC unless the target moves: a ledge,
+-- wall or drop in the way means taking a path round it instead.
+local LINE_RECHECK_SQR = 64 * 64
+local LINE_CHECK_DIST = 1200
+local function straightOk(npc, now, pos, tPos)
+	local c = npc.NGLLineCheck
+	if c and now < c.t and (c.x - tPos.x) ^ 2 + (c.y - tPos.y) ^ 2 < LINE_RECHECK_SQR then return c.ok end
+	c = c or {}
+	c.t, c.x, c.y = now + 1, tPos.x, tPos.y
+	-- Only the next stretch: what's beyond is checked as we get closer.
+	local dx, dy = tPos.x - pos.x, tPos.y - pos.y
+	local d = math.sqrt(dx * dx + dy * dy)
+	local to = tPos
+	if d > LINE_CHECK_DIST then
+		local f = LINE_CHECK_DIST / d
+		to = Vector(pos.x + dx * f, pos.y + dy * f, pos.z + (tPos.z - pos.z) * f)
+	end
+	c.ok = NGL.Nav.WalkLine(pos, to) ~= false
+	npc.NGLLineCheck = c
+	return c.ok
+end
+
 -- Move towards the enemy. Straight line when it's in view on the same level
--- (no path-finding at all), otherwise along a path from our nav grid,
--- requested in the background. The NPC never stands still waiting: until the
--- path arrives (or if it fails) it keeps walking straight at the target.
+-- and the grid says nothing's in the way (no path-finding at all), otherwise
+-- along a path from our nav grid, requested in the background. The NPC never
+-- stands still waiting: until the path arrives (or if it fails) it keeps
+-- walking straight at the target.
 local function chase(npc, now, pos, tPos, visible)
 	local nav = NGL.Nav
 	local forcePath = now < (npc.NGLForcePathUntil or 0)
 	if not (nav and nav.Loaded) or now < (npc.NGLPathFailUntil or 0)
-		or (visible and not forcePath and abs(tPos.z - pos.z) < 96) then
+		or (visible and not forcePath and abs(tPos.z - pos.z) < 96 and straightOk(npc, now, pos, tPos)) then
 		npc.NGLPath = nil
 		npc.NGLGoal = tPos
 		npc.NGLDirect = true
@@ -945,6 +969,9 @@ local ARRIVE_SQR = 64 * 64
 function Core.GiveOrder(npc, order, now)
 	local base = ORDER_TIME[order.kind]
 	if not base and not (npc.OrderKinds and npc.OrderKinds[order.kind]) then return false end
+	-- Sent somewhere by a player (NGL NPC Mover): squad orders wait till it's there.
+	local cur = npc.NGLOrder
+	if cur and cur.byPlayer and not order.byPlayer and now < cur.untilT then return false end
 	if npc:OnOrder(order) == true then return true end -- handled by the NPC itself
 	if npc.NGLOrder then Core.EndOrder(npc, "replaced") end
 	order.untilT = now + (order.time or base or 10)

@@ -234,8 +234,6 @@ function ENT:Initialize()
 	local model = self.Model
 	if type(model) == "table" then model = model[math.random(#model)] end
 	self:SetModel(model)
-	local am = self.Rappel and self.RappelAnimModel
-	if am and util.IsValidModel(am) then util.PrecacheModel(am) end -- no hitch on the first rope
 	self:NGLResolveAnims()
 	self:NGLResolveSounds()
 
@@ -348,7 +346,7 @@ function ENT:BehaveUpdate(interval)
 			local dx, dy = wp.x - pos.x, wp.y - pos.y
 			local reach = self.WaypointRadius
 			if dx * dx + dy * dy < (reach and reach * reach or WAYPOINT_SQR) and not self.NGLTraverse then
-				-- At a ledge or gap on the path: jump (or rappel) to the next point.
+				-- At a ledge or gap on the path: jump (or climb) to the next point.
 				local L = path.links and path.links[idx]
 				idx = idx + 1
 				self.NGLPathIdx = idx
@@ -363,7 +361,7 @@ function ENT:BehaveUpdate(interval)
 		end
 	end
 
-	-- In the air or on a rope: nothing else until we're down.
+	-- In the air or climbing: nothing else until we're there.
 	if self.NGLTraverse then
 		self:NGLTraverseUpdate(CurTime())
 		local B = NGL.Bench
@@ -497,10 +495,16 @@ function ENT:BehaveUpdate(interval)
 	if B then B.LuaTime = B.LuaTime + (SysTime() - t0) end
 end
 
--- Jumping down a ledge or across a gap (the engine's jump, with the Jump,
--- Glide and Land animations), or rappelling down a big drop: step out over
--- the edge, then slide down to the landing point with the Rappel loop.
-local RAPPEL_SPEED = 350 -- units per second down the rope
+-- Getting along a nav link (sv_nav.lua):
+--   jump   down a ledge or across a gap: the engine's jump, with the Jump,
+--          Glide and Land animations
+--   up     onto a ledge: a short hop up and over the edge (JumpUp, then Land)
+--   climb  up or down a climb link (ENT.Climb): straight up the wall and over
+--          the top, or over the edge and straight down (ClimbUp, ClimbDown)
+-- `up` and `climb` move the NPC along a set curve, so they always land
+-- where the grid says.
+local UP_TIME = 0.45     -- s for a hop up, plus a little per unit of height
+local UP_CLEAR = 16      -- how far above the ledge the hop goes
 
 function ENT:NGLStartTraverse(move, to)
 	local now = CurTime()
@@ -515,77 +519,49 @@ function ENT:NGLStartTraverse(move, to)
 	local T = { move = move, from = from, to = to, t0 = now }
 	self.NGLTraverse = T
 	self.NGLMoving, self.NGLSteer = false, nil
-	if move == "rappel" then
-		T.over = 0.35
-		T.dur = T.over + math.Clamp((from.z - to.z) / RAPPEL_SPEED, 0.8, 5)
-		-- The rope hangs from the edge, half way to where it lands.
-		self:SetNGLRope(Vector((from.x + to.x) * 0.5, (from.y + to.y) * 0.5, from.z + 4))
-		local seq, drop = self:NGLRappelModel(true)
-		if seq then
-			-- One animation for the whole way down, played to fit the drop.
-			local sd = self:SequenceDuration(seq)
-			local rate = math.Clamp(sd / T.dur, 0.6, 2.5)
-			T.dur = sd / rate
-			T.over = math.min(0.5 / rate, T.dur * 0.3) -- its step off the edge
-			T.oneShot = true
-			self:PlayAnim(drop, false, rate)
-		elseif A.Rappel then
-			self:PlayAnim(A.Rappel, false)
-		end
-		self:NGLSound("Rappel")
+	local h = to.z - from.z
+	if move == "up" then
+		T.dur = UP_TIME + math.max(h, 0) / 400
+		local anim = A.JumpUp or A.Jump
+		if anim then self:PlayAnim(anim, false) end
+	elseif move == "climb" then
+		T.over = 0.3 -- across the top
+		T.dur = T.over + math.max(math.abs(h) / (self.ClimbRate or 250), 0.3)
+		local anim = h >= 0 and A.ClimbUp or A.ClimbDown or A.ClimbUp or A.Glide
+		T.anim = anim
+		if anim then self:PlayAnim(anim, false) end
 	else
 		self.loco:JumpAcrossGap(to, dir)
 		if A.Jump then self:PlayAnim(A.Jump, false) end
 	end
 end
 
--- Rappel animations that the NPC's model doesn't have come from an
--- animation-only model (ENT.RappelAnimModel, same skeleton): the NPC
--- switches to it for the way down and clients draw its own model on top
--- (bone-merged). on = true: switch, returns the sequence and its name, or
--- nil to use the Rappel loop instead. on = false: switch back.
-local rappelSeqs = {}
-function ENT:NGLRappelModel(on)
-	if not on then
-		local body = self.NGLBodyModel
-		if not body then return end
-		self.NGLBodyModel = nil
-		self:SetModel(body)
-		self:SetSkin(self.NGLBodySkin or 0)
-		local b = self.NGLBodyBounds
-		if b then self:SetCollisionBounds(b[1], b[2]) end
-		self:SetNGLBody("")
-		return
-	end
-	local list = self.Anims and self.Anims.RappelDrop or BASE_ANIMS.RappelDrop
-	if not list then return nil end
-	if type(list) ~= "table" then list = { list } end
-	local am = self.RappelAnimModel
-	local own = self:GetModel()
-	local key = am or own
-	if rappelSeqs[key] == false or am and not util.IsValidModel(am) then return nil end
-	if am then
-		self.NGLBodyModel, self.NGLBodySkin = own, self:GetSkin()
-		local mins, maxs = self:GetCollisionBounds()
-		self.NGLBodyBounds = { mins, maxs }
-		self:SetModel(am)
-		self:SetCollisionBounds(mins, maxs)
-		self:SetSkin(self.NGLBodySkin) -- clients draw the body with it
-	end
-	local found = rappelSeqs[key]
-	if found == nil then
-		found = false
-		for _, name in ipairs(list) do
-			if self:LookupSequence(name) >= 0 then found = name break end
+-- Where a scripted move (up, climb) has got to at time t.
+local function scriptedPos(T, t)
+	local from, to = T.from, T.to
+	local f = math.Clamp(t / T.dur, 0, 1)
+	if T.move == "up" then
+		-- Rise first, then forward over the edge and down onto it.
+		local top = math.max(from.z, to.z) + UP_CLEAR
+		local z
+		if f < 0.6 then
+			z = from.z + (top - from.z) * math.sin(f / 0.6 * math.pi * 0.5)
+		else
+			z = top + (to.z - top) * ((f - 0.6) / 0.4) ^ 2
 		end
-		rappelSeqs[key] = found
+		local g = f * f
+		return Vector(from.x + (to.x - from.x) * g, from.y + (to.y - from.y) * g, z)
 	end
-	if not found then
-		self:NGLRappelModel(false)
-		return nil
+	-- climb: up the wall then over the top, or over the edge then down.
+	local over = T.over / T.dur
+	local up = to.z >= from.z
+	local vf, hf
+	if up then
+		vf, hf = math.min(f / (1 - over), 1), math.max((f - (1 - over)) / over, 0)
+	else
+		hf, vf = math.min(f / over, 1), math.max((f - over) / (1 - over), 0)
 	end
-	if am then self:SetNGLBody(own) end
-	return self:LookupSequence(found), found
+	return Vector(from.x + (to.x - from.x) * hf, from.y + (to.y - from.y) * hf, from.z + (to.z - from.z) * vf)
 end
 
 function ENT:NGLTraverseUpdate(now)
@@ -593,27 +569,14 @@ function ENT:NGLTraverseUpdate(now)
 	local A = self.NGLActs
 	self.NGLMoving = false
 	local t = now - T.t0
-	if T.move == "rappel" then
-		local from, to = T.from, T.to
-		local p
-		if t < T.over then
-			local f = t / T.over
-			p = Vector(from.x + (to.x - from.x) * f, from.y + (to.y - from.y) * f, from.z)
-		else
-			local f = math.min((t - T.over) / (T.dur - T.over), 1)
-			f = f * f * (3 - 2 * f)
-			p = Vector(to.x, to.y, from.z + (to.z - from.z) * f)
-		end
-		if t >= T.dur then p = to end
-		self:SetPos(p)
+	if T.move == "up" or T.move == "climb" then
+		self:SetPos(t >= T.dur and T.to or scriptedPos(T, t))
 		self.loco:SetVelocity(Vector(0, 0, 0))
 		if t >= T.dur then
 			self.NGLTraverse = nil
-			self:NGLRappelModel(false)
-			self:SetNGLRope(vector_origin)
-			if A.Land then self:PlayAnim(A.Land, false) end
-		elseif not T.oneShot and A.Rappel and now >= (self.NGLAnimUntil or 0) then
-			self:PlayAnim(A.Rappel, false) -- keep the loop going
+			if A.Land and T.move == "up" then self:PlayAnim(A.Land, false) end
+		elseif T.anim and now >= (self.NGLAnimUntil or 0) then
+			self:PlayAnim(T.anim, false) -- keep the climb going
 		end
 		return
 	end
@@ -645,9 +608,6 @@ end
 function ENT:OnKilled(dmginfo)
 	if self.NGLDying then return end
 	self.NGLDying = true
-	-- Shot off the rope: back to its own model for the ragdoll.
-	if self.NGLBodyModel then self:NGLRappelModel(false) end
-	self:SetNGLRope(vector_origin)
 
 	hook.Run("OnNPCKilled", self, dmginfo:GetAttacker(), dmginfo:GetInflictor())
 	self:NGLSound("Death")

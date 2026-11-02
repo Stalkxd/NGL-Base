@@ -1,13 +1,17 @@
 -- NGL Nav Editor: fix the NGL nav grid by hand, like any other tool.
 --   Area mode:  left click adds walkable area round the spot (flood-filled
 --               within the radius), right click removes the grid there.
---   Link mode:  left click on a ledge, then left click where to land: NPCs
---               jump down there (or across, if it's level). Right click
---               removes jump links near the spot.
+--   Link mode:  left click where the jump starts, then left click where it
+--               lands: NPCs jump down there, up onto it (short ones), or
+--               across, if it's level. Right click removes links near the spot.
+--   Climb mode: left click the bottom, then the top (or the other way): NPCs
+--               that climb (ENT.Climb) go up and down there. Right click
+--               removes links near the spot.
 --   Reload:     undo the last edit.
--- The grid round you is drawn while the tool is out: blue walkable links,
--- yellow ledge drops, green gap jumps. Superadmins only. Edits are saved
--- per map and survive regenerating the grid (see sv_nav_edit.lua).
+-- The grid round you is drawn while the tool is out: open floor as filled
+-- squares, narrower walkable places as blue lines, yellow drops, orange
+-- jumps up, green gap jumps, purple climbs. Superadmins only. Edits are
+-- saved per map and survive regenerating the grid (see sv_nav_edit.lua).
 TOOL.Category = "NGL Base"
 TOOL.Name = "#tool.ngl_nav.name"
 TOOL.Command = nil
@@ -25,8 +29,8 @@ TOOL.Information = {
 if CLIENT then
 	language.Add("tool.ngl_nav.name", "NGL Nav Editor")
 	language.Add("tool.ngl_nav.desc", "Edit where NGL NPCs can walk and jump")
-	language.Add("tool.ngl_nav.left", "Area: add walkable area. Link: set jump start, then landing")
-	language.Add("tool.ngl_nav.right", "Area: remove area. Link: remove jump links here")
+	language.Add("tool.ngl_nav.left", "Area: add walkable area. Link / Climb: set the start, then the other end")
+	language.Add("tool.ngl_nav.right", "Area: remove area. Link / Climb: remove links here")
 	language.Add("tool.ngl_nav.reload", "Undo last edit")
 end
 
@@ -34,7 +38,8 @@ local function use(self, trace, button)
 	if CLIENT then return true end
 	local ply = self:GetOwner()
 	if not (NGL and NGL.Nav and NGL.Nav.ToolUse) then return false end
-	local mode = self:GetClientInfo("mode") == "link" and "link" or "area"
+	local mode = self:GetClientInfo("mode")
+	if mode ~= "link" and mode ~= "climb" then mode = "area" end
 	local radius = math.Clamp(self:GetClientNumber("radius", 160), 16, 1024)
 	return NGL.Nav.ToolUse(ply, mode, button, trace.HitPos, radius)
 end
@@ -59,11 +64,12 @@ if CLIENT then
 		panel:Help("Fix where NGL NPCs walk. The grid is made on its own for maps without one (ngl_nav_auto 0 turns that off). Edits are saved per map and kept when the grid is made again.")
 		local combo = panel:ComboBox("Mode", "ngl_nav_mode")
 		combo:AddChoice("Walkable area (add / remove)", "area")
-		combo:AddChoice("Jump links (ledge drops, gaps)", "link")
+		combo:AddChoice("Jump links (down, up, across gaps)", "link")
+		combo:AddChoice("Climb links (for climbing NPCs)", "climb")
 		panel:NumSlider("Radius", "ngl_nav_radius", 16, 1024, 0)
-		panel:Help("Blue: walkable. Yellow: drop down a ledge (small ones: everyone, big ones: Combine rappel). Green: jump across.")
+		panel:Help("Filled squares: open floor, NPCs walk straight across. Blue lines: narrower walkable places. Yellow: jump down. Orange: jump up. Green: jump across. Purple: climb.")
 		panel:Button("Generate the grid again", "ngl_nav_generate")
 		panel:Button("Remove all my edits", "ngl_nav_edit_clear")
-		panel:Help("Console: ngl_nav_auto 0/1, ngl_nav_drops 0/1, ngl_nav_max_drop, ngl_nav_spacing, ngl_nav_info")
+		panel:Help("Console: ngl_nav_auto 0/1, ngl_nav_drops 0/1, ngl_nav_max_drop, ngl_nav_max_up, ngl_nav_spacing, ngl_nav_info")
 	end
 end

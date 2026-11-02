@@ -40,14 +40,15 @@ ENT.Group = nil                 -- NPCs without ENT.Squad team up with allies of
 --                                 (these defaults when nil); false = always alone (zombies, animals).
 --                                 loose: members stand about near the leader and stroll after it;
 --                                 or "wedge", "line", "column" for a set formation
--- Jumping and doors (sv_nav.lua, sv_doors.lua). The nav grid links ledges
--- to the ground below; paths use the ones this NPC can take.
+-- Jumping, climbing and doors (sv_nav.lua, sv_doors.lua). The nav grid links
+-- ledges up and down; paths use the ones this NPC can take. Only short
+-- jumps: nobody leaps off a roof to get at you.
 ENT.JumpDown = 200              -- jumps down ledges up to this high (units); 0 = never
+ENT.JumpUp = 72                 -- jumps up onto ledges up to this high; 0 = never
 ENT.JumpGap = true              -- jumps across gaps (jump links placed with the NGL Nav Editor tool)
-ENT.Rappel = false              -- slides down a rope from higher ledges, up to RappelMax (Combine)
-ENT.RappelMax = 1000
-ENT.RappelAnimModel = nil       -- animation-only model with the RappelDrop animations, used just while roping down
-								-- (the Combine: models/ngl/combine_rappel.mdl); the NPC's own model is drawn on it
+ENT.Climb = 0                   -- climbs up and down climb links up to this high (placed with the tool;
+								-- for fast zombies, antlions and the like); 0 = never
+ENT.ClimbRate = 250             -- units per second up or down a climb
 ENT.OpenDoors = true            -- opens closed doors in its way
 ENT.DoorBreach = false          -- kicks doors in instead, locked ones too (Combine, rebels); see ngl_door_breach
 ENT.Squad = nil                 -- set to lead a squad on its own, see sv_squad.lua:
@@ -129,18 +130,17 @@ ENT.Anims = {
 	CrouchWalk = { ACT_WALK_CROUCH_AIM_RIFLE, ACT_WALK_CROUCH_RIFLE, ACT_WALK_CROUCH },
 	-- Full-body melee swing (see ENT.Melee).
 	Melee   = { ACT_MELEE_ATTACK1, ACT_MELEE_ATTACK_SWING },
-	-- Jumping down or across (nav links), rappelling (Rappel) and breaking a
-	-- door in (DoorBreach). Sequence names work too, like activities.
-	-- RappelDrop: one animation for the whole way down a rope (stepping off
-	-- the edge and sliding down), played to fit the drop; looked up on
-	-- ENT.RappelAnimModel when the NPC has one (the Combine), else on its
-	-- own model. Without one: the Rappel loop. Kick: HL2's Combine hit the
-	-- door with the rifle butt.
+	-- Jumping (nav links), climbing (ENT.Climb) and breaking a door in
+	-- (DoorBreach). Each NPC class can have its own: put your faction's
+	-- jump here. Sequence names work too, like activities. JumpUp: onto a
+	-- ledge (falls back to Jump). Kick: HL2's Combine hit the door with the
+	-- rifle butt.
 	Jump    = { "jump_holding_jump", ACT_JUMP },
+	JumpUp  = { "jump_holding_jump", ACT_JUMP },
 	Glide   = { "jump_holding_glide", ACT_GLIDE },
 	Land    = { "jump_holding_land", ACT_LAND },
-	Rappel  = { "rappelloop", ACT_RAPPEL_LOOP },
-	RappelDrop = { "Rappel_b", "Rappel_c", "Rappel_f" },
+	ClimbUp   = { ACT_CLIMB_UP },
+	ClimbDown = { ACT_CLIMB_DOWN, ACT_CLIMB_UP },
 	Kick    = { ACT_MELEE_ATTACK1, ACT_MELEE_ATTACK_SWING },
 	-- Squad leader hand signals (see ENT.Squad): an upper-body gesture when
 	-- the model has one, otherwise the full-body signal while standing.
@@ -200,8 +200,4 @@ ENT.Anims = {
 
 function ENT:SetupDataTables()
 	self:NetworkVar("Bool", 0, "NGLDead")
-	-- While roping down: the NPC's own model (drawn on the rappel animation
-	-- model) and the top of the rope.
-	self:NetworkVar("String", 0, "NGLBody")
-	self:NetworkVar("Vector", 1, "NGLRope")
 end
