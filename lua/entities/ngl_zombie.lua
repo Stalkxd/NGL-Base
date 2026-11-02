@@ -14,6 +14,9 @@ ENT.SightRange = 3000
 ENT.EyeHeight = 60
 ENT.WanderRadius = 300
 ENT.Group = false               -- zombies shamble alone, no formations
+ENT.JumpDown = 250              -- drops off ledges, but doesn't jump gaps or open doors
+ENT.JumpGap = false
+ENT.OpenDoors = false
 
 ENT.WeaponModel = false
 ENT.Weapon = false

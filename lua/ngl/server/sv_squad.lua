@@ -469,23 +469,22 @@ function Squad.AutoGroup(npc, now, pos)
 	end
 	if type(cfg) ~= "table" then cfg = GROUP_DEFAULT end
 	local faction = npc.Faction
-	local best, bestD
+	-- A group nearby with room comes first, so allies end up in one group
+	-- rather than pairing off; otherwise start one with the nearest loner.
+	local best, bestD, lone, loneD
 	local found = NGL.FindInRadius(pos, cfg.Radius or 800, function(e)
 		return e ~= npc and e.Faction == faction and e.Group ~= false and not e.IsVehicleNPC and alive(e)
 	end)
 	for _, e in ipairs(found) do
 		local esq = e.NGLSquad
-		local ok
+		local d = pos:DistToSqr(e:GetPos())
 		if esq then
-			ok = esq.auto and esq.leader ~= nil and not esq:IsFull()
-		else
-			ok = not e.Squad
-		end
-		if ok then
-			local d = pos:DistToSqr(e:GetPos())
-			if not bestD or d < bestD then best, bestD = e, d end
+			if esq.auto and esq.leader ~= nil and not esq:IsFull() and (not bestD or d < bestD) then best, bestD = e, d end
+		elseif not e.Squad and (not loneD or d < loneD) then
+			lone, loneD = e, d
 		end
 	end
+	best = best or lone
 	if not best then return end
 	if best.NGLSquad then
 		best.NGLSquad:Add(npc)
@@ -493,6 +492,7 @@ function Squad.AutoGroup(npc, now, pos)
 		local bcfg = type(best.Group) == "table" and best.Group or cfg
 		local s = NGL.NewSquad(best, bcfg.Max or 6)
 		s.auto = true
+		s.formation = bcfg.Formation or "loose" -- ordinary NPCs: a loose group, not a formation
 		s:Add(npc)
 	end
 end

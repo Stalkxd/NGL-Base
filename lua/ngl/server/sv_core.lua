@@ -250,6 +250,58 @@ local function alertAllies(npc, pos, now)
 	end
 end
 
+-- Crowding: another NPC right in the way of where we walk. Walk round it,
+-- keeping right (two meeting head on both keep right and slide past), and
+-- if it's just standing there it steps aside the other way. Uses the grid
+-- and positions from each NPC's last think: no extra traces, nothing for
+-- NPCs that aren't moving. BehaveUpdate bends the steering (NGLSep) and
+-- walks the one standing aside (NGLPush) for a moment.
+local CROWD_R = 90
+local function radiusOf(e) local h = e.Hull return h and h[2].x or 18 end
+
+local function crowdCheck(npc, now, pos)
+	local g = npc.NGLSteer
+	if not (g and npc.NGLMoving) or npc.IsVehicleNPC then return end
+	local dx, dy = g.x - pos.x, g.y - pos.y
+	local l = math.sqrt(dx * dx + dy * dy)
+	if l < 8 then return end
+	dx, dy = dx / l, dy / l
+	local look = math.min(CROWD_R, l + 16)
+	local myR = radiusOf(npc)
+	local best, bestA, bestS, bestW
+	local x0, x1 = floor((pos.x - CROWD_R) / CELL) + OFFSET, floor((pos.x + CROWD_R) / CELL) + OFFSET
+	local y0, y1 = floor((pos.y - CROWD_R) / CELL) + OFFSET, floor((pos.y + CROWD_R) / CELL) + OFFSET
+	for x = x0, x1 do
+		local base = x * 4096
+		for y = y0, y1 do
+			local c = cells[base + y]
+			if c then
+				for e in pairs(c) do
+					local p = e.NGLGridPos
+					if p and e ~= npc and not e.NGLDying then
+						local ox, oy = p.x - pos.x, p.y - pos.y
+						local along = ox * dx + oy * dy
+						local w = myR + radiusOf(e) + 8
+						if along > 0 and along < look + w and (not bestA or along < bestA) then
+							local side = oy * dx - ox * dy -- > 0: left of our line
+							if side < w and side > -w then best, bestA, bestS, bestW = e, along, side, w end
+						end
+					end
+				end
+			end
+		end
+	end
+	if not best then return end
+	local s = bestS >= 0 and -1 or 1 -- which way we go: -1 right, 1 left
+	npc.NGLSep = { x = -dy * s, y = dx * s, w = bestW, untilT = now + 0.7 }
+	if not best.NGLMoving and not best.IsVehicleNPC and best.NGLEnemy == nil and not best.NGLAnimUntil
+		and now >= (best.NGLPushUntil or 0) then
+		best.NGLPush = { x = dy * s, y = -dx * s, untilT = now + 0.8 }
+		best.NGLPushUntil = now + 1.5
+	end
+end
+Core.CrowdCheck = crowdCheck
+
 -- NGL NPCs within `radius` of `pos` for which `filter(npc)` is true (all
 -- if no filter). Uses the spatial grid, so it only looks at nearby cells.
 function Core.FindInRadius(pos, radius, filter)
@@ -572,7 +624,7 @@ local function chase(npc, now, pos, tPos, visible)
 		end
 	end, function()
 		return IsValid(npc) and npc.NGLPathReq == req
-	end, npc.NavWidth)
+	end, npc.NavWidth, npc.NGLNavCaps)
 	if npc.NGLPathPending and not npc.NGLPath then
 		npc.NGLGoal = (not forcePath) and tPos or nil
 	end
@@ -812,6 +864,9 @@ local FOLLOW_OK_SQR = 120 * 120   -- close enough to our slot: stand
 local FOLLOW_RUN_SQR = 500 * 500  -- this far behind: run to catch up
 
 local FORMATIONS = {
+	-- loose: no set places (Core.Follow below): the group of ordinary NPCs
+	-- that teamed up on their own. This is only its fallback shape.
+	loose = function(slot, row, side) return SLOT_BACK * row * 1.5, SLOT_SIDE * row * side * 1.5 end,
 	wedge = function(slot, row, side) return SLOT_BACK * row, SLOT_SIDE * row * side end,
 	line = function(slot, row, side) return 40, SLOT_SIDE * row * side end,
 	column = function(slot, row, side) return SLOT_BACK * 0.8 * slot, 24 * side end,
@@ -829,11 +884,46 @@ function Core.SlotPos(leader, slot, formation)
 	return Vector(lp.x + fx * back - fy * lat, lp.y + fy * back + fx * lat, lp.z)
 end
 
+-- Loose group: each member picks its own spot somewhere round the leader
+-- and stays there, looking about, until the leader has moved off; then it
+-- strolls after it to a new spot. No set places, no turning with the leader.
+local LOOSE_MIN, LOOSE_MAX = 90, 240
+local LOOSE_LEAVE_SQR = 380 * 380 -- leader this far from where we settled: follow
+local LOOSE_OK_SQR = 60 * 60
+
+local function followLoose(npc, now, pos, sq, leader)
+	local lp = leader:GetPos()
+	local L = npc.NGLLoose
+	if not L or L.sq ~= sq or lp:DistToSqr(L.anchor) > LOOSE_LEAVE_SQR then
+		-- Not straight away when the leader sets off: people don't move as one.
+		if L and L.sq == sq and not L.waitT then L.waitT = now + Rand(0.3, 2) end
+		if L and L.waitT and now < L.waitT then return true end
+		local goal, raw
+		for _ = 1, 3 do
+			local a, d = Rand(0, 2 * math.pi), Rand(LOOSE_MIN, LOOSE_MAX)
+			raw = Vector(lp.x + math.cos(a) * d, lp.y + math.sin(a) * d, lp.z)
+			goal = Core.GridSpot(raw)
+			if goal then break end
+		end
+		L = { sq = sq, anchor = lp, goal = goal or raw } -- off the grid: walk there straight
+		npc.NGLLoose = L
+	end
+	local dSqr = pos:DistToSqr(L.goal)
+	if dSqr < LOOSE_OK_SQR then
+		if npc.NGLGoal or npc.NGLPath or npc.NGLPathPending then stopMoving(npc) end
+		return true
+	end
+	npc:NGLSetMoveMode(dSqr > 700 * 700 and "run" or "walk")
+	chase(npc, now, pos, L.goal, dSqr < 400 * 400)
+	return true
+end
+
 -- Returns true when it moved the NPC (or kept it in place) as a follower.
 function Core.Follow(npc, now, pos, sq)
 	local leader = sq.leader
 	local slot = sq.slots[npc]
 	if not (slot and IsValid(leader) and leader ~= npc) or leader.NGLDying then return false end
+	if sq.formation == "loose" then return followLoose(npc, now, pos, sq, leader) end
 	local goal = Core.SlotPos(leader, slot, sq.formation)
 	local dSqr = pos:DistToSqr(goal)
 	if dSqr < FOLLOW_OK_SQR then
@@ -1004,6 +1094,13 @@ local function think(npc, now, dt, nearestPlayerSqr)
 
 	local pos = npc:GetPos()
 	gridUpdate(npc, pos)
+	npc.NGLGridPos = pos
+	if not npc.NGLTraverse then
+		crowdCheck(npc, now, pos)
+		-- A closed door in the way: open it or kick it in (sv_doors.lua).
+		local D = NGL.Doors
+		if D and npc.NGLMoving and (npc.OpenDoors or npc.DoorBreach) then D.Think(npc, now, pos) end
+	end
 
 	-- Squad leaders (ENT.Squad): recruiting and commanding, twice a second.
 	if npc.Squad then NGL.Squad.LeaderThink(npc, now, pos) end
