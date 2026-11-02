@@ -389,13 +389,15 @@ function Squad.LeaderThink(npc, now, pos)
 	local sq = npc.NGLSquad
 	if sq and sq.leader ~= npc then return end -- someone else leads us
 
+	-- A leader always has a squad, even alone (it may call reinforcements).
+	sq = sq or NGL.NewSquad(npc, cfg.Max or 10)
+
 	if now >= (npc.NGLNextRecruit or 0) then
 		npc.NGLNextRecruit = now + 2
 		if not sq or not sq:IsFull() then
 			local found = NGL.FindInRadius(pos, cfg.RecruitRadius or 1500, recruitable(npc, cfg))
 			if #found > 0 then
 				table.sort(found, function(a, b) return pos:DistToSqr(a:GetPos()) < pos:DistToSqr(b:GetPos()) end)
-				sq = sq or NGL.NewSquad(npc, cfg.Max or 10)
 				for _, e in ipairs(found) do
 					if sq:IsFull() then break end
 					sq:Add(e)
@@ -406,6 +408,7 @@ function Squad.LeaderThink(npc, now, pos)
 
 	if sq then
 		scanAssets(npc, now, pos, sq, cfg)
+		if cfg.Reinforce and NGL.Reinforce then NGL.Reinforce.Think(npc, now, sq, cfg) end
 		lostTarget(npc, now, sq, cfg)
 		-- A packed group around our target: call in the vehicles.
 		local e = npc.NGLEnemy

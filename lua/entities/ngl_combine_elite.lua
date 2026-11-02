@@ -38,6 +38,10 @@ ENT.Squad = {
 	LostDelay = 2,
 	CommandRadius = 3000,              -- APCs (ENT.Commandable) this close take its orders
 	FireSupportDelay = 12,             -- s between rocket barrages it calls in
+	-- Down to 3 soldiers or fewer in a fight: a dropship with 6 more, or 4
+	-- on foot from out of sight on maps with no open sky (sv_reinforce.lua;
+	-- ngl_reinforce_limit, ngl_reinforce_cooldown, ngl_dropship_max).
+	Reinforce = { Ship = "ngl_dropship", Cargo = "ngl_combine_soldier", Count = 6, OnFootCount = 4, When = 3 },
 }
 
 local VO = "npc/combine_soldier/vo/"
@@ -48,6 +52,7 @@ ENT.Sounds = {
 	Search = { VO .. "sweepingin.wav", VO .. "motioncheckallradials.wav" },
 	Engage = { VO .. "movein.wav", VO .. "gosharp.wav" },
 	StandDown = { VO .. "reportingclear.wav", VO .. "thatsitwrapitup.wav" },
+	Reinforce = VO .. "overwatchrequestreinforcement.wav",
 	CallFire = { VO .. "callhotpoint.wav", VO .. "prosecuting.wav" }, -- ordering the APC to fire
 	Pain = { "npc/combine_soldier/pain1.wav", "npc/combine_soldier/pain2.wav", "npc/combine_soldier/pain3.wav" },
 	Death = { "npc/combine_soldier/die1.wav", "npc/combine_soldier/die2.wav", "npc/combine_soldier/die3.wav" },
