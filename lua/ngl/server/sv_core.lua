@@ -825,6 +825,9 @@ local function think(npc, now, dt, nearestPlayerSqr)
 	local pos = npc:GetPos()
 	gridUpdate(npc, pos)
 
+	-- Squad leaders (ENT.Squad): recruiting and commanding, twice a second.
+	if npc.Squad then NGL.Squad.LeaderThink(npc, now, pos) end
+
 	-- Stuck (not moved 16 units in 2 s while trying to): drop the path and
 	-- strafe goal so the next decision starts fresh.
 	if npc.NGLGoal or npc.NGLPath then

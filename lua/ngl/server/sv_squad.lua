@@ -167,6 +167,184 @@ function Squad:Contact(from, pos, now)
 end
 
 ----------------------------------------------------------------------------
+-- Leaders: any NGL NPC with ENT.Squad set leads a squad on its own.
+--
+--   ENT.Squad = {
+--   	Max = 10,                 -- squad size, leader included
+--   	Recruit = { "ngl_combine_soldier" }, -- classes it takes (nil = any ally)
+--   	RecruitRadius = 1500,
+--   	Scouts = 3,               -- sent to search when the target is lost
+--   	ScoutRadius = 400, ScoutTime = 20,
+--   	LostDelay = 2,            -- s out of sight before the squad halts
+--   }
+--
+-- Runs inside the leader's think at most twice a second: recruiting, and the
+-- lost-target drill (halt, then send scouts, then engage or stand down).
+-- Hand signals (ENT:NGLSignal) and voice lines (Sounds.Halt, .Search,
+-- .Engage, .StandDown) go with each step; members act half a second after
+-- the signal so players see it first.
+----------------------------------------------------------------------------
+
+local LEAD_RATE = 0.5
+local SIGNAL_DELAY = 0.5
+local recruitSets = setmetatable({}, { __mode = "k" })
+
+local function recruitable(leader, cfg)
+	local set = cfg.Recruit and recruitSets[cfg]
+	if cfg.Recruit and not set then
+		set = {}
+		for _, c in ipairs(cfg.Recruit) do set[c] = true end
+		recruitSets[cfg] = set
+	end
+	return function(e)
+		return e ~= leader and e.IsNGLNPC and not e.Squad and alive(e)
+			and (e.NGLSquad == nil or e.NGLSquad.leader == nil)
+			and NGL.GetRelation(e.Faction, leader.Faction) == D_LI
+			and (not set or set[e:GetClass()])
+	end
+end
+
+local function signal(npc, kind)
+	if npc.NGLSignal then npc:NGLSignal(kind) end
+	npc:NGLSound(kind)
+end
+
+-- Something to do SIGNAL_DELAY after a hand signal (one at a time).
+local function later(npc, now, fn)
+	npc.NGLLeadAction = { at = now + SIGNAL_DELAY, fn = fn }
+end
+
+-- Everyone (leader too) drops their orders and fights `enemy`.
+local function engage(npc, sq, enemy, now)
+	npc.NGLLost = nil
+	npc.NGLLeadAction = nil
+	signal(npc, "Engage")
+	local Core = NGL.Core
+	local ePos = IsValid(enemy) and enemy:GetPos()
+	for _, m in ipairs(sq:Prune()) do
+		if m.NGLOrder then Core.EndOrder(m, "cleared") end
+		if ePos and Core.IsHostile(m, enemy) then
+			Core.SetEnemy(m, enemy)
+			m.NGLLastSeenPos, m.NGLLastSeenT = ePos, now
+		end
+	end
+end
+
+-- Nothing found: orders off, forget the target, back into formation.
+local function standDown(npc, sq, lost)
+	npc.NGLLost = nil
+	npc.NGLLeadAction = nil
+	signal(npc, "StandDown")
+	local Core = NGL.Core
+	for _, m in ipairs(sq:Prune()) do
+		if m.NGLOrder then Core.EndOrder(m, "cleared") end
+		if m.NGLEnemy == lost and not m.NGLEnemyVisible then Core.SetEnemy(m, nil) end
+	end
+end
+
+-- Any member looking at a hostile right now?
+local function anyoneSees(sq)
+	for _, m in ipairs(sq.members) do
+		local e = m.NGLEnemy
+		if e and m.NGLEnemyVisible and IsValid(e) and not e.NGLDying and e:Health() > 0 then return e end
+	end
+end
+
+local function lostTarget(npc, now, sq, cfg)
+	local L = npc.NGLLost
+	if not L then
+		local e = npc.NGLEnemy
+		if not IsValid(e) then return end
+		if npc.NGLEnemyVisible then
+			npc.NGLLostFor = nil -- seen again: the drill may run again later
+			return
+		end
+		if npc.NGLLostFor == e or now - (npc.NGLLastSeenT or now) < (cfg.LostDelay or 2) then return end
+		if #sq:Prune() < 2 then return end
+		if anyoneSees(sq) then return end -- someone still has eyes on it
+		npc.NGLLostFor = e
+		local last = npc.NGLLastSeenPos or e:GetPos()
+		L = { enemy = e, last = last, stage = "halt", at = now + 1.5 }
+		npc.NGLLost = L
+		signal(npc, "Halt")
+		local hold = (cfg.ScoutTime or 20) + 6
+		later(npc, now, function()
+			if npc.NGLLost ~= L then return end
+			sq:Order("everyone", { kind = "hold", face = last, time = hold })
+		end)
+		return
+	end
+
+	-- Contact while halted or searching: everyone fights.
+	local seen = anyoneSees(sq)
+	if seen then return engage(npc, sq, seen, now) end
+
+	if L.stage == "halt" then
+		if now < L.at then return end
+		L.stage = "search"
+		L.giveUp = now + (cfg.ScoutTime or 20) + 5
+		signal(npc, "Search")
+		later(npc, now, function()
+			if npc.NGLLost ~= L then return end
+			local scouts = sq:Nearest(L.last, cfg.Scouts or 3)
+			L.left = #scouts
+			for _, sc in ipairs(scouts) do
+				sc:GiveOrder({
+					kind = "search", pos = L.last, radius = cfg.ScoutRadius or 400, time = cfg.ScoutTime or 20,
+					onDone = function(s, _, reason)
+						if npc.NGLLost ~= L or not IsValid(npc) then return end
+						if reason == "contact" then
+							engage(npc, sq, s.NGLEnemy, CurTime())
+						elseif reason ~= "replaced" then
+							L.left = L.left - 1
+							if L.left <= 0 then standDown(npc, sq, L.enemy) end
+						end
+					end,
+				})
+			end
+			if L.left == 0 then standDown(npc, sq, L.enemy) end
+		end)
+	elseif L.stage == "search" and now > L.giveUp then
+		standDown(npc, sq, L.enemy)
+	end
+end
+
+function Squad.LeaderThink(npc, now, pos)
+	if now < (npc.NGLNextLead or 0) then return end
+	npc.NGLNextLead = now + LEAD_RATE
+	local cfg = npc.Squad
+
+	local act = npc.NGLLeadAction
+	if act and now >= act.at then
+		npc.NGLLeadAction = nil
+		act.fn()
+	end
+
+	local sq = npc.NGLSquad
+	if sq and sq.leader ~= npc then return end -- someone else leads us
+
+	if now >= (npc.NGLNextRecruit or 0) then
+		npc.NGLNextRecruit = now + 2
+		if not sq or not sq:IsFull() then
+			local found = NGL.FindInRadius(pos, cfg.RecruitRadius or 1500, recruitable(npc, cfg))
+			if #found > 0 then
+				table.sort(found, function(a, b) return pos:DistToSqr(a:GetPos()) < pos:DistToSqr(b:GetPos()) end)
+				sq = sq or NGL.NewSquad(npc, cfg.Max or 10)
+				for _, e in ipairs(found) do
+					if sq:IsFull() then break end
+					sq:Add(e)
+				end
+			end
+		end
+	end
+
+	if sq then
+		lostTarget(npc, now, sq, cfg)
+		if npc.OnLeaderThink then npc:OnLeaderThink(sq, now) end
+	end
+end
+
+----------------------------------------------------------------------------
 -- Test commands (superadmin): group, order and inspect squads in game.
 ----------------------------------------------------------------------------
 

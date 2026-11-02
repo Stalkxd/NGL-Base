@@ -8,7 +8,7 @@ An NPC base for Garry's Mod built for large battles (100+ NPCs) with minimal ser
 2. **NPC base core** (done). Central scheduler with a CPU budget, distance-based think rate, spatial grid, factions and a modding API. `ngl_combine_soldier` holds **1250** NPCs at 67 tick in the typical case (one player watching) and **800** in the worst case (every NPC thinking at 10 Hz and firing real bullets). Stock `npc_combine_s`: 200.
 3. **Custom navigation** (done). Our own walk grid generated per map (no navmesh, no AI nodes), path-finding spread over ticks under a CPU budget, shared and cached paths.
 3a. **Behaviour, animation and modding** (done). Weapon animations with level of detail, wandering, alerts, enemy memory; melee, entity-free projectiles, voice lines, and building blocks for custom behaviour. `ngl_combine_soldier` holds **800** at 67 tick with full animations (v0.4.1).
-3b. **Squads, elite Combine, APC and dropship** (in progress). Squads and orders (v0.6.0); next the elite Combine squad leader, the APC, flying navigation and the dropship.
+3b. **Squads, elite Combine, APC and dropship** (in progress). Squads and orders (v0.6.0), squad leaders and the elite Combine (v0.7.0); next the APC, flying navigation and the dropship.
 4. **Battle test.** Two teams of 100+ soldiers on several maps, singleplayer and dedicated server, tuned against the target.
 
 **Target:** 300 NGL NPCs with real combat AI holding 67 tick (under 1% late ticks, `ngl_bench_limit`) on a local dedicated server on a normal PC. That's 3x the 100 goal, so weaker servers still manage 100+.
@@ -50,6 +50,7 @@ Every field, hook and building block is documented in `lua/entities/ngl_base/sha
 - `ngl_combine_soldier`: SMG plus a rifle-butt melee, voice lines.
 - `ngl_rebel`: random faces, male and female voices via `SoundsByModel`, friendly to players.
 - `ngl_zombie`: melee only, no code at all.
+- `ngl_combine_elite`: the first hard NPC. Super soldier model, AR2, tougher and more accurate, and leads up to 9 Combine soldiers with hand signals (`ENT.Squad`, see Squads and orders). Still no code beyond fields.
 
 ### Attacks
 
@@ -132,6 +133,23 @@ for _, ally in ipairs(leader:GetAllies(1500)) do sq:Add(ally) end
 sq:Order(sq:Nearest(lastSeen, 3), { kind = "search", pos = lastSeen, time = 20 })
 ```
 
+**Leaders.** Any NPC with `ENT.Squad` set leads a squad on its own, twice a second inside its think:
+
+```lua
+ENT.Squad = {
+	Max = 10,                            -- squad size, leader included
+	Recruit = { "ngl_combine_soldier" }, -- classes it takes (nil = any ally)
+	RecruitRadius = 1500,
+	Scouts = 3, ScoutRadius = 400, ScoutTime = 20,
+	LostDelay = 2,                       -- s out of sight before the squad halts
+}
+```
+
+- **Recruiting:** every 2 seconds, until full, it takes the nearest allies of those classes that have no leader.
+- **Target lost, not killed:** after `LostDelay` seconds with nobody in the squad seeing it, the leader signals halt and the whole squad holds, crouched, watching the last seen spot. 1.5 seconds later it signals forward and sends the `Scouts` nearest soldiers to search there. If anyone sees the enemy, the leader signals advance and everyone engages. If the scouts find nothing, it signals regroup and the squad forgets the target and falls back into formation.
+- **Signals and voice:** hand signals come from `Anims.SignalHalt`, `SignalSearch`, `SignalEngage` and `SignalStandDown` (an upper-body gesture when the model has one, else the full-body signal while standing). Voice lines come from `Sounds.Halt`, `Search`, `Engage` and `StandDown`. Members act half a second after the signal, so players see it first.
+- `OnLeaderThink(squad, now)` runs at the same rate for your own commands.
+
 Testing in game (superadmin): `ngl_squad_make [size]` makes the NGL NPC you look at lead the nearest allies; `ngl_squad_order <hold|move|search|fire_at> [n]` orders that squad (or only the `n` nearest) at the spot you look at; `ngl_squad_info` lists squads.
 
 ### Behaviour
@@ -143,7 +161,7 @@ Testing in game (superadmin): `ngl_squad_make [size]` makes the NGL NPC you look
 - **Animations:** idle, alert idle, walk, run, aimed walk and aimed run, crouched idle, aim and walk picked per state; firing, reload and flinch gestures; upper body aims at the enemy. Strafing keeps the body on the target while the legs swing smoothly (every tick, eased) to the direction of travel, anywhere a player can see the NPC (`ngl_ai_visual_range`); standing or crouched, the upper body aims and the feet stay planted until the target is more than 45° off; running always faces where the NPC goes, with the gun raised only when the target is ahead. Walk/run cycles play at the speed the NPC actually moves. Models without crouch animations simply don't crouch. See the level of detail below.
 - **Animation level of detail:** within `ngl_anim_detail_range` (1500) of a player, NPCs get everything above. Further out they play only the plain idle, walk and run cycles: no aim pose, no gestures, no aimed variants with their extra aim layers, and their poses are reset once when they leave the range. This saves server time and, more importantly, drawing time on every client. Clients also skip drawing NPC weapons beyond `ngl_cl_weapon_range` (4000, client setting; 0 = always).
 
-Examples shipped: `ngl_combine_soldier` and `ngl_rebel` (NPC tab, category "NGL Base").
+Examples shipped: `ngl_combine_soldier`, `ngl_combine_elite`, `ngl_rebel` and `ngl_zombie` (NPC tab, category "NGL Base").
 
 ### How the core keeps it cheap
 

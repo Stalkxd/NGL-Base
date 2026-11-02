@@ -31,6 +31,9 @@ ENT.AttackRange = 1200          -- closer than this it stops chasing and fights
 ENT.EyeHeight = 64
 ENT.CrouchEyeHeight = 40
 ENT.CrouchChance = 0.35         -- chance, each time it picks a new spot while fighting, to crouch and hold position instead; 0 = never
+ENT.Squad = nil                 -- set to lead a squad on its own, see sv_squad.lua:
+--                                 { Max = 10, Recruit = { "ngl_combine_soldier" }, RecruitRadius = 1500,
+--                                   Scouts = 3, ScoutRadius = 400, ScoutTime = 20, LostDelay = 2 }
 ENT.OrderKinds = nil            -- { mykind = true }: extra order kinds this NPC runs itself (in OnAIThink)
 ENT.EnemyMemory = 8             -- seconds it keeps hunting an enemy it can't see (heads to where it last saw it)
 ENT.AlertRadius = 1500          -- allies this close with nothing to do come to help when it spots an enemy; 0 = never
@@ -100,6 +103,12 @@ ENT.Anims = {
 	CrouchWalk = { ACT_WALK_CROUCH_AIM_RIFLE, ACT_WALK_CROUCH_RIFLE, ACT_WALK_CROUCH },
 	-- Full-body melee swing (see ENT.Melee).
 	Melee   = { ACT_MELEE_ATTACK1, ACT_MELEE_ATTACK_SWING },
+	-- Squad leader hand signals (see ENT.Squad): an upper-body gesture when
+	-- the model has one, otherwise the full-body signal while standing.
+	SignalHalt      = { ACT_GESTURE_SIGNAL_HALT, ACT_SIGNAL_HALT },
+	SignalSearch    = { ACT_GESTURE_SIGNAL_FORWARD, ACT_SIGNAL_FORWARD },
+	SignalEngage    = { ACT_GESTURE_SIGNAL_ADVANCE, ACT_SIGNAL_ADVANCE },
+	SignalStandDown = { ACT_GESTURE_SIGNAL_GROUP, ACT_SIGNAL_GROUP },
 }
 
 ----------------------------------------------------------------------------
@@ -127,6 +136,7 @@ ENT.Anims = {
 --                                   yourself (it is not stored)
 -- ENT:OnOrderDone(order, reason)    an order ended ("timeout", "done",
 --                                   "contact", "replaced", "cleared")
+-- ENT:OnLeaderThink(squad, now)     squad leaders (ENT.Squad), twice a second
 --
 -- Building blocks (server; call them from hooks, see the end of init.lua):
 --   Movement:  self:MoveTo(pos, run)  self:StopMoving()  self:IsMoving()
@@ -142,6 +152,7 @@ ENT.Anims = {
 --   Sound:     self:Speak(kindOrPath)
 --   State:     self:IsNearPlayer()  self:IsDetailed()  self:IsBusy()
 --   Orders:    self:GiveOrder(order)  self:GetOrder()  self:ClearOrder()
+--   Signals:   self:NGLSignal("Halt" | "Search" | "Engage" | "StandDown")
 --   Squads:    self:MakeSquad(max)  self:GetSquad()  self:IsSquadLeader()
 --              self:LeaveSquad()  squad:Add(npc)  squad:Order(who, order)
 --              squad:Nearest(pos, n)  squad:Members()  NGL.NewSquad(leader, max)
