@@ -44,7 +44,8 @@ ENT.IsVehicleNPC = true
 ENT.BulletDamageScale = 0.15    -- bullets, clubs and claws barely scratch it
 ENT.Hull = { Vector(-80, -80, 0), Vector(80, 80, 96) }
 ENT.WaypointRadius = 120        -- a car can't hit path points exactly
-ENT.JumpDown = 0                -- no jumping, rappelling or doors for a car
+ENT.JumpDown = 0                -- no jumping or doors for a car
+ENT.JumpUp = 0
 ENT.JumpGap = false
 ENT.OpenDoors = false
 

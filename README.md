@@ -10,7 +10,8 @@ An NPC base for Garry's Mod built for large battles (100+ NPCs) with minimal ser
 3a. **Behaviour, animation and modding** (done). Weapon animations with level of detail, wandering, alerts, enemy memory; melee, entity-free projectiles, voice lines, and building blocks for custom behaviour. `ngl_combine_soldier` holds **800** at 67 tick with full animations (v0.4.1).
 3b. **Squads, elite Combine, APC and dropship** (done). Squads and orders (v0.6.0), squad leaders and the elite Combine (v0.7.0), the APC with fire support from the elite (v0.8.0), flying navigation and the dropship bringing reinforcements (v0.9.0), the dropship carrying an APC (v0.10.0).
 3c. **AI modes and groups** (done, v0.14.0). Four fighting styles modders can pick or extend, NPCs teaming up on their own, idle pauses, the APC following hills and patrolling.
-3d. **Getting around** (done, v0.15.0). NPCs slide past each other instead of stopping, loose groups, jumping down ledges and Combine rappelling, doors opened or kicked in, the nav grid made on its own and editable with a tool, and an APC that sits on its wheels and gets itself off walls.
+3d. **Getting around** (done, v0.15.0). NPCs slide past each other instead of stopping, loose groups, jumping down ledges, doors opened or kicked in, the nav grid made on its own and editable with a tool, and an APC that sits on its wheels and gets itself off walls.
+3e. **Finer grid, jumps and NPC tools** (done, v0.16.0). The grid gets into narrow halls and doorways, open floor is walked straight across, ledges are jumped up and down instead of walked into, climb links for climbing NPCs, and tools to watch NPCs and send them somewhere.
 4. **Battle test.** Two teams of 100+ soldiers on several maps, singleplayer and dedicated server, tuned against the target.
 
 **Target:** 300 NGL NPCs with real combat AI holding 67 tick (under 1% late ticks, `ngl_bench_limit`) on a local dedicated server on a normal PC. That's 3x the 100 goal, so weaker servers still manage 100+.
@@ -191,7 +192,8 @@ Testing in game (superadmin): `ngl_squad_make [size]` makes the NGL NPC you look
 
 - **Idle:** strolls around its home spot (where it spawned or last fought) at walking pace with relaxed weapon animations, then stands a while (`WanderDelay`, 4 to 10 s) and looks around now and then before the next stroll (`WanderRadius`, `WalkSpeed`; `WanderRadius = 0` stands still). Group members hang about near their leader.
 - **Crowds:** an NPC with another one right in its way (within 90 units ahead, closer than their two widths to its line) bends round it, keeping right, so two meeting head on slide past each other instead of stopping. One standing in the way steps aside the other way for a moment. It uses the spatial grid and positions from each NPC's last think: no traces, nothing for NPCs that aren't moving.
-- **Ledges:** paths can jump down ledges up to `ENT.JumpDown` (200; zombies 250) and across gaps (`ENT.JumpGap`), with the engine's jump and the `Jump`, `Glide` and `Land` animations (HL2's `jump_holding_*`). With `ENT.Rappel` (Combine) higher drops, up to `RappelMax` (1000), are roped down: a rope (GMod's rope texture) hangs from the edge, and the NPC steps out over it and slides down holding it, with one `RappelDrop` animation for the whole way (the Combine's come with NGL, see below; played faster or slower to fit the drop), or the `Rappel` loop (HL2's `rappelloop`) for NPCs without one. Animations a model doesn't have can come from an animation-only model with the same skeleton (`ENT.RappelAnimModel`): the NPC uses it just while it's on the rope and clients draw its own model on it. `ENT.JumpDown = 0` and `JumpGap = false` keep an NPC off them (the APC).
+- **Ledges:** only short jumps, so nobody leaps off a roof to get at you. Paths jump down ledges up to `ENT.JumpDown` (200; zombies 250), up onto ledges up to `ENT.JumpUp` (72; zombies 0) and across gaps (`ENT.JumpGap`). Down and across use the engine's jump with the `Jump`, `Glide` and `Land` animations; up is a short hop that rises first and then goes over the edge (`JumpUp`, then `Land`). Each NPC class can have its own jump animations in its `ENT.Anims` (HL2's `jump_holding_*` by default), so factions can jump differently. `ENT.JumpDown = 0`, `JumpUp = 0` and `JumpGap = false` keep an NPC off them (the APC).
+- **Climbing:** `ENT.Climb` (0 = never) lets an NPC climb up and down climb links up to that high, placed with the NGL Nav Editor: straight up the wall and over the top, or over the edge and down, at `ENT.ClimbRate` units a second with the `ClimbUp` and `ClimbDown` animations. Meant for fast zombies, antlions and the like (none ship yet). Climbers can also climb ledges too high for them to jump.
 - **Doors:** a closed door in the way is opened (`ENT.OpenDoors`, on for people, off for zombies and the APC), or kicked in, locked or not, with `ENT.DoorBreach` (Combine and rebels): the NPC faces it and hits it with its melee animation (`Anims.Kick`; HL2's Combine use the rifle butt; models without one, like citizens, give it a shove), and the door flies off its hinges as a physics prop. The map's doors are put in a small grid once, so the check is a table lookup unless a door is right ahead. `ngl_door_breach` 2 = off the hinges (default), 1 = burst open, 0 = just open it; `ngl_door_respawn` (120 s, 0 = never) puts kicked-off doors back so map logic keeps working.
 - **Alerted:** when an NPC spots an enemy, allies within `AlertRadius` (1500) that have nothing to do run over to look.
 - **Fighting:** depends on the AI mode (above). The default runs at the enemy with the weapon raised until in `AttackRange`, then shoots while sidestepping at walking pace, standing still (`StandChance`, 0.3) or crouching to hold the spot (`CrouchChance`, 0.35; crouched it sees and shoots from `CrouchEyeHeight`). Reloads after `Weapon.Clip` shots (`Weapon.ReloadTime` seconds without firing).
@@ -215,16 +217,20 @@ Examples shipped: `ngl_combine_soldier`, `ngl_combine_elite`, `ngl_apc`, `ngl_re
 
 NGL NPCs use their own walk grid instead of the navmesh or AI nodes.
 
-1. On a map with no grid it's made on its own a few seconds after the map loads (or when the first player spawns, on maps without spawn points). `ngl_nav_auto 0` turns that off; then run `ngl_nav_generate` (server console or superadmin), which also rebuilds it any time. It flood-fills the walkable area from the map's spawn points and every player, spending at most `ngl_nav_gen_budget` ms per tick, and prints progress. On gm_construct expect around a minute. Doors don't block it (NPCs open or kick them), and every ledge with ground further down (up to `ngl_nav_max_drop`, 1000) gets a one-way drop link to a point below, so the grid carries on down there and NPCs can jump or rappel down (`ngl_nav_drops 0` turns that off).
-2. The grid is saved to `garrysmod/data/ngl_nav/<map>.dat` and loaded automatically on that map from then on. Ship the file with your addon or server.
-3. Fix it in game with the **NGL Nav Editor** tool (Q menu, Tools, NGL Base; superadmins). The grid round you is drawn while the tool is out: blue where NPCs walk, yellow ledge drops, green gap jumps, and a circle where you aim. **Walkable area mode:** left click adds walkable area round the spot (flood-filled within the radius, joined up with the grid around it), right click removes the grid there (only on that floor). **Jump links mode:** left click a ledge, then left click where to land: a drop link if it's lower (small drops for everyone, big ones for rappelling Combine), a gap jump both ways if it's level; right click removes links near the spot. Reload undoes the last edit. Edits are saved apart from the grid (`garrysmod/data/ngl_nav/<map>_edits.txt`, by position) and put back on whenever it's loaded or made again; `ngl_nav_edit_clear` removes them all.
+1. On a map with no grid it's made on its own a few seconds after the map loads (or when the first player spawns, on maps without spawn points). `ngl_nav_auto 0` turns that off; then run `ngl_nav_generate` (server console or superadmin), which also rebuilds it any time. It flood-fills the walkable area from the map's spawn points and every player, spending at most `ngl_nav_gen_budget` ms per tick, and prints progress. On gm_construct expect a minute or two. Doors don't block it (NPCs open or kick them).
+   - **Narrow places:** a point that doesn't fit at its spot in the grid (a person-sized box, 26 wide) is moved within its square to the nearest spot that fits, so halls and doorways narrower than the grid spacing get points too, and so do the edges of rooms.
+   - **Only real walking:** two points are linked for walking only when the ground between them has no step higher than a person can step (more on slopes, as steep as the ground) and no hole. A ledge too high to step up is a jump: up to `ngl_nav_max_up` (72) gets a jump-up link, and a drop with ground further down (up to `ngl_nav_max_drop`, 250) a jump-down link (`ngl_nav_drops 0` turns both off).
+   - **Open squares:** where four points round a square are all linked, the square is open floor. Paths cut straight across open squares instead of following the grid lines, and only follow the lines in narrower places.
+2. The grid is saved to `garrysmod/data/ngl_nav/<map>.dat` and loaded automatically on that map from then on. Ship the file with your addon or server. Grids from before v0.16.0 are made again on their own (edits are kept).
+3. Fix it in game with the **NGL Nav Editor** tool (Q menu, Tools, NGL Base; superadmins). The grid round you is drawn while the tool is out: open floor as faintly filled squares with a see-through outline, narrower walkable places as blue lines, yellow jumps down, orange jumps up, green gap jumps, purple climbs, and a circle where you aim. **Walkable area mode:** left click adds walkable area right where you click and round it (flood-filled within the radius, joined up with the grid around it; works in tight spots), right click removes the grid there (only on that floor). **Jump links mode:** left click where the jump starts, then where it lands: a jump down if it's lower, a jump up if it's higher (up to 128), a gap jump both ways if it's level. **Climb links mode:** left click one end, then the other: a climb both ways, any height, for NPCs with `ENT.Climb`. In both link modes right click removes links near the spot. Reload undoes the last edit. Edits are saved apart from the grid (`garrysmod/data/ngl_nav/<map>_edits.txt`, by position) and put back on whenever it's loaded or made again; `ngl_nav_edit_clear` removes them all.
 
 How NPCs use it:
 
-- Enemy in view on the same level: straight line at any distance, no path-finding at all.
+- Enemy in view on the same level (or a short hop to its squad spot): straight line, no path-finding, as long as the grid says nothing's in the way. That check is table lookups along the line (open squares, or point to linked point), at most once a second per NPC; a ledge, wall or drop in the way means a path round it instead, so followers go round to their leader rather than walking into a wall.
 - Otherwise: an A* path is requested in the background. All searches share `ngl_nav_budget` ms per tick (default 2). Requests from roughly the same spot (within 3 grid cells) to roughly the same goal share one search, and results are cached for 4 s, so a squad chasing the same target pays for one or a few paths.
 - An NPC never stands still waiting for a path. It walks straight at the target until the path arrives, gives up after 3 s, and walks straight for 3 s after a failed search.
-- Paths take the ledge drops and gap jumps the NPC can (`JumpDown`, `Rappel`, `JumpGap`; see Behaviour), costing a little more than walking; NPCs that can't never get them.
+- Paths take the jumps and climbs the NPC can (`JumpDown`, `JumpUp`, `JumpGap`, `Climb`; see Behaviour), costing a little more than walking; NPCs that can't never get them.
+- Paths are smoothed: across open squares an NPC walks straight to the next corner instead of along each grid line.
 - Wide NPCs (`ENT.NavWidth`, half width in units, e.g. 80 for the APC) get paths they fit through: their searches also test each grid point they reach with a box that wide, once, and remember the answer for later searches.
 - **Air layer** for flying NPCs: built automatically in the background from the grid once it loads (no file, a few hundred traces). Every 4th grid point with open sky above gets one air node up to 1200 units over the ground, linked to its neighbours when a dropship fits between them; nodes at the edge of the sky are where ships come and go. Landing spots are checked when needed: flat ground and a clear column straight down from the air layer. `ngl_air_info` prints its state.
 - Searches nobody is waiting for any more are dropped, and when `ngl_nav_max_queue` searches are queued new requests fail at once, so a flood of requests can't build a backlog.
@@ -238,8 +244,9 @@ How NPCs use it:
 | --- | --- |
 | `ngl_nav_generate` | Build and save the grid for the current map |
 | `ngl_nav_auto` (1) | Make the grid on its own for maps that have none |
-| `ngl_nav_drops` (1) | Link ledges to the ground below when generating |
-| `ngl_nav_max_drop` (1000) | Highest ledge linked |
+| `ngl_nav_drops` (1) | Link ledges up and down when generating |
+| `ngl_nav_max_drop` (250) | Highest ledge linked for jumping down |
+| `ngl_nav_max_up` (72) | Highest ledge linked for jumping up |
 | `ngl_nav_edit_clear` | Remove all NGL Nav Editor edits for this map |
 | `ngl_nav_info` | Points, jump links, edits, spacing, queued searches, cached paths, and counts of found, failed, cached, dropped and rejected paths |
 | `ngl_nav_draw [radius]` | Draw the grid around you for 15 s (listen server with `developer 1`) |
@@ -250,15 +257,16 @@ How NPCs use it:
 | `ngl_nav_max_expand` (8000) | A search gives up after this many points |
 | `ngl_nav_max_queue` (64) | Requests beyond this many queued searches fail at once (the NPC walks straight) |
 
+## NPC tools
+
+Two tools in the Q menu (Tools, NGL Base; superadmins):
+
+- **NGL NPC Tracker:** left click NGL NPCs to track them (up to 8; again to stop), right click to stop all. For each one you see where it has been (white trail), its path ahead (blue, with jumps down in yellow, jumps up in orange, climbs in purple), where it's heading (green ring), where a player sent it (pink ring), and a line over its head: class, AI mode, order, squad, enemy and how it's moving. Shown while the tool is out, or always with the tool's checkbox (`ngl_track_always 1`). Only tracked NPCs cost anything: they're sent five times a second to whoever tracks them.
+- **NGL NPC Mover:** left click NGL NPCs to pick them (green rings), then right click (or left click the ground) to send them there. They spread out round the spot, find their way along the grid, shoot enemies on the way, and with "Stay there" hold the spot for a minute. Their squad leader can't call them off it until they arrive. Reload drops the picked ones.
+
 ## Installing
 
 Copy (or clone) this folder into `garrysmod/addons/ngl-base`, then restart the map.
-
-Nothing else is needed. The Combine rope animations (`Rappel_b`, `Rappel_c`, `Rappel_f`) ship with NGL in `models/ngl/combine_rappel.mdl`, under NGL's own name, so they replace nothing in HL2 or other addons and only play while an NGL Combine is on a rope. Servers send them to clients that don't have the addon.
-
-## Credits
-
-Combine rope animations: from [Unit1's Mixed Combine Animation Pack](https://steamcommunity.com/sharedfiles/filedetails/?id=3773503767), used with permission; Unit1 got them, with permission, from their original authors, who took them from the game. The rope uses GMod's own `cable/rope` texture.
 
 ## Running the benchmark
 

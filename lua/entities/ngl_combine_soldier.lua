@@ -13,8 +13,6 @@ ENT.WeaponModel = "models/weapons/w_smg1.mdl"
 -- A mix of fighting styles (sv_aimodes.lua): most fight normally, some
 -- sneak round to your side, some rush you, some hold their ground.
 ENT.AIMode = { balanced = 3, flanker = 2, assault = 1, defender = 1 }
-ENT.Rappel = true               -- ropes down ledges too high to jump
-ENT.RappelAnimModel = "models/ngl/combine_rappel.mdl" -- the rope animations (Rappel_b, c, f), see README
 ENT.DoorBreach = true           -- kicks doors in
 
 -- Rifle butt when an enemy gets too close; the SMG (base default) otherwise.
