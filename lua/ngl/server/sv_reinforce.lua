@@ -1,8 +1,10 @@
 -- NGL reinforcements: a squad leader that is down to a few men (ENT.Squad
--- with Reinforce) calls more. On maps with open sky a dropship brings them
--- (sv_air.lua, ngl_dropship); indoors, where it can't land near the leader,
--- and on maps without sky, they arrive on foot from a spot neither the
--- enemy nor any player can see.
+-- with Reinforce) calls more. Either a dropship brings them (sv_air.lua,
+-- ngl_dropship), or they appear on foot close to the leader, 700 to 1600
+-- units away, at a spot neither the enemy nor any player can see, and run
+-- to it. Which one: ngl_reinforce_onfoot (by default a mix of both).
+-- Indoors, where a dropship can't land near the leader, and on maps
+-- without sky, they always come on foot.
 --
 --   ENT.Squad.Reinforce = {
 --   	Ship = "ngl_dropship", Cargo = "ngl_combine_soldier",
@@ -32,6 +34,10 @@ local cvShips = CreateConVar("ngl_dropship_max", "2", FCVAR_ARCHIVE,
 	"NGL dropships in the air at once, across the map.", 0, 32)
 local cvVehicle = CreateConVar("ngl_reinforce_apc", "1", FCVAR_ARCHIVE,
 	"1 = NGL squad leaders may get an APC (Reinforce.Vehicle) as a reinforcement wave.", 0, 1)
+local cvOnFoot = CreateConVar("ngl_reinforce_onfoot", "1", FCVAR_ARCHIVE,
+	"How NGL reinforcements arrive: 0 = dropship under open sky, on foot only indoors; 1 = mixed, each wave picks at random (default); 2 = always on foot, appearing nearby out of sight.", 0, 2)
+local cvOnFootChance = CreateConVar("ngl_reinforce_onfoot_chance", "0.5", FCVAR_ARCHIVE,
+	"With ngl_reinforce_onfoot 1: chance that a wave comes on foot instead of by dropship.", 0, 1)
 
 local IsValid = IsValid
 
@@ -77,60 +83,76 @@ function R.WantsVehicle(npc, sq, enemy, rc)
 	return #near >= (rc.VehicleThreat or 4) and class or nil
 end
 
--- Is `pos` in sight of `ent` (an enemy or a player)?
+-- Is a man at `pos` in sight of `ent` (an enemy or a player)? Head or feet.
 local losTrace = { mask = MASK_SOLID_BRUSHONLY }
 local losResult = {}
 losTrace.output = losResult
 local function seenBy(ent, pos)
-	losTrace.start = ent:EyePos()
-	losTrace.endpos = pos + Vector(0, 0, 48)
+	losTrace.start = ent.EyePos and ent:EyePos() or ent:WorldSpaceCenter()
+	losTrace.endpos = pos + Vector(0, 0, 64)
+	util.TraceLine(losTrace)
+	if not losResult.Hit then return true end
+	losTrace.endpos = pos + Vector(0, 0, 16)
 	util.TraceLine(losTrace)
 	return not losResult.Hit
 end
 R.SeenBy = seenBy
 
--- On foot: a grid point 1200 to 2500 units from the leader, away from the
--- enemy, that neither the enemy nor any player can see. A vehicle drives in
--- from such a point if it is wide enough.
-function R.OnFoot(npc, sq, enemy, rc, vehicle)
+local MIN_PLAYER_DIST = 500 -- never pop up right next to a player, seen or not
+
+-- On foot: a grid point close to the leader (700 to 1600 units), on its
+-- side away from the enemy first, that neither the enemy nor any player
+-- can see. A vehicle drives in from such a point if it is wide enough.
+-- At most 16 spots tried (two traces per watcher each).
+function R.FindHiddenSpot(npc, enemy, vehicle)
 	local Nav = NGL.Nav
-	if not (Nav and Nav.Loaded) then return false end
+	if not (Nav and Nav.Loaded) then return nil end
 	local pos, ePos = npc:GetPos(), enemy:GetPos()
 	local away = pos - ePos
 	local base = math.atan2(away.y, away.x)
 	local players = player.GetAll()
-	for try = 0, 9 do
-		local a = base + ((try % 2 == 0) and 1 or -1) * math.floor((try + 1) / 2) * 0.5
-		local dist = 1200 + 300 * (try % 5)
-		local g = Nav.Nearest(Vector(pos.x + math.cos(a) * dist, pos.y + math.sin(a) * dist, pos.z))
-		local vt = vehicle and scripted_ents.Get(vehicle) or {}
-		local width = vt.NavWidth
-		if g and width and width > 24 and not Nav.WideOk(g, math.ceil(width / 8) * 8) then g = nil end
-		if g then
-			local gp = Nav.NodePos(g)
-			local hidden = not seenBy(enemy, gp)
+	local vt = vehicle and scripted_ents.Get(vehicle) or {}
+	local width = vt.NavWidth
+	for try = 0, 15 do
+		-- fan out from straight behind the leader: 0, +40, -40, +80 ... degrees
+		local a = base + ((try % 2 == 0) and 1 or -1) * math.floor((try + 1) / 2) * math.rad(40)
+		local dist = 700 + 300 * (try % 4)
+		local gp, g = NGL.Core.GridSpot(Vector(pos.x + math.cos(a) * dist, pos.y + math.sin(a) * dist, pos.z))
+		if gp and g and width and width > 24 and not Nav.WideOk(g, math.ceil(width / 8) * 8) then gp = nil end
+		if gp then
+			local ok = not seenBy(enemy, gp) and gp:DistToSqr(ePos) > 600 * 600
 			for _, ply in ipairs(players) do
-				if hidden and ply:Alive() and seenBy(ply, gp) then hidden = false end
+				if not ok then break end
+				if ply:Alive() and (gp:DistToSqr(ply:GetPos()) < MIN_PLAYER_DIST * MIN_PLAYER_DIST or seenBy(ply, gp)) then ok = false end
 			end
-			if hidden and vehicle then
-				-- Facing the leader (vehicle models may face +Y: HeadingOffset).
-				local v = R.Spawn(vehicle, gp + Vector(0, 0, 8), npc, nil, math.deg(base) + 180 - (vt.HeadingOffset or 0))
-				if not IsValid(v) then return false end
-				R.AttachVehicle(v, npc, sq)
-				if v.MoveTo then v:MoveTo(pos, true) end
-				return true
-			elseif hidden then
-				local n = rc.OnFootCount or 4
-				for k = 1, n do
-					local ang = k / n * 2 * math.pi
-					local e = R.Spawn(rc.Cargo, gp + Vector(math.cos(ang) * 60, math.sin(ang) * 60, 8), npc, sq)
-					if IsValid(e) and e.MoveTo then e:MoveTo(pos, true) end
-				end
-				return true
-			end
+			if ok then return gp, base end
 		end
 	end
-	return false
+	return nil
+end
+
+function R.OnFoot(npc, sq, enemy, rc, vehicle)
+	local gp, base = R.FindHiddenSpot(npc, enemy, vehicle)
+	if not gp then return false end
+	local pos = npc:GetPos()
+	if vehicle then
+		-- Facing the leader (vehicle models may face +Y: HeadingOffset).
+		local vt = scripted_ents.Get(vehicle) or {}
+		local v = R.Spawn(vehicle, gp + Vector(0, 0, 8), npc, nil, math.deg(base) + 180 - (vt.HeadingOffset or 0))
+		if not IsValid(v) then return false end
+		R.AttachVehicle(v, npc, sq)
+		if v.MoveTo then v:MoveTo(pos, true) end
+		return true
+	end
+	local n = rc.OnFootCount or 4
+	for k = 1, n do
+		local ang = k / n * 2 * math.pi
+		local p = gp + Vector(math.cos(ang) * 60, math.sin(ang) * 60, 0)
+		p = NGL.Core.GridSpot(p) or gp -- not inside a wall
+		local e = R.Spawn(rc.Cargo, p + Vector(0, 0, 8), npc, sq)
+		if IsValid(e) and e.MoveTo then e:MoveTo(pos, true) end
+	end
+	return true
 end
 
 -- Tries to get reinforcements to the leader now. True if they're coming.
@@ -151,6 +173,12 @@ end
 -- narrow streets and on maps with no sky they come on foot instead.
 function R.Call(npc, sq, enemy, now, rc, vehicle)
 	local Air = NGL.Air
+	-- On foot by choice (ngl_reinforce_onfoot); the dropship if no hidden
+	-- spot is free.
+	local mode = cvOnFoot:GetInt()
+	if mode == 2 or (mode == 1 and math.random() < cvOnFootChance:GetFloat()) then
+		if R.OnFoot(npc, sq, enemy, rc, vehicle) then return true end
+	end
 	if not (Air and Air.Ready) then return false end -- still building: try later
 	if Air.Count == 0 or R.Indoors(npc) then return R.OnFoot(npc, sq, enemy, rc, vehicle) end
 

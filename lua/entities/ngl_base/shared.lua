@@ -31,6 +31,13 @@ ENT.AttackRange = 1200          -- closer than this it stops chasing and fights
 ENT.EyeHeight = 64
 ENT.CrouchEyeHeight = 40
 ENT.CrouchChance = 0.35         -- chance, each time it picks a new spot while fighting, to crouch and hold position instead; 0 = never
+ENT.StandChance = 0.3           -- chance, each time it picks a new spot while fighting, to just stand and shoot instead of sidestepping
+ENT.AIMode = "balanced"         -- how it fights (sv_aimodes.lua): "balanced", "assault" (pushes forward no matter what),
+--                                 "flanker" (attacks from out of your sight), "defender" (holds its ground), your own
+--                                 NGL.RegisterAIMode, or weights for a random pick: { balanced = 2, flanker = 1 }
+ENT.DefendRadius = nil          -- "defender" mode: how far it may move from where the fight started (default 500)
+ENT.Group = nil                 -- NPCs without ENT.Squad team up with allies of their faction nearby: { Max = 6, Radius = 800 }
+--                                 (these defaults when nil); false = always alone (zombies, animals)
 ENT.Squad = nil                 -- set to lead a squad on its own, see sv_squad.lua:
 --                                 { Max = 10, Recruit = { "ngl_combine_soldier" }, RecruitRadius = 1500,
 --                                   Scouts = 3, ScoutRadius = 400, ScoutTime = 20, LostDelay = 2 }
@@ -41,7 +48,7 @@ ENT.OrderKinds = nil            -- { mykind = true }: extra order kinds this NPC
 ENT.EnemyMemory = 8             -- seconds it keeps hunting an enemy it can't see (heads to where it last saw it)
 ENT.AlertRadius = 1500          -- allies this close with nothing to do come to help when it spots an enemy; 0 = never
 ENT.WanderRadius = 600          -- idle NPCs stroll around their home spot (where they spawned or last fought); 0 = stand still
-ENT.WanderDelay = { 4, 10 }     -- seconds between strolls
+ENT.WanderDelay = { 4, 10 }     -- seconds it stands around between strolls
 
 ENT.WeaponModel = "models/weapons/w_smg1.mdl" -- drawn on the client only; false for none
 -- Ranged weapon; false for none. Add `Projectile = { ... }` to fire
@@ -161,6 +168,7 @@ ENT.Anims = {
 --   State:     self:IsNearPlayer()  self:IsDetailed()  self:IsBusy()
 --   Orders:    self:GiveOrder(order)  self:GetOrder()  self:ClearOrder()
 --   Signals:   self:NGLSignal("Halt" | "Search" | "Engage" | "StandDown" | "Reinforce")
+--   AI mode:   self:SetAIMode(name)  self:GetAIMode()
 --   Squads:    self:MakeSquad(max)  self:GetSquad()  self:IsSquadLeader()
 --              self:LeaveSquad()  squad:Add(npc)  squad:Order(who, order)
 --              squad:Nearest(pos, n)  squad:Members()  NGL.NewSquad(leader, max)

@@ -304,6 +304,7 @@ function Core.SetEnemy(npc, enemy)
 		npc.NGLInvestigate = nil
 		npc:NGLSetMoveMode("run")
 		if not IsValid(old) then
+			npc.NGLContactPos = npc:GetPos() -- where the fight started (defenders hold it)
 			alertAllies(npc, ePos, now)
 			if npc.NGLSquad then npc.NGLSquad:Contact(npc, ePos, now) end
 			npc:NGLSound("Alert")
@@ -588,7 +589,28 @@ end
 Core.StopMoving = stopMoving
 Core.Chase = chase
 
--- No enemy: go and look where an ally saw one, otherwise stroll around home.
+-- Standing around with nothing to do: now and then look somewhere else
+-- (only where a player can see it; nobody notices further away).
+local function lookAround(npc, now, pos)
+	if not npc.NGLNear then
+		npc.NGLFace = nil
+		return
+	end
+	local L = npc.NGLLook
+	if not L or now >= L.untilT or (L.from and pos:DistToSqr(L.from) > 64 * 64) then
+		L = { untilT = now + Rand(3, 7), from = pos }
+		if random() < 0.6 then
+			local a = Rand(0, 2 * math.pi)
+			L.pos = Vector(pos.x + math.cos(a) * 200, pos.y + math.sin(a) * 200, pos.z)
+		end
+		npc.NGLLook = L
+	end
+	npc.NGLFace = L.pos
+end
+Core.LookAround = lookAround
+
+-- No enemy: go and look where an ally saw one, otherwise stroll around home,
+-- standing a while between strolls.
 local function idle(npc, now, pos)
 	if npc.NGLNear and now >= (npc.NGLNextIdleSound or 0) then
 		local d = npc.IdleSoundDelay
@@ -599,9 +621,16 @@ local function idle(npc, now, pos)
 	npc.NGLFace = nil
 	npc.NGLCrouch = false
 
+	-- Not in a group yet: team up with allies nearby (sv_squad.lua).
+	local S = NGL.Squad
+	if S and S.AutoGroup then S.AutoGroup(npc, now, pos) end
+
 	-- Squad member: keep our place in the formation behind the leader.
 	local sq = npc.NGLSquad
-	if sq and not npc.NGLInvestigate and Core.Follow(npc, now, pos, sq) then return end
+	if sq and not npc.NGLInvestigate and Core.Follow(npc, now, pos, sq) then
+		if not (npc.NGLGoal or npc.NGLPath or npc.NGLPathPending) then lookAround(npc, now, pos) end
+		return
+	end
 
 	local inv = npc.NGLInvestigate
 	if inv then
@@ -620,15 +649,28 @@ local function idle(npc, now, pos)
 	local radius = npc.WanderRadius or 0
 	if radius <= 0 then
 		npc.NGLGoal, npc.NGLPath = nil, nil
+		lookAround(npc, now, pos)
 		return
 	end
-	if npc.NGLPath or npc.NGLGoal or npc.NGLPathPending then return end -- still strolling
+	local delay = npc.WanderDelay
+	if npc.NGLPath or npc.NGLGoal or npc.NGLPathPending then -- still strolling
+		npc.NGLStrolling = true
+		return
+	end
+	if npc.NGLStrolling then
+		-- Just got there: stand a while before the next stroll.
+		npc.NGLStrolling = nil
+		npc.NGLNextWander = now + Rand(delay[1], delay[2])
+	end
 	npc:NGLSetMoveMode("walk")
 	npc.NGLDirect = nil
-	if now < (npc.NGLNextWander or 0) then return end
+	if now < (npc.NGLNextWander or 0) then
+		lookAround(npc, now, pos)
+		return
+	end
 
-	local delay = npc.WanderDelay
 	npc.NGLNextWander = now + Rand(delay[1], delay[2])
+	npc.NGLLook = nil
 	local home = npc.NGLHome or pos
 	local nav = NGL.Nav
 	local path = nav and nav.Loaded and nav.RandomWalk(pos, home, radius, random(3, 8))
@@ -642,6 +684,119 @@ local function idle(npc, now, pos)
 		local d = Rand(radius * 0.3, radius)
 		npc.NGLGoal = Vector(home.x + math.cos(a) * d, home.y + math.sin(a) * d, pos.z)
 	end
+end
+
+----------------------------------------------------------------------------
+-- Positions: standing fights, grid spots, hiding places (used by the AI
+-- modes in sv_aimodes.lua; custom modes can use them too)
+----------------------------------------------------------------------------
+
+-- A standing fight for this think: every few seconds pick crouching (hold
+-- the spot), standing (hold it) or a sidestep across the line of fire.
+-- stand, crouch: chances 0..1. minD/maxD: sidestep length (100..250).
+-- home/leash: never step further than leash from home.
+function Core.Strafe(npc, now, pos, tPos, stand, crouch, minD, maxD, home, leash)
+	npc.NGLPath = nil
+	npc.NGLDirect = nil
+	npc:NGLSetMoveMode("walk")
+	if now >= (npc.NGLNextStrafe or 0) then
+		if not npc.NGLActs.CrouchIdle then crouch = 0 end
+		local r = random()
+		if r < crouch then
+			npc.NGLNextStrafe = now + Rand(2.5, 5)
+			npc.NGLCrouch = true
+			npc.NGLGoal = nil
+		elseif r < crouch + stand then
+			npc.NGLNextStrafe = now + Rand(1.5, 3.5)
+			npc.NGLCrouch = false
+			npc.NGLGoal = nil
+		else
+			npc.NGLNextStrafe = now + Rand(2, 3.5)
+			npc.NGLCrouch = false
+			local dir = tPos - pos
+			dir.z = 0
+			dir:Normalize()
+			local side = (random(2) == 1) and 1 or -1
+			local step = Vector(-dir.y, dir.x, 0) * Rand(minD or 100, maxD or 250)
+			local goal = pos + step * side
+			if home and leash and goal:DistToSqr(home) > leash * leash then
+				goal = pos - step * side
+				if goal:DistToSqr(home) > leash * leash then goal = nil end
+			end
+			npc.NGLGoal = goal
+		end
+	end
+	npc.NGLFace = tPos
+end
+
+-- Where an entity looks from, and which way it faces.
+function Core.EyeOf(ent)
+	if ent:IsPlayer() then return ent:EyePos() end
+	if ent.IsNGLNPC then
+		local p = ent:GetPos()
+		p.z = p.z + eyeHeight(ent)
+		return p
+	end
+	return ent:WorldSpaceCenter()
+end
+
+function Core.FacingYaw(ent)
+	if ent:IsPlayer() then return ent:EyeAngles().y end
+	return ent:GetAngles().y
+end
+
+-- The nav grid point nearest to `pos` (looking down for the ground first
+-- when `pos` is up in the air or on a slope), or `pos` itself without a grid.
+local groundTrace = { mask = MASK_SOLID_BRUSHONLY }
+local groundResult = {}
+groundTrace.output = groundResult
+function Core.GridSpot(pos)
+	local nav = NGL.Nav
+	if not (nav and nav.Loaded) then return pos end
+	local n = nav.Nearest(pos)
+	if not n then
+		groundTrace.start = Vector(pos.x, pos.y, pos.z + 256)
+		groundTrace.endpos = Vector(pos.x, pos.y, pos.z - 512)
+		util.TraceLine(groundTrace)
+		if groundResult.Hit then n = nav.Nearest(groundResult.HitPos) end
+	end
+	return n and nav.NodePos(n) or nil, n
+end
+
+-- Is a man standing at `spot` out of sight from `eye`? (head and feet)
+local hideTrace = { mask = MASK_SOLID_BRUSHONLY }
+local hideResult = {}
+hideTrace.output = hideResult
+function Core.HiddenFrom(eye, spot)
+	hideTrace.start = eye
+	hideTrace.endpos = Vector(spot.x, spot.y, spot.z + 64)
+	util.TraceLine(hideTrace)
+	if not hideResult.Hit then return false end
+	hideTrace.endpos = Vector(spot.x, spot.y, spot.z + 16)
+	util.TraceLine(hideTrace)
+	return hideResult.Hit == true
+end
+
+-- A grid spot minR..maxR from `center` that `eye` can't see, nearest to
+-- the NPC, or nil. `yaws`: directions to try (degrees); by default 8 all
+-- round. `notNear`: skip spots within 300 units of this position (e.g.
+-- where the NPC already is). Two traces per direction at most, so call it
+-- now and then, not every think.
+local ALL_ROUND = { 0, 45, 90, 135, 180, 225, 270, 315 }
+function Core.FindHiddenSpot(npc, eye, center, minR, maxR, yaws, notNear)
+	local pos = npc:GetPos()
+	local best, bestD
+	local spin = yaws and 0 or Rand(0, 45)
+	for _, a in ipairs(yaws or ALL_ROUND) do
+		local r = math.rad(a + spin)
+		local d = Rand(minR, maxR)
+		local spot = Core.GridSpot(Vector(center.x + math.cos(r) * d, center.y + math.sin(r) * d, center.z))
+		if spot and not (notNear and spot:DistToSqr(notNear) < 300 * 300) and Core.HiddenFrom(eye, spot) then
+			local dd = pos:DistToSqr(spot)
+			if not bestD or dd < bestD then best, bestD = spot, dd end
+		end
+	end
+	return best
 end
 
 ----------------------------------------------------------------------------
@@ -906,10 +1061,17 @@ local function think(npc, now, dt, nearestPlayerSqr)
 		return
 	end
 	local distSqr = pos:DistToSqr(tPos)
-	if npc:OnCombat(enemy, math.sqrt(distSqr), visible) == true then return end
+	local dist = math.sqrt(distSqr)
+	if npc:OnCombat(enemy, dist, visible) == true then return end
+
+	-- The NPC's AI mode (sv_aimodes.lua) fights its own way; a mode without
+	-- a Fight, or one that returns nothing, gets the default below.
+	local mode = npc.NGLMode
+	local fight = mode and mode.Fight
 
 	-- Out of sight: hunt it down where we last saw it (no seeing through walls).
 	if not visible then
+		if fight and fight(npc, enemy, dist, false, now, dt) == true then return end
 		local last = npc.NGLLastSeenPos or tPos
 		if pos:DistToSqr(last) < LAST_SEEN_DONE_SQR then
 			Core.SetEnemy(npc, nil) -- it's not here; look around from here
@@ -947,6 +1109,8 @@ local function think(npc, now, dt, nearestPlayerSqr)
 		return
 	end
 
+	if fight and fight(npc, enemy, dist, true, now, dt) == true then return end
+
 	local range = npc.AttackRange
 	if distSqr > range * range * ATTACK_KEEP_SQR_PAD then
 		npc:NGLSetMoveMode("run")
@@ -958,28 +1122,10 @@ local function think(npc, now, dt, nearestPlayerSqr)
 		return
 	end
 
-	-- In range and in view: strafe and shoot.
-	npc.NGLPath = nil
-	npc.NGLDirect = nil
-	npc:NGLSetMoveMode("walk")
-	if now >= npc.NGLNextStrafe then
-		local cc = npc.CrouchChance or 0
-		if cc > 0 and npc.NGLActs.CrouchIdle and random() < cc then
-			-- Crouch and hold this spot for a while.
-			npc.NGLNextStrafe = now + Rand(2.5, 5)
-			npc.NGLCrouch = true
-			npc.NGLGoal = nil
-		else
-			npc.NGLNextStrafe = now + Rand(2, 3.5)
-			npc.NGLCrouch = false
-			local dir = tPos - pos
-			dir.z = 0
-			dir:Normalize()
-			local side = (random(2) == 1) and 1 or -1
-			npc.NGLGoal = pos + Vector(-dir.y, dir.x, 0) * (side * Rand(100, 250))
-		end
-	end
-	npc.NGLFace = tPos
+	-- In range and in view: stand, crouch or sidestep, and shoot.
+	local stand = mode and mode.StandChance or npc.StandChance or 0
+	local crouch = mode and mode.CrouchChance or npc.CrouchChance or 0
+	Core.Strafe(npc, now, pos, tPos, stand, crouch)
 	shoot(npc, now, dt, enemy)
 end
 

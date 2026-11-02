@@ -13,6 +13,7 @@ ENT.WalkSpeed = 35
 ENT.SightRange = 3000
 ENT.EyeHeight = 60
 ENT.WanderRadius = 300
+ENT.Group = false               -- zombies shamble alone, no formations
 
 ENT.WeaponModel = false
 ENT.Weapon = false

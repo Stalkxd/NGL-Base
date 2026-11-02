@@ -16,6 +16,7 @@ ENT.SightRange = 5000
 ENT.EnemyMemory = 12
 ENT.AttackRange = 1400
 ENT.CrouchChance = 0.25
+ENT.AIMode = "balanced"         -- the leader stays with its squad
 
 ENT.WeaponModel = "models/weapons/w_irifle.mdl"
 ENT.Weapon = {

@@ -17,6 +17,7 @@ ENT.StartHealth = 70
 ENT.RunSpeed = 220
 ENT.WalkSpeed = 75
 ENT.WeaponModel = "models/weapons/w_smg1.mdl"
+ENT.AIMode = { balanced = 3, defender = 2, flanker = 1, assault = 1 }
 ENT.Weapon = {
 	Damage = 4,
 	Delay = 0.1,

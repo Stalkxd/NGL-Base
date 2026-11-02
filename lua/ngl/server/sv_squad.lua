@@ -67,6 +67,9 @@ function Squad:Prune()
 	if self.leader and not (alive(self.leader) and self.leader.NGLSquad == self) then
 		self.leader = nil
 	end
+	-- A group that formed on its own (Squad.AutoGroup) picks a new leader
+	-- when its leader dies or leaves.
+	if self.auto and not self.leader and m[1] then self:SetLeader(m[1]) end
 	return m
 end
 
@@ -224,8 +227,9 @@ local function recruitable(leader, cfg)
 		recruitSets[cfg] = set
 	end
 	return function(e)
+		local esq = e.NGLSquad
 		return e ~= leader and e.IsNGLNPC and not e.Squad and alive(e)
-			and (e.NGLSquad == nil or e.NGLSquad.leader == nil)
+			and (esq == nil or esq.leader == nil or esq.auto) -- a real leader takes over loose groups
 			and NGL.GetRelation(e.Faction, leader.Faction) == D_LI
 			and (not set or set[e:GetClass()])
 	end
@@ -439,6 +443,57 @@ function Squad.LeaderThink(npc, now, pos)
 			callFire(npc, sq, e:GetPos(), now, cfg)
 		end
 		if npc.OnLeaderThink then npc:OnLeaderThink(sq, now) end
+	end
+end
+
+----------------------------------------------------------------------------
+-- Groups: NPCs without ENT.Squad team up on their own with allies of the
+-- same faction nearby (ENT.Group, default { Max = 6, Radius = 800 }; false
+-- = always alone, e.g. zombies). The nearest ally becomes the leader; the
+-- group walks in formation behind it, shares contacts, and picks a new
+-- leader when it dies. A squad leader (ENT.Squad) nearby takes them over.
+-- Runs from the idle think, every 3 to 5 seconds per NPC: one grid lookup.
+----------------------------------------------------------------------------
+
+local GROUP_DEFAULT = { Max = 6, Radius = 800 }
+
+function Squad.AutoGroup(npc, now, pos)
+	if now < (npc.NGLNextGroup or 0) then return end
+	npc.NGLNextGroup = now + math.Rand(3, 5)
+	local cfg = npc.Group
+	if cfg == false or npc.Squad or npc.IsVehicleNPC then return end
+	local sq = npc.NGLSquad
+	if sq then
+		if not (sq.auto and sq:Count() <= 1) then return end
+		sq:Disband() -- everyone else is gone: look for a new group
+	end
+	if type(cfg) ~= "table" then cfg = GROUP_DEFAULT end
+	local faction = npc.Faction
+	local best, bestD
+	local found = NGL.FindInRadius(pos, cfg.Radius or 800, function(e)
+		return e ~= npc and e.Faction == faction and e.Group ~= false and not e.IsVehicleNPC and alive(e)
+	end)
+	for _, e in ipairs(found) do
+		local esq = e.NGLSquad
+		local ok
+		if esq then
+			ok = esq.auto and esq.leader ~= nil and not esq:IsFull()
+		else
+			ok = not e.Squad
+		end
+		if ok then
+			local d = pos:DistToSqr(e:GetPos())
+			if not bestD or d < bestD then best, bestD = e, d end
+		end
+	end
+	if not best then return end
+	if best.NGLSquad then
+		best.NGLSquad:Add(npc)
+	else
+		local bcfg = type(best.Group) == "table" and best.Group or cfg
+		local s = NGL.NewSquad(best, bcfg.Max or 6)
+		s.auto = true
+		s:Add(npc)
 	end
 end
 
