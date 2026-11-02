@@ -24,6 +24,8 @@ local cvRateNear = CreateConVar("ngl_ai_rate_near", "0.1", FCVAR_ARCHIVE, "Secon
 local cvRateMid = CreateConVar("ngl_ai_rate_mid", "0.3", FCVAR_ARCHIVE, "Seconds between AI thinks at medium distance.", 0, 5)
 local cvRateFar = CreateConVar("ngl_ai_rate_far", "1.0", FCVAR_ARCHIVE, "Seconds between AI thinks far from every player.", 0, 10)
 local cvVisual = CreateConVar("ngl_ai_visual_range", "3000", FCVAR_ARCHIVE, "NPCs this close to a player fire real bullets with tracers and sound; further away they use one silent trace.", 0, 50000)
+local cvDetail = CreateConVar("ngl_anim_detail_range", "1500", FCVAR_ARCHIVE, "NPCs this close to a player get full animation detail (aim and strafe poses, firing/reload/flinch gestures, aimed walk and run). Further away they play plain idle/walk/run cycles, which is much cheaper for the server and every client.", 0, 50000)
+local DETAIL_LEAVE = 1.15 * 1.15 -- leave full detail a bit further out than we enter it, so it doesn't flicker at the edge
 
 ----------------------------------------------------------------------------
 -- Factions
@@ -458,6 +460,8 @@ end
 -- One AI decision for one NPC. `dt` is the time since its last think.
 local function think(npc, now, dt, nearestPlayerSqr)
 	npc.NGLNear = nearestPlayerSqr < cvVisual:GetFloat() ^ 2
+	local detailSqr = cvDetail:GetFloat() ^ 2
+	npc.NGLDetail = nearestPlayerSqr < (npc.NGLDetail and detailSqr * DETAIL_LEAVE or detailSqr)
 	if npc:OnAIThink(dt) == true then return end
 
 	local pos = npc:GetPos()
@@ -637,7 +641,9 @@ hook.Add("Tick", "NGL.Core.Scheduler", function()
 				npc.NGLNextThink = now + interval * Rand(0.9, 1.1)
 
 				think(npc, now, dt, best)
-				if npc.NGLNear and not npc.NGLDying then npc:NGLUpdatePose() end
+				if npc.NGLDying then -- nothing
+				elseif npc.NGLDetail then npc:NGLUpdatePose()
+				elseif npc.NGLPosed then npc:NGLResetPose() end
 			end
 
 			if SysTime() - start > budget then

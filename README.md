@@ -51,13 +51,14 @@ Fields and hooks are listed in `lua/entities/ngl_base/shared.lua`. Hooks: `OnSpa
 - **Alerted:** when an NPC spots an enemy, allies within `AlertRadius` (1500) that have nothing to do run over to look.
 - **Fighting:** runs at the enemy with the weapon raised until in `AttackRange`, then strafes at walking pace and shoots. Reloads after `Weapon.Clip` shots (`Weapon.ReloadTime` seconds without firing).
 - **Enemy out of sight:** heads for where it last saw the enemy (no seeing through walls), and gives up after `EnemyMemory` seconds or once it gets there and finds nobody.
-- **Animations:** idle, alert idle, walk, run, aimed walk and aimed run picked per state; firing, reload and flinch gestures; upper body aims at the enemy and legs follow the strafe direction; walk/run cycles play at the speed the NPC actually moves. Gestures and poses only run for NPCs within `ngl_ai_visual_range` of a player, at the AI think rate, so far-away NPCs cost nothing extra.
+- **Animations:** idle, alert idle, walk, run, aimed walk and aimed run picked per state; firing, reload and flinch gestures; upper body aims at the enemy and legs follow the strafe direction; walk/run cycles play at the speed the NPC actually moves. See the level of detail below.
+- **Animation level of detail:** within `ngl_anim_detail_range` (1500) of a player, NPCs get everything above. Further out they play only the plain idle, walk and run cycles: no aim or strafe poses, no gestures, no aimed variants with their extra aim layers, and their poses are reset once when they leave the range. This saves server time and, more importantly, drawing time on every client. Clients also skip drawing NPC weapons beyond `ngl_cl_weapon_range` (4000, client setting; 0 = always).
 
 Examples shipped: `ngl_combine_soldier` and `ngl_rebel` (NPC tab, category "NGL Base").
 
 ### How the core keeps it cheap
 
-- **Per tick**, each NPC only steers towards its current goal (`BehaveUpdate`: one `Approach`, one `FaceTowards`) and advances its animation. The stock NextBot coroutine is not used. Aim and strafe poses update at the think rate, near players only.
+- **Per tick**, each NPC only steers towards its current goal (`BehaveUpdate`: one `Approach`, one `FaceTowards`) and advances its animation. The stock NextBot coroutine is not used. Aim and strafe poses update at the think rate, and only within `ngl_anim_detail_range` of a player.
 - **Decisions** (targets, chase or strafe, shooting) run in one central hook under a CPU budget (`ngl_ai_budget`, default 3 ms per tick). NPCs that don't fit think on the next tick.
 - **Think rate depends on the nearest player**: every 0.1 s within 1500 units, 0.3 s within 4000, 1 s further away (`ngl_ai_near`, `ngl_ai_mid`, `ngl_ai_rate_*`).
 - **Enemy search uses a 1024-unit spatial grid**, so cost depends on nearby NPCs, not all of them. Line of sight is checked for at most the 3 closest candidates, once per second.
