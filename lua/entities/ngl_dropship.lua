@@ -1,8 +1,9 @@
 -- Combine dropship: brings reinforcements to a squad leader (sv_reinforce.lua).
 -- Not a NextBot (those walk): a scripted entity that flies itself along the
 -- air layer (sv_air.lua) from the edge of the sky to a checked landing spot,
--- hovers low while the soldiers jump out one by one into the leader's squad,
--- then climbs and leaves the way it came. There are only ever a few of them
+-- hovers low while the soldiers jump out one by one into the leader's squad
+-- (or sets down the vehicle it carries under it, an APC), then climbs and
+-- leaves the way it came. There are only ever a few of them
 -- (ngl_dropship_max), so moving them every tick is cheap.
 AddCSLuaFile()
 
@@ -20,6 +21,11 @@ ENT.DropDelay = 0.6      -- seconds between soldiers jumping out
 ENT.MaxLife = 150        -- removed after this long whatever happens
 ENT.StartHealth = 1500   -- only with ngl_dropship_vulnerable 1
 ENT.EngineSound = "NPC_CombineDropship.RotorLoop"
+-- Carrying a vehicle: until it is set down it is only a model hanging under
+-- the ship (no NPC, no thinking); the real NPC is created on the ground.
+ENT.CarryOffset = Vector(0, 0, -110)  -- vehicle origin (its bottom) under the ship
+ENT.CarryHoverHeight = 130            -- ship height above the ground when setting it down
+ENT.CarryReleaseTime = 1.5            -- seconds on the ground before climbing away
 
 if CLIENT then return end
 
@@ -50,7 +56,41 @@ function ENT:NGLStartTrip(trip)
 	path[#path + 1] = trip.hover
 	self.NGLPath, self.NGLIdx = path, 1
 	self.NGLState = "inbound"
+	if trip.vehicle then self:NGLHang(trip.vehicle) end
 	self:NextThink(CurTime())
+end
+
+-- The model of the carried vehicle, parented under the ship.
+function ENT:NGLHang(class)
+	local t = scripted_ents.Get(class)
+	local mdl = t and t.Model
+	if not mdl then return end
+	local p = ents.Create("prop_dynamic")
+	if not IsValid(p) then return end
+	p:SetModel(mdl)
+	p:SetPos(self:LocalToWorld(self.CarryOffset))
+	p:SetAngles(self:GetAngles())
+	p:SetParent(self)
+	p:Spawn()
+	p:SetSolid(SOLID_NONE)
+	self.NGLCarried = p
+end
+
+-- Sets the vehicle down: the hanging model goes, the real NPC appears on the
+-- ground and takes the leader's orders.
+function ENT:NGLDropVehicle()
+	local T = self.Trip
+	if IsValid(self.NGLCarried) then self.NGLCarried:Remove() end
+	self.NGLCarried = nil
+	self:SetNotSolid(true) -- don't trap the vehicle in the ship's box
+	local leader = IsValid(T.leader) and not T.leader.NGLDying and T.leader or nil
+	local R = NGL.Reinforce
+	local v = R.Spawn(T.vehicle, T.landing + Vector(0, 0, 8), leader, nil, self:GetAngles().y)
+	if IsValid(v) and leader then
+		R.AttachVehicle(v, leader, T.squad)
+		if v.MoveTo then v:MoveTo(leader:GetPos(), false) end
+	end
+	self.NGLVehicleOut = true
 end
 
 -- Velocity plus a nose that turns into the flight direction and banks.
@@ -118,7 +158,7 @@ function ENT:Think()
 
 	elseif st == "descend" then
 		local pos = self:GetPos()
-		local target = T.landing + Vector(0, 0, self.HoverHeight)
+		local target = T.landing + Vector(0, 0, T.vehicle and self.CarryHoverHeight or self.HoverHeight)
 		local dz = target.z - pos.z
 		if math.abs(dz) < 16 then
 			self:SetLocalVelocity(vector_origin)
@@ -133,7 +173,10 @@ function ENT:Think()
 	elseif st == "unload" then
 		self:SetLocalVelocity(vector_origin)
 		if now >= self.NGLNextDrop then
-			if self.NGLDropped < (T.count or 6) then
+			if T.vehicle and not self.NGLVehicleOut then
+				self:NGLDropVehicle()
+				self.NGLNextDrop = now + self.CarryReleaseTime
+			elseif self.NGLDropped < (T.count or 6) then
 				self:NGLDropOne()
 				self.NGLNextDrop = now + self.DropDelay
 			else
@@ -150,6 +193,7 @@ function ENT:Think()
 			path[#path + 1] = exit
 			self.NGLPath, self.NGLIdx = path, 1
 			self.NGLState = "outbound"
+			if self.NGLVehicleOut then self:SetNotSolid(false) end
 		else
 			self:NGLFly(Vector(0, 0, self.ClimbSpeed), dt)
 		end
@@ -184,5 +228,6 @@ end
 
 function ENT:OnRemove()
 	if self.NGLEngine then self.NGLEngine:Stop() end
+	if IsValid(self.NGLCarried) then self.NGLCarried:Remove() end
 	if NGL.Reinforce then NGL.Reinforce.Active[self] = nil end
 end

@@ -8,7 +8,16 @@
 --   	Count = 6,            -- soldiers per dropship
 --   	OnFootCount = 4,      -- soldiers per wave on foot
 --   	When = 3,             -- call when this many members or fewer are left
+--   	Vehicle = "ngl_apc",  -- optional: a dropship can bring this instead
+--   	VehicleLimit = 1,     -- vehicles per leader
+--   	VehicleThreat = 4,    -- enemies near the target that call for a vehicle
+--   	ChooseVehicle = nil,  -- optional function(leader, squad, enemy) -> true
 --   }
+--
+-- A wave is a vehicle when the leader has no vehicle of its own left and the
+-- fight is heavy: the target is a player or a vehicle, or VehicleThreat or
+-- more enemies stand near it. Otherwise soldiers. With no open sky the
+-- vehicle drives in from out of sight, like the soldiers walk in.
 
 NGL.Reinforce = NGL.Reinforce or {}
 local R = NGL.Reinforce
@@ -20,6 +29,8 @@ local cvCooldown = CreateConVar("ngl_reinforce_cooldown", "90", FCVAR_ARCHIVE,
 	"Seconds between reinforcement waves of one NGL squad leader.", 0, 3600)
 local cvShips = CreateConVar("ngl_dropship_max", "2", FCVAR_ARCHIVE,
 	"NGL dropships in the air at once, across the map.", 0, 32)
+local cvVehicle = CreateConVar("ngl_reinforce_apc", "1", FCVAR_ARCHIVE,
+	"1 = NGL squad leaders may get an APC (Reinforce.Vehicle) as a reinforcement wave.", 0, 1)
 
 local IsValid = IsValid
 
@@ -44,6 +55,27 @@ function R.Spawn(class, pos, leader, sq, yaw)
 	return e
 end
 
+-- A delivered vehicle takes the leader's orders (a squad asset, not a member).
+function R.AttachVehicle(v, leader, sq)
+	if not (IsValid(v) and IsValid(leader) and not leader.NGLDying and sq) then return end
+	v.NGLCommander = leader
+	sq.assets[v] = true
+end
+
+-- Should this wave be a vehicle (its class) instead of soldiers (nil)?
+function R.WantsVehicle(npc, sq, enemy, rc)
+	local class = rc.Vehicle
+	if not class or not cvVehicle:GetBool() then return nil end
+	if (npc.NGLVehiclesCalled or 0) >= (rc.VehicleLimit or 1) then return nil end
+	for v in pairs(sq.assets) do
+		if IsValid(v) and not v.NGLDying then return nil end -- still has one
+	end
+	if rc.ChooseVehicle then return rc.ChooseVehicle(npc, sq, enemy) and class or nil end
+	if enemy:IsPlayer() or enemy.IsVehicleNPC then return class end
+	local near = NGL.FindInRadius(enemy:GetPos(), 800, function(e) return NGL.Core.IsHostile(npc, e) end)
+	return #near >= (rc.VehicleThreat or 4) and class or nil
+end
+
 -- Is `pos` in sight of `ent` (an enemy or a player)?
 local losTrace = { mask = MASK_SOLID_BRUSHONLY }
 local losResult = {}
@@ -57,8 +89,9 @@ end
 R.SeenBy = seenBy
 
 -- On foot: a grid point 1200 to 2500 units from the leader, away from the
--- enemy, that neither the enemy nor any player can see.
-function R.OnFoot(npc, sq, enemy, rc)
+-- enemy, that neither the enemy nor any player can see. A vehicle drives in
+-- from such a point if it is wide enough.
+function R.OnFoot(npc, sq, enemy, rc, vehicle)
 	local Nav = NGL.Nav
 	if not (Nav and Nav.Loaded) then return false end
 	local pos, ePos = npc:GetPos(), enemy:GetPos()
@@ -69,13 +102,21 @@ function R.OnFoot(npc, sq, enemy, rc)
 		local a = base + ((try % 2 == 0) and 1 or -1) * math.floor((try + 1) / 2) * 0.5
 		local dist = 1200 + 300 * (try % 5)
 		local g = Nav.Nearest(Vector(pos.x + math.cos(a) * dist, pos.y + math.sin(a) * dist, pos.z))
+		local width = vehicle and (scripted_ents.Get(vehicle) or {}).NavWidth
+		if g and width and width > 24 and not Nav.WideOk(g, math.ceil(width / 8) * 8) then g = nil end
 		if g then
 			local gp = Nav.NodePos(g)
 			local hidden = not seenBy(enemy, gp)
 			for _, ply in ipairs(players) do
 				if hidden and ply:Alive() and seenBy(ply, gp) then hidden = false end
 			end
-			if hidden then
+			if hidden and vehicle then
+				local v = R.Spawn(vehicle, gp + Vector(0, 0, 8), npc, nil, math.deg(base) + 180)
+				if not IsValid(v) then return false end
+				R.AttachVehicle(v, npc, sq)
+				if v.MoveTo then v:MoveTo(pos, true) end
+				return true
+			elseif hidden then
 				local n = rc.OnFootCount or 4
 				for k = 1, n do
 					local ang = k / n * 2 * math.pi
@@ -90,10 +131,11 @@ function R.OnFoot(npc, sq, enemy, rc)
 end
 
 -- Tries to get reinforcements to the leader now. True if they're coming.
-function R.Call(npc, sq, enemy, now, rc)
+-- `vehicle` = class to bring instead of soldiers.
+function R.Call(npc, sq, enemy, now, rc, vehicle)
 	local Air = NGL.Air
 	if not (Air and Air.Ready) then return false end -- still building: try later
-	if Air.Count == 0 then return R.OnFoot(npc, sq, enemy, rc) end
+	if Air.Count == 0 then return R.OnFoot(npc, sq, enemy, rc, vehicle) end
 
 	if R.CountShips() >= cvShips:GetInt() then return false end
 	local ePos = enemy:GetPos()
@@ -109,7 +151,8 @@ function R.Call(npc, sq, enemy, now, rc)
 	R.Active[ship] = true
 	ship:NGLStartTrip({
 		entry = entry, landing = ground, hover = top, enemyPos = ePos,
-		leader = npc, squad = sq, cargo = rc.Cargo, count = rc.Count or 6,
+		leader = npc, squad = sq, cargo = rc.Cargo,
+		count = vehicle and 0 or rc.Count or 6, vehicle = vehicle,
 	})
 	return true
 end
@@ -125,8 +168,15 @@ function R.Think(npc, now, sq, cfg)
 	if not IsValid(e) or now - (npc.NGLLastSeenT or -1e9) > 30 then return end
 
 	npc.NGLNextReinforce = now + 15 -- no luck: ask again a bit later
-	if R.Call(npc, sq, e, now, rc) then
+	local vehicle = R.WantsVehicle(npc, sq, e, rc)
+	local ok = R.Call(npc, sq, e, now, rc, vehicle)
+	if not ok and vehicle then -- no way to bring it: soldiers instead
+		vehicle = nil
+		ok = R.Call(npc, sq, e, now, rc)
+	end
+	if ok then
 		npc.NGLReinforced = (npc.NGLReinforced or 0) + 1
+		if vehicle then npc.NGLVehiclesCalled = (npc.NGLVehiclesCalled or 0) + 1 end
 		npc.NGLNextReinforce = now + cvCooldown:GetFloat()
 		if npc.NGLSignal then npc:NGLSignal("Halt") end
 		npc:NGLSound("Reinforce")
