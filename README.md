@@ -191,7 +191,7 @@ Testing in game (superadmin): `ngl_squad_make [size]` makes the NGL NPC you look
 
 - **Idle:** strolls around its home spot (where it spawned or last fought) at walking pace with relaxed weapon animations, then stands a while (`WanderDelay`, 4 to 10 s) and looks around now and then before the next stroll (`WanderRadius`, `WalkSpeed`; `WanderRadius = 0` stands still). Group members hang about near their leader.
 - **Crowds:** an NPC with another one right in its way (within 90 units ahead, closer than their two widths to its line) bends round it, keeping right, so two meeting head on slide past each other instead of stopping. One standing in the way steps aside the other way for a moment. It uses the spatial grid and positions from each NPC's last think: no traces, nothing for NPCs that aren't moving.
-- **Ledges:** paths can jump down ledges up to `ENT.JumpDown` (200; zombies 250) and across gaps (`ENT.JumpGap`), with the engine's jump and the `Jump`, `Glide` and `Land` animations (HL2's `jump_holding_*`). With `ENT.Rappel` (Combine) higher drops, up to `RappelMax` (1000), are roped down: the NPC steps out over the edge and slides down with the `Rappel` loop (HL2's `rappelloop`). `ENT.JumpDown = 0` and `JumpGap = false` keep an NPC off them (the APC).
+- **Ledges:** paths can jump down ledges up to `ENT.JumpDown` (200; zombies 250) and across gaps (`ENT.JumpGap`), with the engine's jump and the `Jump`, `Glide` and `Land` animations (HL2's `jump_holding_*`). With `ENT.Rappel` (Combine) higher drops, up to `RappelMax` (1000), are roped down: a rope (GMod's rope texture) hangs from the edge, and the NPC steps out over it and slides down holding it, with one `RappelDrop` animation for the whole way (the Combine's come with NGL, see below; played faster or slower to fit the drop), or the `Rappel` loop (HL2's `rappelloop`) for NPCs without one. Animations a model doesn't have can come from an animation-only model with the same skeleton (`ENT.RappelAnimModel`): the NPC uses it just while it's on the rope and clients draw its own model on it. `ENT.JumpDown = 0` and `JumpGap = false` keep an NPC off them (the APC).
 - **Doors:** a closed door in the way is opened (`ENT.OpenDoors`, on for people, off for zombies and the APC), or kicked in, locked or not, with `ENT.DoorBreach` (Combine and rebels): the NPC faces it and hits it with its melee animation (`Anims.Kick`; HL2's Combine use the rifle butt; models without one, like citizens, give it a shove), and the door flies off its hinges as a physics prop. The map's doors are put in a small grid once, so the check is a table lookup unless a door is right ahead. `ngl_door_breach` 2 = off the hinges (default), 1 = burst open, 0 = just open it; `ngl_door_respawn` (120 s, 0 = never) puts kicked-off doors back so map logic keeps working.
 - **Alerted:** when an NPC spots an enemy, allies within `AlertRadius` (1500) that have nothing to do run over to look.
 - **Fighting:** depends on the AI mode (above). The default runs at the enemy with the weapon raised until in `AttackRange`, then shoots while sidestepping at walking pace, standing still (`StandChance`, 0.3) or crouching to hold the spot (`CrouchChance`, 0.35; crouched it sees and shoots from `CrouchEyeHeight`). Reloads after `Weapon.Clip` shots (`Weapon.ReloadTime` seconds without firing).
@@ -253,6 +253,12 @@ How NPCs use it:
 ## Installing
 
 Copy (or clone) this folder into `garrysmod/addons/ngl-base`, then restart the map.
+
+Nothing else is needed. The Combine rope animations (`Rappel_b`, `Rappel_c`, `Rappel_f`) ship with NGL in `models/ngl/combine_rappel.mdl`, under NGL's own name, so they replace nothing in HL2 or other addons and only play while an NGL Combine is on a rope. Servers send them to clients that don't have the addon.
+
+## Credits
+
+Combine rope animations: from [Unit1's Mixed Combine Animation Pack](https://steamcommunity.com/sharedfiles/filedetails/?id=3773503767), used with permission; Unit1 got them, with permission, from their original authors, who took them from the game. The rope uses GMod's own `cable/rope` texture.
 
 ## Running the benchmark
 

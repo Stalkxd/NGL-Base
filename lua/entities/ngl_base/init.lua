@@ -234,6 +234,8 @@ function ENT:Initialize()
 	local model = self.Model
 	if type(model) == "table" then model = model[math.random(#model)] end
 	self:SetModel(model)
+	local am = self.Rappel and self.RappelAnimModel
+	if am and util.IsValidModel(am) then util.PrecacheModel(am) end -- no hitch on the first rope
 	self:NGLResolveAnims()
 	self:NGLResolveSounds()
 
@@ -516,12 +518,74 @@ function ENT:NGLStartTraverse(move, to)
 	if move == "rappel" then
 		T.over = 0.35
 		T.dur = T.over + math.Clamp((from.z - to.z) / RAPPEL_SPEED, 0.8, 5)
-		if A.Rappel then self:PlayAnim(A.Rappel, false) end
+		-- The rope hangs from the edge, half way to where it lands.
+		self:SetNGLRope(Vector((from.x + to.x) * 0.5, (from.y + to.y) * 0.5, from.z + 4))
+		local seq, drop = self:NGLRappelModel(true)
+		if seq then
+			-- One animation for the whole way down, played to fit the drop.
+			local sd = self:SequenceDuration(seq)
+			local rate = math.Clamp(sd / T.dur, 0.6, 2.5)
+			T.dur = sd / rate
+			T.over = math.min(0.5 / rate, T.dur * 0.3) -- its step off the edge
+			T.oneShot = true
+			self:PlayAnim(drop, false, rate)
+		elseif A.Rappel then
+			self:PlayAnim(A.Rappel, false)
+		end
 		self:NGLSound("Rappel")
 	else
 		self.loco:JumpAcrossGap(to, dir)
 		if A.Jump then self:PlayAnim(A.Jump, false) end
 	end
+end
+
+-- Rappel animations that the NPC's model doesn't have come from an
+-- animation-only model (ENT.RappelAnimModel, same skeleton): the NPC
+-- switches to it for the way down and clients draw its own model on top
+-- (bone-merged). on = true: switch, returns the sequence and its name, or
+-- nil to use the Rappel loop instead. on = false: switch back.
+local rappelSeqs = {}
+function ENT:NGLRappelModel(on)
+	if not on then
+		local body = self.NGLBodyModel
+		if not body then return end
+		self.NGLBodyModel = nil
+		self:SetModel(body)
+		self:SetSkin(self.NGLBodySkin or 0)
+		local b = self.NGLBodyBounds
+		if b then self:SetCollisionBounds(b[1], b[2]) end
+		self:SetNGLBody("")
+		return
+	end
+	local list = self.Anims and self.Anims.RappelDrop or BASE_ANIMS.RappelDrop
+	if not list then return nil end
+	if type(list) ~= "table" then list = { list } end
+	local am = self.RappelAnimModel
+	local own = self:GetModel()
+	local key = am or own
+	if rappelSeqs[key] == false or am and not util.IsValidModel(am) then return nil end
+	if am then
+		self.NGLBodyModel, self.NGLBodySkin = own, self:GetSkin()
+		local mins, maxs = self:GetCollisionBounds()
+		self.NGLBodyBounds = { mins, maxs }
+		self:SetModel(am)
+		self:SetCollisionBounds(mins, maxs)
+		self:SetSkin(self.NGLBodySkin) -- clients draw the body with it
+	end
+	local found = rappelSeqs[key]
+	if found == nil then
+		found = false
+		for _, name in ipairs(list) do
+			if self:LookupSequence(name) >= 0 then found = name break end
+		end
+		rappelSeqs[key] = found
+	end
+	if not found then
+		self:NGLRappelModel(false)
+		return nil
+	end
+	if am then self:SetNGLBody(own) end
+	return self:LookupSequence(found), found
 end
 
 function ENT:NGLTraverseUpdate(now)
@@ -545,8 +609,10 @@ function ENT:NGLTraverseUpdate(now)
 		self.loco:SetVelocity(Vector(0, 0, 0))
 		if t >= T.dur then
 			self.NGLTraverse = nil
+			self:NGLRappelModel(false)
+			self:SetNGLRope(vector_origin)
 			if A.Land then self:PlayAnim(A.Land, false) end
-		elseif A.Rappel and now >= (self.NGLAnimUntil or 0) then
+		elseif not T.oneShot and A.Rappel and now >= (self.NGLAnimUntil or 0) then
 			self:PlayAnim(A.Rappel, false) -- keep the loop going
 		end
 		return
@@ -579,6 +645,9 @@ end
 function ENT:OnKilled(dmginfo)
 	if self.NGLDying then return end
 	self.NGLDying = true
+	-- Shot off the rope: back to its own model for the ragdoll.
+	if self.NGLBodyModel then self:NGLRappelModel(false) end
+	self:SetNGLRope(vector_origin)
 
 	hook.Run("OnNPCKilled", self, dmginfo:GetAttacker(), dmginfo:GetInflictor())
 	self:NGLSound("Death")
