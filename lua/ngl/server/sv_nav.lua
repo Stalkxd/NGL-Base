@@ -11,6 +11,14 @@
 -- search, results are cached briefly, the queue is capped, and searches nobody
 -- is waiting for any more are dropped, so a squad pays for one path and a
 -- flood of requests can't build an endless backlog.
+--
+-- With no grid for the map it is generated on its own (ngl_nav_auto). The
+-- generator walks through doors (NPCs open or kick them) and links ledges to
+-- the ground below: NPCs jump down small drops (ENT.JumpDown) and Combine
+-- rappel down big ones (ENT.Rappel). Players can fix the grid in game with
+-- the NGL Nav Editor tool (sv_nav_edit.lua): add or remove walkable area and
+-- place jump links. Edits are kept apart from the generated grid
+-- (data/ngl_nav/<map>_edits.txt), so they survive regenerating it.
 
 NGL.Nav = NGL.Nav or {}
 local Nav = NGL.Nav
@@ -24,6 +32,9 @@ local cvGenBudget = CreateConVar("ngl_nav_gen_budget", "20", FCVAR_ARCHIVE, "Mil
 local cvBudget = CreateConVar("ngl_nav_budget", "2", FCVAR_ARCHIVE, "Milliseconds per tick for NPC path-finding.", 0.1, 50)
 local cvMaxExpand = CreateConVar("ngl_nav_max_expand", "8000", FCVAR_ARCHIVE, "Give up a path search after expanding this many grid points.", 100, 1000000)
 local cvMaxQueue = CreateConVar("ngl_nav_max_queue", "64", FCVAR_ARCHIVE, "Path requests beyond this many queued searches fail at once (the NPC walks straight).", 1, 10000)
+local cvAuto = CreateConVar("ngl_nav_auto", "1", FCVAR_ARCHIVE, "Generate the NGL nav grid on its own when a map has none (0 = only with ngl_nav_generate).", 0, 1)
+local cvDrops = CreateConVar("ngl_nav_drops", "1", FCVAR_ARCHIVE, "ngl_nav_generate links ledges to the ground below, so NPCs can jump or rappel down.", 0, 1)
+local cvMaxDrop = CreateConVar("ngl_nav_max_drop", "1000", FCVAR_ARCHIVE, "Highest ledge (units) ngl_nav_generate links to the ground below.", 64, 4000)
 
 -- Hull the generator checks against: a standing NPC above step height.
 local STEP = 18
@@ -56,6 +67,9 @@ local function reset()
 	Nav.NX, Nav.NY, Nav.NZ, Nav.NM, Nav.NB = {}, {}, {}, {}, {}
 	Nav.Cells = {}
 	Nav.Count = 0
+	Nav.Dead = {}  -- removed by an edit, until the next compact()
+	Nav.Links = {} -- one-way jumps: { a = node, b = node, kind = "drop" | "jump", h = drop height }
+	Nav.LB = {}    -- [node] = { link index, ... } leaving it
 	Nav.Loaded = false
 	Nav.Cache = {}
 	Nav.Pending = {}
@@ -86,9 +100,10 @@ local function nodeAt(ix, iy, z, tol)
 	local c = Nav.Cells[cellKey(ix, iy)]
 	if not c then return nil end
 	local best, bestD = nil, tol
+	local dead = Nav.Dead
 	for i = 1, #c do
 		local d = abs(Nav.NZ[c[i]] - z)
-		if d <= bestD then best, bestD = c[i], d end
+		if d <= bestD and not (dead and dead[c[i]]) then best, bestD = c[i], d end
 	end
 	return best
 end
@@ -118,6 +133,27 @@ local function buildNeighbours()
 	end
 end
 
+-- Links leaving each node, for the search.
+local function buildLinks()
+	local LB = {}
+	for k, L in ipairs(Nav.Links) do
+		local t = LB[L.a]
+		if not t then t = {}; LB[L.a] = t end
+		t[#t + 1] = k
+	end
+	Nav.LB = LB
+end
+Nav.BuildLinks = buildLinks
+
+local function addLink(a, b, kind, h)
+	for _, L in ipairs(Nav.Links) do
+		if L.a == a and L.b == b then return L end
+	end
+	local L = { a = a, b = b, kind = kind, h = h }
+	Nav.Links[#Nav.Links + 1] = L
+	return L
+end
+
 -- Nearest node to a world position (searches up to 2 cells around).
 function Nav.Nearest(pos)
 	if not Nav.Loaded then return nil end
@@ -133,7 +169,7 @@ function Nav.Nearest(pos)
 						for k = 1, #c do
 							local i = c[k]
 							local dz = Nav.NZ[i] - pos.z
-							if dz < 80 and dz > -120 then
+							if dz < 80 and dz > -120 and not Nav.Dead[i] then
 								local dx, dy = x * S - pos.x, y * S - pos.y
 								local d = dx * dx + dy * dy + dz * dz * 4
 								if d < bestD then best, bestD = i, d end
@@ -197,15 +233,24 @@ local function navPath()
 	return "ngl_nav/" .. game.GetMap() .. ".dat"
 end
 
+-- The generated grid (edits are kept apart, see sv_nav_edit.lua).
+-- Format: header, one line per point, then "LINKS" and one line per link.
+local KIND_CODE, CODE_KIND = { drop = 1, jump = 2 }, { "drop", "jump" }
+
 function Nav.Save()
-	local parts = { string.format("NGLNAV1 %d %d", Nav.S, Nav.Count) }
+	local parts = { string.format("NGLNAV2 %d %d", Nav.S, Nav.Count) }
 	for i = 1, Nav.Count do
 		parts[#parts + 1] = string.format("%d %d %.1f %d", Nav.NX[i], Nav.NY[i], Nav.NZ[i], Nav.NM[i])
+	end
+	parts[#parts + 1] = "LINKS"
+	for _, L in ipairs(Nav.Links) do
+		parts[#parts + 1] = string.format("%d %d %d %.1f", L.a, L.b, KIND_CODE[L.kind] or 1, L.h or 0)
 	end
 	file.CreateDir("ngl_nav")
 	file.Write(navPath(), util.Compress(table.concat(parts, "\n")))
 end
 
+-- Loads the generated grid, then puts the edits back on (Nav.ApplyEdits).
 function Nav.Load()
 	local raw = file.Read(navPath(), "DATA")
 	if not raw then return false end
@@ -213,17 +258,29 @@ function Nav.Load()
 	if not text then return false end
 
 	local header, rest = text:match("^([^\n]*)\n?(.*)$")
-	local S = header and tonumber(header:match("^NGLNAV1 (%d+)"))
+	local S = header and tonumber(header:match("^NGLNAV[12] (%d+)"))
 	if not S then return false end
 
 	reset()
 	Nav.S = S
-	for ix, iy, z, m in rest:gmatch("(-?%d+) (-?%d+) (-?[%d%.]+) (%d+)") do
+	local nodes, links = rest, nil
+	local cut = rest:find("LINKS", 1, true)
+	if cut then nodes, links = rest:sub(1, cut - 1), rest:sub(cut + 5) end
+	for ix, iy, z, m in nodes:gmatch("(-?%d+) (-?%d+) (-?[%d%.]+) (%d+)") do
 		local i = addNode(tonumber(ix), tonumber(iy), tonumber(z))
 		Nav.NM[i] = tonumber(m)
 	end
+	if links then
+		local n = Nav.Count
+		for a, b, k, h in links:gmatch("(%d+) (%d+) (%d+) (-?[%d%.]+)") do
+			a, b = tonumber(a), tonumber(b)
+			if a <= n and b <= n then addLink(a, b, CODE_KIND[tonumber(k)] or "drop", tonumber(h)) end
+		end
+	end
 	buildNeighbours()
+	buildLinks()
 	Nav.Loaded = Nav.Count > 0
+	if Nav.ApplyEdits then Nav.ApplyEdits() end
 	return Nav.Loaded
 end
 
@@ -239,101 +296,152 @@ local hullTrace = { mask = MASK_NPCSOLID_BRUSHONLY, mins = HULL_MINS, maxs = HUL
 local hullResult = {}
 hullTrace.output = hullResult
 
+-- Doors don't block the grid: NPCs open them or kick them in (sv_doors.lua).
+local DOOR_CLASSES = { "prop_door_rotating", "func_door", "func_door_rotating" }
+local function doorFilter()
+    local list = {}
+    for _, cls in ipairs(DOOR_CLASSES) do
+        for _, e in ipairs(ents.FindByClass(cls)) do list[#list + 1] = e end
+    end
+    groundTrace.filter, hullTrace.filter = list, list
+end
+
 -- Ground height at (x, y) searching from zTop down to zBottom, or nil.
 local function groundAt(x, y, zTop, zBottom)
-	groundTrace.start = Vector(x, y, zTop)
-	groundTrace.endpos = Vector(x, y, zBottom)
-	util.TraceLine(groundTrace)
-	if groundResult.StartSolid or not groundResult.Hit or groundResult.HitNormal.z < MIN_NORMAL_Z then
-		return nil
-	end
-	return groundResult.HitPos.z
+    groundTrace.start = Vector(x, y, zTop)
+    groundTrace.endpos = Vector(x, y, zBottom)
+    util.TraceLine(groundTrace)
+    if groundResult.StartSolid or not groundResult.Hit or groundResult.HitNormal.z < MIN_NORMAL_Z then
+        return nil
+    end
+    return groundResult.HitPos.z
 end
 
 local function walkable(ax, ay, az, bx, by, bz)
-	hullTrace.start = Vector(ax, ay, az + STEP)
-	hullTrace.endpos = Vector(bx, by, bz + STEP)
-	util.TraceHull(hullTrace)
-	return not hullResult.Hit and not hullResult.StartSolid
+    hullTrace.start = Vector(ax, ay, az + STEP)
+    hullTrace.endpos = Vector(bx, by, bz + STEP)
+    util.TraceHull(hullTrace)
+    return not hullResult.Hit and not hullResult.StartSolid
 end
 
 local function seedPositions()
-	local seeds = {}
-	for _, cls in ipairs({ "info_player_start", "info_player_deathmatch", "info_player_combine",
-		"info_player_rebel", "info_player_terrorist", "info_player_counterterrorist", "gmod_player_start" }) do
-		for _, e in ipairs(ents.FindByClass(cls)) do seeds[#seeds + 1] = e:GetPos() end
-	end
-	for _, ply in ipairs(player.GetAll()) do seeds[#seeds + 1] = ply:GetPos() end
-	return seeds
+    local seeds = {}
+    for _, cls in ipairs({ "info_player_start", "info_player_deathmatch", "info_player_combine",
+        "info_player_rebel", "info_player_terrorist", "info_player_counterterrorist", "gmod_player_start" }) do
+        for _, e in ipairs(ents.FindByClass(cls)) do seeds[#seeds + 1] = e:GetPos() end
+    end
+    for _, ply in ipairs(player.GetAll()) do seeds[#seeds + 1] = ply:GetPos() end
+    return seeds
+end
+
+-- Links node i to its 8 neighbours where a person can walk, adding new
+-- points to `queue`. `canAdd(ix, iy, z)`, if given, says where new points
+-- may go (the editor's add tool keeps to its circle). With drops on, a
+-- straight step off a ledge with ground further down (up to
+-- ngl_nav_max_drop) gets a one-way drop link to a point down there.
+local function expandNode(i, queue, maxNodes, canAdd, drops)
+    local S = Nav.S
+    local maxUp = math.min(S * 0.75, 64)
+    local maxDown = 64
+    local ix, iy, z = Nav.NX[i], Nav.NY[i], Nav.NZ[i]
+    local ax, ay = ix * S, iy * S
+    for d = 1, 8 do
+        local bit_d = bit.lshift(1, d - 1)
+        if bit.band(Nav.NM[i], bit_d) == 0 then
+            local nx, ny = ix + DIRS[d][1], iy + DIRS[d][2]
+            local bx, by = nx * S, ny * S
+            local gz = groundAt(bx, by, z + maxUp + 8, z - maxDown)
+            if gz then
+                if walkable(ax, ay, z, bx, by, gz) then
+                    local j = nodeAt(nx, ny, gz, 32)
+                    if not j and Nav.Count < maxNodes and (not canAdd or canAdd(nx, ny, gz)) then
+                        j = addNode(nx, ny, gz)
+                        queue[#queue + 1] = j
+                    end
+                    if j then
+                        Nav.NM[i] = bit.bor(Nav.NM[i], bit_d)
+                        Nav.NM[j] = bit.bor(Nav.NM[j], bit.lshift(1, OPP[d] - 1))
+                    end
+                end
+            elseif drops and d <= 4 then
+                -- Nothing within a step down: a ledge. Room to walk off it and
+                -- to fall straight down to ground further below?
+                local low = groundAt(bx, by, z + 8, z - drops)
+                if low and z - low > maxDown and walkable(ax, ay, z, bx, by, z) and walkable(bx, by, z, bx, by, low) then
+                    local j = nodeAt(nx, ny, low, 32)
+                    if not j and Nav.Count < maxNodes and (not canAdd or canAdd(nx, ny, low)) then
+                        j = addNode(nx, ny, low)
+                        queue[#queue + 1] = j
+                    end
+                    if j then addLink(i, j, "drop", z - low) end
+                end
+            end
+        end
+    end
+end
+
+-- Flood-fills from the queue (all of it, or `budget` seconds at a time when
+-- run in a coroutine, with `report` now and then).
+local function flood(queue, maxNodes, canAdd, drops, budget, report)
+    local head = 1
+    local t0, lastReport = SysTime(), SysTime()
+    while head <= #queue do
+        expandNode(queue[head], queue, maxNodes, canAdd, drops)
+        head = head + 1
+        if budget and SysTime() - t0 > budget then
+            if report and SysTime() - lastReport > 2 then
+                lastReport = SysTime()
+                report(string.format("Generating... %d points, %d queued", Nav.Count, #queue - head + 1))
+            end
+            coroutine.yield()
+            t0 = SysTime()
+        end
+    end
 end
 
 local genRoutine = nil
 
 local function generate(report)
-	reset()
-	local S = Nav.S
-	local maxUp = math.min(S * 0.75, 64)
-	local maxDown = 64
-	local maxNodes = cvMaxNodes:GetInt()
-	local budget = cvGenBudget:GetFloat() / 1000
-	local queue, head = {}, 1
-	local t0 = SysTime()
-	local lastReport = SysTime()
+    reset()
+    local S = Nav.S
+    local maxNodes = cvMaxNodes:GetInt()
+    local queue = {}
+    doorFilter()
 
-	for _, p in ipairs(seedPositions()) do
-		local ix, iy = floor(p.x / S + 0.5), floor(p.y / S + 0.5)
-		local z = groundAt(ix * S, iy * S, p.z + 32, p.z - 256)
-		if z and not nodeAt(ix, iy, z, 32) then
-			queue[#queue + 1] = addNode(ix, iy, z)
-		end
-	end
-	if #queue == 0 then
-		report("No spawn points or players to start from. Stand on the map and try again.")
-		return
-	end
+    for _, p in ipairs(seedPositions()) do
+        local ix, iy = floor(p.x / S + 0.5), floor(p.y / S + 0.5)
+        local z = groundAt(ix * S, iy * S, p.z + 32, p.z - 256)
+        if z and not nodeAt(ix, iy, z, 32) then
+            queue[#queue + 1] = addNode(ix, iy, z)
+        end
+    end
+    if #queue == 0 then
+        report("No spawn points or players to start from. Stand on the map and try again.")
+        return
+    end
 
-	while head <= #queue do
-		local i = queue[head]
-		head = head + 1
-		local ix, iy, z = Nav.NX[i], Nav.NY[i], Nav.NZ[i]
-		local ax, ay = ix * S, iy * S
+    flood(queue, maxNodes, nil, cvDrops:GetBool() and cvMaxDrop:GetFloat() or nil, cvGenBudget:GetFloat() / 1000, report)
 
-		for d = 1, 8 do
-			local bit_d = bit.lshift(1, d - 1)
-			if bit.band(Nav.NM[i], bit_d) == 0 then
-				local nx, ny = ix + DIRS[d][1], iy + DIRS[d][2]
-				local bx, by = nx * S, ny * S
-				local gz = groundAt(bx, by, z + maxUp + 8, z - maxDown)
-				if gz and walkable(ax, ay, z, bx, by, gz) then
-					local j = nodeAt(nx, ny, gz, 32)
-					if not j and Nav.Count < maxNodes then
-						j = addNode(nx, ny, gz)
-						queue[#queue + 1] = j
-					end
-					if j then
-						Nav.NM[i] = bit.bor(Nav.NM[i], bit_d)
-						Nav.NM[j] = bit.bor(Nav.NM[j], bit.lshift(1, OPP[d] - 1))
-					end
-				end
-			end
-		end
-
-		if SysTime() - t0 > budget then
-			if SysTime() - lastReport > 2 then
-				lastReport = SysTime()
-				report(string.format("Generating... %d points, %d queued", Nav.Count, #queue - head + 1))
-			end
-			coroutine.yield()
-			t0 = SysTime()
-		end
-	end
-
-	buildNeighbours()
-	Nav.Loaded = Nav.Count > 0
-	Nav.Save()
-	report(string.format("Done: %d points at %d-unit spacing%s. Saved to garrysmod/data/%s",
-		Nav.Count, S, Nav.Count >= maxNodes and " (hit ngl_nav_max_nodes, map may be partly covered)" or "", navPath()))
+    buildNeighbours()
+    buildLinks()
+    Nav.Loaded = Nav.Count > 0
+    Nav.Save()
+    local base = Nav.Count
+    if Nav.ApplyEdits then Nav.ApplyEdits() end
+    report(string.format("Done: %d points, %d ledge links at %d-unit spacing%s. Saved to garrysmod/data/%s%s",
+        base, #Nav.Links, S, base >= maxNodes and " (hit ngl_nav_max_nodes, map may be partly covered)" or "", navPath(),
+        (Nav.Edits and #Nav.Edits > 0) and string.format(" (+ %d edits)", #Nav.Edits) or ""))
 end
+
+-- For the editor (sv_nav_edit.lua).
+Nav._I = {
+    addNode = addNode, nodeAt = nodeAt, addLink = addLink, cellKey = cellKey,
+    groundAt = groundAt, walkable = walkable, flood = flood, doorFilter = doorFilter,
+    buildNeighbours = buildNeighbours, buildLinks = buildLinks, reset = reset,
+    clearSearches = function() for k in pairs(searches) do searches[k] = nil end end,
+    maxNodes = function() return cvMaxNodes:GetInt() end,
+    maxDrop = function() return cvDrops:GetBool() and cvMaxDrop:GetFloat() or nil end,
+}
 
 ----------------------------------------------------------------------------
 -- Path-finding (A* in budgeted coroutines)
@@ -382,8 +490,23 @@ local function heuristic(a, b)
 	return (dx > dy) and (dx + 0.4142 * dy) or (dy + 0.4142 * dx)
 end
 
+-- How an NPC with these capabilities (ENT.JumpDown, ENT.Rappel...) gets
+-- along a link: "jump" (jump down, or across a gap), "rappel", or nil.
+local function linkMove(L, caps)
+	if not caps then return nil end
+	if L.kind == "jump" then return caps.gap and "jump" or nil end
+	local h = L.h or 0
+	if h <= (caps.drop or 0) then return "jump" end
+	if h <= (caps.rappel or 0) then return "rappel" end
+	return nil
+end
+Nav.LinkMove = linkMove
+
 -- Turns a node chain into waypoints, dropping points on straight runs.
-local function toWaypoints(chain)
+-- linkIn[k]: the link taken from chain[k - 1] to chain[k]. Both ends of a
+-- link are kept, and pts.links[w] = { move = "jump" | "rappel", h = height }
+-- marks waypoint w as the take-off point (w + 1 is where it lands).
+local function toWaypoints(chain, linkIn, caps)
 	local pts = {}
 	local n = #chain
 	for k = 1, n do
@@ -393,8 +516,14 @@ local function toWaypoints(chain)
 			local d1x, d1y = Nav.NX[b] - Nav.NX[a], Nav.NY[b] - Nav.NY[a]
 			local d2x, d2y = Nav.NX[c] - Nav.NX[b], Nav.NY[c] - Nav.NY[b]
 			keep = d1x ~= d2x or d1y ~= d2y or abs(Nav.NZ[c] - Nav.NZ[b]) > 24
+				or (linkIn and (linkIn[k] or linkIn[k + 1])) or false
 		end
 		if keep then pts[#pts + 1] = nodePos(chain[k]) end
+		local L = linkIn and linkIn[k + 1]
+		if L then
+			pts.links = pts.links or {}
+			pts.links[#pts] = { move = linkMove(L, caps), h = L.h or 0 }
+		end
 	end
 	return pts
 end
@@ -426,7 +555,7 @@ Nav.WideOk = function(n, width)
 	return wideOk(n, width, Nav.Wide[width])
 end
 
-local function search(start, goal, width)
+local function search(start, goal, width, caps)
 	local known
 	if width then
 		Nav.Wide[width] = Nav.Wide[width] or {}
@@ -435,6 +564,8 @@ local function search(start, goal, width)
 	local traced = 0
 	local hn, hf, size = {}, {}, 0
 	local g, came, closed = { [start] = 0 }, {}, {}
+	local LB, Links = caps and Nav.LB, Nav.Links
+	local viaLink = LB and {}
 	size = heapPush(hn, hf, size, start, heuristic(start, goal))
 	local maxExpand = cvMaxExpand:GetInt()
 	local expanded = 0
@@ -443,12 +574,18 @@ local function search(start, goal, width)
 		local cur
 		cur, size = heapPop(hn, hf, size)
 		if cur == goal then
-			local chain = { cur }
+			local chain, linkIn = { cur }, viaLink and {}
+			local rev = { viaLink and viaLink[cur] or false }
 			while came[cur] do
 				cur = came[cur]
 				table.insert(chain, 1, cur)
+				table.insert(rev, 1, viaLink and viaLink[cur] or false)
 			end
-			return toWaypoints(chain)
+			if linkIn then
+				for k = 1, #chain do if rev[k] then linkIn[k] = rev[k] end end
+				if next(linkIn) == nil then linkIn = nil end
+			end
+			return toWaypoints(chain, linkIn, caps)
 		end
 		if not closed[cur] then
 			closed[cur] = true
@@ -470,7 +607,28 @@ local function search(start, goal, width)
 					if not old or ng < old then
 						g[j] = ng
 						came[j] = cur
+						if viaLink then viaLink[j] = nil end
 						size = heapPush(hn, hf, size, j, ng + heuristic(j, goal))
+					end
+				end
+			end
+
+			-- Jumps and drops this NPC can take.
+			local out = LB and LB[cur]
+			if out then
+				for k = 1, #out do
+					local L = Links[out[k]]
+					local j = L.b
+					if not closed[j] and linkMove(L, caps) then
+						local dx, dy = Nav.NX[j] - Nav.NX[cur], Nav.NY[j] - Nav.NY[cur]
+						local ng = gc + sqrt(dx * dx + dy * dy) + 3 -- a bit dearer than walking
+						local old = g[j]
+						if not old or ng < old then
+							g[j] = ng
+							came[j] = cur
+							viaLink[j] = L
+							size = heapPush(hn, hf, size, j, ng + heuristic(j, goal))
+						end
 					end
 				end
 			end
@@ -482,6 +640,23 @@ local function search(start, goal, width)
 		end
 	end
 	return nil
+end
+
+-- What an NPC class can do on links, from its ENT fields; one shared
+-- table per combination (its key is part of the path cache key).
+local capsCache = {}
+function Nav.Caps(ent)
+	local drop = ent.JumpDown or 0
+	local rappel = ent.Rappel and (ent.RappelMax or 1000) or 0
+	local gap = ent.JumpGap and true or false
+	if drop <= 0 and rappel <= 0 and not gap then return nil end
+	local key = string.format("c%d:%d:%s", drop, rappel, gap and 1 or 0)
+	local c = capsCache[key]
+	if not c then
+		c = { key = key, drop = drop, rappel = rappel, gap = gap }
+		capsCache[key] = c
+	end
+	return c
 end
 
 local function regionKey(s, t)
@@ -502,8 +677,11 @@ end
 -- table: it is shared with other NPCs and the cache.
 -- `width` (half width in units, optional) asks for a path a wide NPC fits
 -- through; anything up to 24 counts as person-sized.
-function Nav.RequestPath(from, to, callback, wanted, width)
+-- `caps` (optional, see Nav.Caps) lets the path jump down ledges, across
+-- gaps or rappel; such paths have `path.links` (see toWaypoints).
+function Nav.RequestPath(from, to, callback, wanted, width, caps)
 	if width and width <= 24 then width = nil end
+	if caps and #Nav.Links == 0 then caps = nil end
 	if width then width = math.ceil(width / 8) * 8 end -- few width classes, more shared work
 	if not Nav.Loaded then return false end
 	local st = Nav.Stats
@@ -516,6 +694,7 @@ function Nav.RequestPath(from, to, callback, wanted, width)
 
 	local key = regionKey(s, t)
 	if width then key = "w" .. width .. "|" .. key end
+	if caps then key = caps.key .. "|" .. key end
 	local hit = Nav.Cache[key]
 	if hit and CurTime() - hit.t < CACHE_TIME then
 		st.cached = st.cached + 1
@@ -539,7 +718,7 @@ function Nav.RequestPath(from, to, callback, wanted, width)
 	Nav.Pending[key] = { waiter }
 	searches[#searches + 1] = {
 		key = key,
-		co = coroutine.create(function() return search(s, t, width) end),
+		co = coroutine.create(function() return search(s, t, width, caps) end),
 	}
 	return true
 end
@@ -623,11 +802,17 @@ local function tell(ply, msg)
 	end
 end
 
-concommand.Add("ngl_nav_generate", function(ply)
-	if not allowed(ply) then return end
-	if genRoutine then tell(ply, "Generation is already running.") return end
+function Nav.Generate(ply)
+	if genRoutine then tell(ply, "Generation is already running.") return false end
 	tell(ply, string.format("Generating nav grid for %s at %d-unit spacing...", game.GetMap(), cvSpacing:GetInt()))
 	genRoutine = coroutine.create(function() generate(function(m) tell(ply, m) end) end)
+	return true
+end
+function Nav.Generating() return genRoutine ~= nil end
+
+concommand.Add("ngl_nav_generate", function(ply)
+	if not allowed(ply) then return end
+	Nav.Generate(ply)
 end)
 
 concommand.Add("ngl_nav_info", function(ply)
@@ -635,8 +820,8 @@ concommand.Add("ngl_nav_info", function(ply)
 	if genRoutine then tell(ply, "Generation is running.") return end
 	if not Nav.Loaded then tell(ply, "No nav grid for this map. Run ngl_nav_generate.") return end
 	local st = Nav.Stats
-	tell(ply, string.format("Nav loaded: %d points, %d-unit spacing. Searches: %d queued, %d cached. Since start: %d found, %d failed, %d served from cache, %d dropped, %d rejected (queue full)",
-		Nav.Count, Nav.S, #searches, table.Count(Nav.Cache), st.ok, st.fail, st.cached, st.dropped, st.rejected))
+	tell(ply, string.format("Nav loaded: %d points, %d jump links, %d edits, %d-unit spacing. Searches: %d queued, %d cached. Since start: %d found, %d failed, %d served from cache, %d dropped, %d rejected (queue full)",
+		Nav.Count, #Nav.Links, Nav.Edits and #Nav.Edits or 0, Nav.S, #searches, table.Count(Nav.Cache), st.ok, st.fail, st.cached, st.dropped, st.rejected))
 end)
 
 -- Draws the grid around the caller for 15 s. debugoverlay only shows on a
@@ -673,7 +858,16 @@ concommand.Add("ngl_nav_reload", function(ply)
 	tell(ply, Nav.Load() and ("Loaded " .. Nav.Count .. " points.") or "No nav file for this map.")
 end)
 
--- Load this map's grid as soon as we can.
+-- Load this map's grid as soon as we can; with none, make one (ngl_nav_auto):
+-- right after the map loads if it has spawn points, otherwise when the first
+-- player spawns (generation starts from where players can stand).
+local function autoGenerate()
+	if Nav.Loaded or genRoutine or not cvAuto:GetBool() then return end
+	if #seedPositions() == 0 then return end
+	print("[NGL] No nav grid for this map: generating one (ngl_nav_auto 0 turns this off).")
+	Nav.Generate(nil)
+end
+
 if Nav.Load() then
 	print(string.format("[NGL] Nav grid loaded: %d points.", Nav.Count))
 end
@@ -681,4 +875,11 @@ hook.Add("InitPostEntity", "NGL.Nav.Load", function()
 	if not Nav.Loaded and Nav.Load() then
 		print(string.format("[NGL] Nav grid loaded: %d points.", Nav.Count))
 	end
+	-- No generated grid and not making one: whatever was added by hand.
+	if not Nav.Loaded and not cvAuto:GetBool() and Nav.ApplyEdits then Nav.ApplyEdits() end
+	timer.Simple(3, autoGenerate)
+end)
+hook.Add("PlayerSpawn", "NGL.Nav.Auto", function()
+	if Nav.Loaded or genRoutine then return end
+	timer.Simple(1, autoGenerate)
 end)

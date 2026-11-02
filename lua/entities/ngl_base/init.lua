@@ -109,7 +109,13 @@ function ENT:NGLResolveAnims()
 			if type(list) == "number" then list = { list } end
 			for i = 1, table.maxn(list) do
 				local act = list[i]
-				if act and self:SelectWeightedSequence(act) >= 0 then
+				local ok
+				if isstring(act) then
+					ok = self.LookupSequence ~= nil and self:LookupSequence(act) >= 0
+				else
+					ok = act and self:SelectWeightedSequence(act) >= 0
+				end
+				if ok then
 					r[name] = act
 					break
 				end
@@ -254,6 +260,8 @@ function ENT:Initialize()
 	self.NGLHome = self:GetPos() -- wander around here
 	self.NGLClip = self.Weapon and self.Weapon.Clip or 0
 	self.NGLMode = NGL.PickAIMode and NGL.PickAIMode(self) or nil
+	self.NGLNavCaps = NGL.Nav and NGL.Nav.Caps and NGL.Nav.Caps(self) or nil -- jumps and drops its paths may use
+	if self.loco.SetDeathDropHeight then self.loco:SetDeathDropHeight(math.max(self.JumpDown or 0, 200) + 64) end
 	self.NGLNextIdleSound = CurTime() + math.Rand(self.IdleSoundDelay[1], self.IdleSoundDelay[2])
 
 	NGL.Core.Add(self)
@@ -337,10 +345,13 @@ function ENT:BehaveUpdate(interval)
 		if wp then
 			local dx, dy = wp.x - pos.x, wp.y - pos.y
 			local reach = self.WaypointRadius
-			if dx * dx + dy * dy < (reach and reach * reach or WAYPOINT_SQR) then
+			if dx * dx + dy * dy < (reach and reach * reach or WAYPOINT_SQR) and not self.NGLTraverse then
+				-- At a ledge or gap on the path: jump (or rappel) to the next point.
+				local L = path.links and path.links[idx]
 				idx = idx + 1
 				self.NGLPathIdx = idx
 				wp = path[idx]
+				if L and L.move and wp then self:NGLStartTraverse(L.move, wp) end
 			end
 		end
 		if wp then
@@ -348,6 +359,14 @@ function ENT:BehaveUpdate(interval)
 		else
 			self.NGLPath = nil
 		end
+	end
+
+	-- In the air or on a rope: nothing else until we're down.
+	if self.NGLTraverse then
+		self:NGLTraverseUpdate(CurTime())
+		local B = NGL.Bench
+		if B then B.LuaTime = B.LuaTime + (SysTime() - t0) end
+		return
 	end
 
 	if not goal then
@@ -384,6 +403,31 @@ function ENT:BehaveUpdate(interval)
 		local B = NGL.Bench
 		if B then B.LuaTime = B.LuaTime + (SysTime() - t0) end
 		return
+	end
+
+	-- Someone in the way (Core.CrowdCheck): bend round them for a moment;
+	-- standing in someone's way: step aside.
+	local now = CurTime()
+	local sep = self.NGLSep
+	if sep then
+		if now >= sep.untilT then
+			self.NGLSep = nil
+		elseif goal then
+			local dx, dy = goal.x - pos.x, goal.y - pos.y
+			local l = math.sqrt(dx * dx + dy * dy)
+			if l > 1 then
+				local w = math.max(sep.w, 40)
+				goal = Vector(pos.x + dx / l * 40 + sep.x * w, pos.y + dy / l * 40 + sep.y * w, goal.z)
+			end
+		end
+	end
+	local push = self.NGLPush
+	if push then
+		if now >= push.untilT then
+			self.NGLPush = nil
+		elseif not goal then
+			goal = Vector(pos.x + push.x * 48, pos.y + push.y * 48, pos.z)
+		end
 	end
 
 	-- Aimed variants (with their extra aim layers) only in full-detail range;
@@ -449,6 +493,72 @@ function ENT:BehaveUpdate(interval)
 
 	local B = NGL.Bench
 	if B then B.LuaTime = B.LuaTime + (SysTime() - t0) end
+end
+
+-- Jumping down a ledge or across a gap (the engine's jump, with the Jump,
+-- Glide and Land animations), or rappelling down a big drop: step out over
+-- the edge, then slide down to the landing point with the Rappel loop.
+local RAPPEL_SPEED = 350 -- units per second down the rope
+
+function ENT:NGLStartTraverse(move, to)
+	local now = CurTime()
+	local from = self:GetPos()
+	local A = self.NGLActs
+	local dir = to - from
+	dir.z = 0
+	if dir.x ~= 0 or dir.y ~= 0 then
+		self:SetAngles(Angle(0, math.deg(math.atan2(dir.y, dir.x)), 0))
+		dir:Normalize()
+	end
+	local T = { move = move, from = from, to = to, t0 = now }
+	self.NGLTraverse = T
+	self.NGLMoving, self.NGLSteer = false, nil
+	if move == "rappel" then
+		T.over = 0.35
+		T.dur = T.over + math.Clamp((from.z - to.z) / RAPPEL_SPEED, 0.8, 5)
+		if A.Rappel then self:PlayAnim(A.Rappel, false) end
+		self:NGLSound("Rappel")
+	else
+		self.loco:JumpAcrossGap(to, dir)
+		if A.Jump then self:PlayAnim(A.Jump, false) end
+	end
+end
+
+function ENT:NGLTraverseUpdate(now)
+	local T = self.NGLTraverse
+	local A = self.NGLActs
+	self.NGLMoving = false
+	local t = now - T.t0
+	if T.move == "rappel" then
+		local from, to = T.from, T.to
+		local p
+		if t < T.over then
+			local f = t / T.over
+			p = Vector(from.x + (to.x - from.x) * f, from.y + (to.y - from.y) * f, from.z)
+		else
+			local f = math.min((t - T.over) / (T.dur - T.over), 1)
+			f = f * f * (3 - 2 * f)
+			p = Vector(to.x, to.y, from.z + (to.z - from.z) * f)
+		end
+		if t >= T.dur then p = to end
+		self:SetPos(p)
+		self.loco:SetVelocity(Vector(0, 0, 0))
+		if t >= T.dur then
+			self.NGLTraverse = nil
+			if A.Land then self:PlayAnim(A.Land, false) end
+		elseif A.Rappel and now >= (self.NGLAnimUntil or 0) then
+			self:PlayAnim(A.Rappel, false) -- keep the loop going
+		end
+		return
+	end
+	if t > 0.25 and self.loco:IsOnGround() then
+		self.NGLTraverse = nil
+		if A.Land then self:PlayAnim(A.Land, false) end
+	elseif t > 5 then
+		self.NGLTraverse = nil -- never came down where expected: carry on
+	elseif t > 0.25 and A.Glide and now >= (self.NGLAnimUntil or 0) then
+		self:PlayAnim(A.Glide, false)
+	end
 end
 
 function ENT:OnInjured(dmginfo)

@@ -36,8 +36,18 @@ ENT.AIMode = "balanced"         -- how it fights (sv_aimodes.lua): "balanced", "
 --                                 "flanker" (attacks from out of your sight), "defender" (holds its ground), your own
 --                                 NGL.RegisterAIMode, or weights for a random pick: { balanced = 2, flanker = 1 }
 ENT.DefendRadius = nil          -- "defender" mode: how far it may move from where the fight started (default 500)
-ENT.Group = nil                 -- NPCs without ENT.Squad team up with allies of their faction nearby: { Max = 6, Radius = 800 }
---                                 (these defaults when nil); false = always alone (zombies, animals)
+ENT.Group = nil                 -- NPCs without ENT.Squad team up with allies of their faction nearby: { Max = 6, Radius = 800, Formation = "loose" }
+--                                 (these defaults when nil); false = always alone (zombies, animals).
+--                                 loose: members stand about near the leader and stroll after it;
+--                                 or "wedge", "line", "column" for a set formation
+-- Jumping and doors (sv_nav.lua, sv_doors.lua). The nav grid links ledges
+-- to the ground below; paths use the ones this NPC can take.
+ENT.JumpDown = 200              -- jumps down ledges up to this high (units); 0 = never
+ENT.JumpGap = true              -- jumps across gaps (jump links placed with the NGL Nav Editor tool)
+ENT.Rappel = false              -- slides down a rope from higher ledges, up to RappelMax (Combine)
+ENT.RappelMax = 1000
+ENT.OpenDoors = true            -- opens closed doors in its way
+ENT.DoorBreach = false          -- kicks doors in instead, locked ones too (Combine, rebels); see ngl_door_breach
 ENT.Squad = nil                 -- set to lead a squad on its own, see sv_squad.lua:
 --                                 { Max = 10, Recruit = { "ngl_combine_soldier" }, RecruitRadius = 1500,
 --                                   Scouts = 3, ScoutRadius = 400, ScoutTime = 20, LostDelay = 2 }
@@ -117,6 +127,15 @@ ENT.Anims = {
 	CrouchWalk = { ACT_WALK_CROUCH_AIM_RIFLE, ACT_WALK_CROUCH_RIFLE, ACT_WALK_CROUCH },
 	-- Full-body melee swing (see ENT.Melee).
 	Melee   = { ACT_MELEE_ATTACK1, ACT_MELEE_ATTACK_SWING },
+	-- Jumping down or across (nav links), rappelling (Rappel) and kicking a
+	-- door in (DoorBreach). Sequence names work too, like activities. The
+	-- names here come with HL2's Combine; "melee_kick" with the Mixed
+	-- Combine Animation Pack (Workshop 3773503767) when it's installed.
+	Jump    = { "jump_holding_jump", ACT_JUMP },
+	Glide   = { "jump_holding_glide", ACT_GLIDE },
+	Land    = { "jump_holding_land", ACT_LAND },
+	Rappel  = { "rappelloop", ACT_RAPPEL_LOOP },
+	Kick    = { "melee_kick", "kickdoorbaton", "kick_door", "Kick_Door", ACT_MELEE_ATTACK1, ACT_MELEE_ATTACK_SWING },
 	-- Squad leader hand signals (see ENT.Squad): an upper-body gesture when
 	-- the model has one, otherwise the full-body signal while standing.
 	SignalHalt      = { ACT_GESTURE_SIGNAL_HALT, ACT_SIGNAL_HALT },
