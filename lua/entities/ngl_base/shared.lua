@@ -127,15 +127,15 @@ ENT.Anims = {
 	CrouchWalk = { ACT_WALK_CROUCH_AIM_RIFLE, ACT_WALK_CROUCH_RIFLE, ACT_WALK_CROUCH },
 	-- Full-body melee swing (see ENT.Melee).
 	Melee   = { ACT_MELEE_ATTACK1, ACT_MELEE_ATTACK_SWING },
-	-- Jumping down or across (nav links), rappelling (Rappel) and kicking a
-	-- door in (DoorBreach). Sequence names work too, like activities. The
-	-- names here come with HL2's Combine; "melee_kick" with the Mixed
-	-- Combine Animation Pack (Workshop 3773503767) when it's installed.
+	-- Jumping down or across (nav links) and rappelling (Rappel): HL2's own
+	-- Combine animations. Sequence names work too, like activities.
+	-- Breaking a door in (DoorBreach): the melee hit (HL2's Combine hit it
+	-- with the rifle butt). Put a kick sequence here if your model has one.
 	Jump    = { "jump_holding_jump", ACT_JUMP },
 	Glide   = { "jump_holding_glide", ACT_GLIDE },
 	Land    = { "jump_holding_land", ACT_LAND },
 	Rappel  = { "rappelloop", ACT_RAPPEL_LOOP },
-	Kick    = { "melee_kick", "kickdoorbaton", "kick_door", "Kick_Door", ACT_MELEE_ATTACK1, ACT_MELEE_ATTACK_SWING },
+	Kick    = { ACT_MELEE_ATTACK1, ACT_MELEE_ATTACK_SWING },
 	-- Squad leader hand signals (see ENT.Squad): an upper-body gesture when
 	-- the model has one, otherwise the full-body signal while standing.
 	SignalHalt      = { ACT_GESTURE_SIGNAL_HALT, ACT_SIGNAL_HALT },
