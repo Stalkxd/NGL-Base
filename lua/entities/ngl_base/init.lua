@@ -28,6 +28,8 @@ function ENT:OnIdle() end
 function ENT:OnCombat(enemy, dist, visible) end
 function ENT:OnAttack(enemy, kind) end
 function ENT:OnMeleeHit(target, hit) end
+function ENT:OnOrder(order) end
+function ENT:OnOrderDone(order, reason) end
 
 ----------------------------------------------------------------------------
 -- Sounds
@@ -602,3 +604,25 @@ end
 function ENT:IsNearPlayer() return self.NGLNear == true end  -- within ngl_ai_visual_range
 function ENT:IsDetailed() return self.NGLDetail == true end  -- within ngl_anim_detail_range
 function ENT:IsBusy() return CurTime() < (self.NGLBusyUntil or 0) end
+
+-- Orders and squads (sv_core.lua, sv_squad.lua) ---------------------------
+
+-- order = { kind = "hold" | "move" | "search" | "fire_at" (or one of
+-- ENT.OrderKinds), time = seconds, plus per kind:
+--   hold:    face = pos, crouch = false to stand
+--   move:    pos, run = bool, radius = arrive distance, hold = true to hold
+--            there afterwards (holdTime)
+--   search:  pos, radius (400), run = false to walk there
+--   fire_at: pos, spread (150)
+--   any:     onDone = function(npc, order, reason) }
+-- reason passed to OnOrderDone/onDone: "timeout", "done", "contact",
+-- "replaced", "cleared".
+function ENT:GiveOrder(order) return core().GiveOrder(self, order, CurTime()) end
+function ENT:GetOrder() return self.NGLOrder end
+function ENT:ClearOrder() core().EndOrder(self, "cleared") end
+
+function ENT:GetSquad() return self.NGLSquad end
+function ENT:IsSquadLeader() return self.NGLSquad ~= nil and self.NGLSquad.leader == self end
+-- A new squad led by this NPC (leaves its old one). maxSize counts the leader.
+function ENT:MakeSquad(maxSize) return NGL.NewSquad(self, maxSize or 10) end
+function ENT:LeaveSquad() if self.NGLSquad then self.NGLSquad:Remove(self) end end

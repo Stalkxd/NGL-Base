@@ -31,6 +31,7 @@ ENT.AttackRange = 1200          -- closer than this it stops chasing and fights
 ENT.EyeHeight = 64
 ENT.CrouchEyeHeight = 40
 ENT.CrouchChance = 0.35         -- chance, each time it picks a new spot while fighting, to crouch and hold position instead; 0 = never
+ENT.OrderKinds = nil            -- { mykind = true }: extra order kinds this NPC runs itself (in OnAIThink)
 ENT.EnemyMemory = 8             -- seconds it keeps hunting an enemy it can't see (heads to where it last saw it)
 ENT.AlertRadius = 1500          -- allies this close with nothing to do come to help when it spots an enemy; 0 = never
 ENT.WanderRadius = 600          -- idle NPCs stroll around their home spot (where they spawned or last fought); 0 = stand still
@@ -122,6 +123,10 @@ ENT.Anims = {
 -- ENT:OnAlerted(ally, pos)          an ally spotted an enemy at pos; return
 --                                   true to stay put
 -- ENT:OnReload()                    started reloading
+-- ENT:OnOrder(order)                given an order; return true to handle it
+--                                   yourself (it is not stored)
+-- ENT:OnOrderDone(order, reason)    an order ended ("timeout", "done",
+--                                   "contact", "replaced", "cleared")
 --
 -- Building blocks (server; call them from hooks, see the end of init.lua):
 --   Movement:  self:MoveTo(pos, run)  self:StopMoving()  self:IsMoving()
@@ -136,6 +141,10 @@ ENT.Anims = {
 --   Animation: self:PlayAnim(actOrSequence, lock, rate)  self:PlayGesture(actOrSequence)
 --   Sound:     self:Speak(kindOrPath)
 --   State:     self:IsNearPlayer()  self:IsDetailed()  self:IsBusy()
+--   Orders:    self:GiveOrder(order)  self:GetOrder()  self:ClearOrder()
+--   Squads:    self:MakeSquad(max)  self:GetSquad()  self:IsSquadLeader()
+--              self:LeaveSquad()  squad:Add(npc)  squad:Order(who, order)
+--              squad:Nearest(pos, n)  squad:Members()  NGL.NewSquad(leader, max)
 
 function ENT:SetupDataTables()
 	self:NetworkVar("Bool", 0, "NGLDead")

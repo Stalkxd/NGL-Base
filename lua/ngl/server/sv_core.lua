@@ -146,6 +146,7 @@ function Core.Remove(npc)
 	List[n] = nil
 	Index[npc] = nil
 	gridRemove(npc)
+	if npc.NGLSquad then npc.NGLSquad:Remove(npc) end
 end
 
 function Core.Count() return #List end
@@ -304,6 +305,7 @@ function Core.SetEnemy(npc, enemy)
 		npc:NGLSetMoveMode("run")
 		if not IsValid(old) then
 			alertAllies(npc, ePos, now)
+			if npc.NGLSquad then npc.NGLSquad:Contact(npc, ePos, now) end
 			npc:NGLSound("Alert")
 		end
 		npc:OnSeeEnemy(enemy)
@@ -340,10 +342,11 @@ function Core.Damage(attacker, target, amount, dmgType, pos, force)
 	target:TakeDamageInfo(dmg)
 end
 
-local function fire(npc, enemy, shots, visual)
+-- `enemy` may be nil when shooting at an area (`dst`, e.g. a fire_at order).
+local function fire(npc, enemy, shots, visual, dst)
 	local w = npc.Weapon
 	local src = npc:GetPos() + Vector(0, 0, eyeHeight(npc))
-	local dst = enemy:WorldSpaceCenter()
+	dst = dst or enemy:WorldSpaceCenter()
 
 	-- Projectile weapon (rockets, grenades...): see sv_projectile.lua.
 	if w.Projectile then
@@ -378,18 +381,57 @@ local function fire(npc, enemy, shots, visual)
 	shotTrace.endpos = dst
 	shotTrace.filter = npc
 	util.TraceLine(shotTrace)
-	if shotResult.Entity == enemy then
+	local hit = shotResult.Entity
+	if enemy and hit == enemy or not enemy and IsValid(hit) and (hit:IsPlayer() or hit.IsNGLNPC) and Core.IsHostile(npc, hit) then
 		local dmg = DamageInfo()
 		dmg:SetDamage(w.Damage * shots * (w.Accuracy or 0.6))
 		dmg:SetDamageType(DMG_BULLET)
 		dmg:SetAttacker(npc)
 		dmg:SetInflictor(npc)
 		dmg:SetDamagePosition(shotResult.HitPos)
-		enemy:TakeDamageInfo(dmg)
+		hit:TakeDamageInfo(dmg)
 	end
 end
 
 Core.Fire = fire
+
+-- Ranged attack for this think: fires the shots owed since the last one
+-- (far NPCs think rarely but deal the same damage over time), handles the
+-- clip and reload. `enemy` may be nil with `dst` set to shoot at an area.
+local function shoot(npc, now, dt, enemy, dst)
+	local w = npc.Weapon
+	if not w then return end
+	if now < (npc.NGLReloadUntil or 0) then
+		npc.NGLFireAccum = 0
+		return
+	end
+	local acc = (npc.NGLFireAccum or 0) + dt
+	local shots = floor(acc / w.Delay)
+	if shots <= 0 then
+		npc.NGLFireAccum = acc
+		return
+	end
+	npc.NGLFireAccum = acc - shots * w.Delay
+	if npc:OnAttack(enemy or dst, "ranged") == true then return end
+
+	local clipSize = w.Clip or 0
+	if clipSize > 0 then
+		shots = min(shots, npc.NGLClip)
+		npc.NGLClip = npc.NGLClip - shots
+	end
+	local visual = npc.NGLNear
+	if shots > 0 then fire(npc, enemy, min(shots, visual and 3 or 30), visual, dst) end
+
+	if clipSize > 0 and npc.NGLClip <= 0 then
+		npc.NGLClip = clipSize
+		npc.NGLReloadUntil = now + (w.ReloadTime or 2)
+		npc.NGLFireAccum = 0
+		npc:NGLGesture("Reload")
+		npc:NGLSound("Reload")
+		npc:OnReload()
+	end
+end
+Core.Shoot = shoot
 
 ----------------------------------------------------------------------------
 -- Melee
@@ -543,6 +585,10 @@ local function idle(npc, now, pos)
 	npc.NGLFace = nil
 	npc.NGLCrouch = false
 
+	-- Squad member: keep our place in the formation behind the leader.
+	local sq = npc.NGLSquad
+	if sq and not npc.NGLInvestigate and Core.Follow(npc, now, pos, sq) then return end
+
 	local inv = npc.NGLInvestigate
 	if inv then
 		if now > npc.NGLInvestigateUntil or pos:DistToSqr(inv) < INVESTIGATE_DONE_SQR then
@@ -582,6 +628,186 @@ local function idle(npc, now, pos)
 		local d = Rand(radius * 0.3, radius)
 		npc.NGLGoal = Vector(home.x + math.cos(a) * d, home.y + math.sin(a) * d, pos.z)
 	end
+end
+
+----------------------------------------------------------------------------
+-- Squads and orders (squads themselves: sv_squad.lua)
+----------------------------------------------------------------------------
+
+-- Formation: a wedge behind the leader, two members per row.
+local SLOT_BACK, SLOT_SIDE = 90, 80
+local FOLLOW_OK_SQR = 120 * 120   -- close enough to our slot: stand
+local FOLLOW_RUN_SQR = 500 * 500  -- this far behind: run to catch up
+
+function Core.SlotPos(leader, slot)
+	local row = math.ceil(slot / 2)
+	local side = (slot % 2 == 1) and 1 or -1
+	local yaw = math.rad(leader:GetAngles().y)
+	local fx, fy = math.cos(yaw), math.sin(yaw)
+	local back, lat = -SLOT_BACK * row, SLOT_SIDE * row * side
+	local lp = leader:GetPos()
+	return Vector(lp.x + fx * back - fy * lat, lp.y + fy * back + fx * lat, lp.z)
+end
+
+-- Returns true when it moved the NPC (or kept it in place) as a follower.
+function Core.Follow(npc, now, pos, sq)
+	local leader = sq.leader
+	local slot = sq.slots[npc]
+	if not (slot and IsValid(leader) and leader ~= npc) or leader.NGLDying then return false end
+	local goal = Core.SlotPos(leader, slot)
+	local dSqr = pos:DistToSqr(goal)
+	if dSqr < FOLLOW_OK_SQR then
+		if npc.NGLGoal or npc.NGLPath or npc.NGLPathPending then stopMoving(npc) end
+		return true
+	end
+	npc:NGLSetMoveMode(dSqr > FOLLOW_RUN_SQR and "run" or "walk")
+	-- Short hops straight; longer ones along the grid.
+	chase(npc, now, pos, goal, dSqr < 400 * 400)
+	return true
+end
+
+-- Default lengths in seconds, when an order has no `time`.
+local ORDER_TIME = { hold = 10, move = 30, search = 20, fire_at = 4 }
+Core.OrderTime = ORDER_TIME
+local ARRIVE_SQR = 64 * 64
+
+-- Gives an order (see ENT:GiveOrder for the fields). Returns true if taken.
+function Core.GiveOrder(npc, order, now)
+	local base = ORDER_TIME[order.kind]
+	if not base and not (npc.OrderKinds and npc.OrderKinds[order.kind]) then return false end
+	if npc:OnOrder(order) == true then return true end -- handled by the NPC itself
+	if npc.NGLOrder then Core.EndOrder(npc, "replaced") end
+	order.untilT = now + (order.time or base or 10)
+	order.startT = now
+	npc.NGLOrder = order
+	npc.NGLFireAccum = 0
+	stopMoving(npc)
+	return true
+end
+
+function Core.EndOrder(npc, reason)
+	local o = npc.NGLOrder
+	if not o then return end
+	npc.NGLOrder = nil
+	npc.NGLCrouch = false
+	if o.kind ~= "hold" then stopMoving(npc) end
+	npc:OnOrderDone(o, reason)
+	if o.onDone then o.onDone(npc, o, reason) end
+end
+
+-- Fight back from where we stand if the enemy is in view: a swing when it's
+-- in reach, shots when it's in range.
+local function returnFire(npc, now, dt, pos, enemy, visible)
+	if not (enemy and visible) then return false end
+	local tPos = enemy:GetPos()
+	local m = npc.Melee
+	if m then
+		local reach = m.Range or 70
+		if pos:DistToSqr(tPos) < reach * reach and abs(tPos.z - pos.z) < 72 then
+			npc.NGLFace = tPos
+			if now >= (npc.NGLNextMelee or 0) and npc:OnAttack(enemy, "melee") ~= true then
+				Core.StartMelee(npc, enemy, now)
+			end
+			return true
+		end
+	end
+	if not npc.Weapon then return false end
+	local range = npc.AttackRange * 1.2
+	if pos:DistToSqr(tPos) > range * range then return false end
+	npc.NGLFace = tPos
+	shoot(npc, now, dt, enemy)
+	return true
+end
+
+-- Runs one think of the NPC's order. Returns true when the order handled
+-- the think, false to let the normal behaviour run (order over or broken off).
+function Core.RunOrder(npc, now, dt, pos, o, enemy, visible)
+	if now >= o.untilT then
+		Core.EndOrder(npc, "timeout")
+		return false
+	end
+	local kind = o.kind
+
+	if kind == "hold" then
+		-- Stay put (crouched if we can), watch `face`, shoot what we see.
+		if npc.NGLGoal or npc.NGLPath or npc.NGLPathPending then stopMoving(npc) end
+		npc:NGLSetMoveMode("walk")
+		npc.NGLCrouch = o.crouch ~= false and npc.NGLActs.CrouchIdle ~= nil
+		if not returnFire(npc, now, dt, pos, enemy, visible) then
+			npc.NGLFace = o.face
+			npc.NGLFireAccum = 0
+		end
+		return true
+
+	elseif kind == "move" then
+		-- Go to `pos` (running if `run`), shooting what we see on the way;
+		-- then hold there if `hold`, else the order is done.
+		if pos:DistToSqr(o.pos) < (o.radius and o.radius * o.radius or ARRIVE_SQR) then
+			if o.hold then
+				o.kind = "hold"
+				o.untilT = now + (o.holdTime or ORDER_TIME.hold)
+				stopMoving(npc)
+				return true
+			end
+			Core.EndOrder(npc, "done")
+			return false
+		end
+		npc.NGLCrouch = false
+		npc:NGLSetMoveMode(o.run and "run" or "walk")
+		chase(npc, now, pos, o.pos, pos:DistToSqr(o.pos) < 300 * 300)
+		if not returnFire(npc, now, dt, pos, enemy, visible) then
+			npc.NGLFace = nil
+			npc.NGLFireAccum = 0
+		end
+		return true
+
+	elseif kind == "search" then
+		-- Walk to `pos`, then sweep around it (`radius`, default 400) until the
+		-- time runs out. Seeing an enemy ends the order and we fight.
+		if enemy and visible then
+			Core.EndOrder(npc, "contact")
+			return false
+		end
+		npc.NGLCrouch = false
+		npc.NGLFace = nil
+		local radius = o.radius or 400
+		if not o.sweeping then
+			if pos:DistToSqr(o.pos) < (radius * 0.75) ^ 2 then
+				o.sweeping = true
+				stopMoving(npc)
+			else
+				npc:NGLSetMoveMode(o.run == false and "walk" or "run")
+				chase(npc, now, pos, o.pos, false)
+				return true
+			end
+		end
+		npc:NGLSetMoveMode("walk")
+		if not (npc.NGLPath or npc.NGLGoal or npc.NGLPathPending) then
+			local nav = NGL.Nav
+			local path = nav and nav.Loaded and nav.RandomWalk(pos, o.pos, radius, random(3, 6))
+			if path and #path > 0 then
+				npc.NGLPath, npc.NGLPathIdx = path, 1
+			else
+				local a = Rand(0, 2 * math.pi)
+				local d = Rand(radius * 0.3, radius)
+				npc.NGLGoal = Vector(o.pos.x + math.cos(a) * d, o.pos.y + math.sin(a) * d, pos.z)
+			end
+		end
+		return true
+
+	elseif kind == "fire_at" then
+		-- Stand and shoot at the area around `pos`, seen or not.
+		if npc.NGLGoal or npc.NGLPath or npc.NGLPathPending then stopMoving(npc) end
+		local p = o.pos
+		npc.NGLFace = p
+		local sp = o.spread or 150
+		local dst = Vector(p.x + Rand(-sp, sp), p.y + Rand(-sp, sp), p.z + 32)
+		shoot(npc, now, dt, nil, dst)
+		return true
+	end
+
+	-- A kind only the NPC knows: it runs it in OnAIThink; nothing to do here.
+	return false
 end
 
 -- One AI decision for one NPC. `dt` is the time since its last think.
@@ -634,20 +860,23 @@ local function think(npc, now, dt, nearestPlayerSqr)
 		enemyOk = IsValid(enemy)
 	end
 
-	if not enemyOk then
-		idle(npc, now, pos)
-		return
-	end
-
-	local tPos = enemy:GetPos()
-
 	-- Line of sight to the current enemy, rechecked at most twice a second.
-	if now >= (npc.NGLNextVis or 0) then
+	local tPos = enemyOk and enemy:GetPos()
+	if enemyOk and now >= (npc.NGLNextVis or 0) then
 		npc.NGLNextVis = now + 0.5
 		npc.NGLEnemyVisible = canSee(npc, pos + Vector(0, 0, eyeHeight(npc)), enemy)
 		if npc.NGLEnemyVisible then npc.NGLLastSeenPos, npc.NGLLastSeenT = tPos, now end
 	end
-	local visible = npc.NGLEnemyVisible
+	local visible = enemyOk and npc.NGLEnemyVisible
+
+	-- An order (squad leader, script) comes before the NPC's own plans.
+	local order = npc.NGLOrder
+	if order and Core.RunOrder(npc, now, dt, pos, order, enemyOk and enemy or nil, visible) then return end
+
+	if not enemyOk then
+		idle(npc, now, pos)
+		return
+	end
 	local distSqr = pos:DistToSqr(tPos)
 	if npc:OnCombat(enemy, math.sqrt(distSqr), visible) == true then return end
 
@@ -723,39 +952,7 @@ local function think(npc, now, dt, nearestPlayerSqr)
 		end
 	end
 	npc.NGLFace = tPos
-
-	if now < (npc.NGLReloadUntil or 0) then
-		npc.NGLFireAccum = 0
-		return
-	end
-
-	-- Shots owed since the last think. Far-away NPCs think rarely but
-	-- still deal the same damage over time.
-	local acc = npc.NGLFireAccum + dt
-	local shots = floor(acc / w.Delay)
-	if shots <= 0 then
-		npc.NGLFireAccum = acc
-		return
-	end
-	npc.NGLFireAccum = acc - shots * w.Delay
-	if npc:OnAttack(enemy, "ranged") == true then return end
-
-	local clipSize = w.Clip or 0
-	if clipSize > 0 then
-		shots = min(shots, npc.NGLClip)
-		npc.NGLClip = npc.NGLClip - shots
-	end
-	local visual = npc.NGLNear
-	if shots > 0 then fire(npc, enemy, min(shots, visual and 3 or 30), visual) end
-
-	if clipSize > 0 and npc.NGLClip <= 0 then
-		npc.NGLClip = clipSize
-		npc.NGLReloadUntil = now + (w.ReloadTime or 2)
-		npc.NGLFireAccum = 0
-		npc:NGLGesture("Reload")
-		npc:NGLSound("Reload")
-		npc:OnReload()
-	end
+	shoot(npc, now, dt, enemy)
 end
 
 ----------------------------------------------------------------------------
