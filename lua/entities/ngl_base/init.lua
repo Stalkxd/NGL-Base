@@ -516,7 +516,18 @@ function ENT:NGLStartTraverse(move, to)
 	if move == "rappel" then
 		T.over = 0.35
 		T.dur = T.over + math.Clamp((from.z - to.z) / RAPPEL_SPEED, 0.8, 5)
-		if A.Rappel then self:PlayAnim(A.Rappel, false) end
+		local seq = A.RappelDrop and self:LookupSequence(A.RappelDrop)
+		if seq and seq >= 0 then
+			-- One animation for the whole way down, played to fit the drop.
+			local sd = self:SequenceDuration(seq)
+			local rate = math.Clamp(sd / T.dur, 0.6, 2.5)
+			T.dur = sd / rate
+			T.over = math.min(0.5 / rate, T.dur * 0.3) -- its step off the edge
+			T.oneShot = true
+			self:PlayAnim(A.RappelDrop, false, rate)
+		elseif A.Rappel then
+			self:PlayAnim(A.Rappel, false)
+		end
 		self:NGLSound("Rappel")
 	else
 		self.loco:JumpAcrossGap(to, dir)
@@ -546,7 +557,7 @@ function ENT:NGLTraverseUpdate(now)
 		if t >= T.dur then
 			self.NGLTraverse = nil
 			if A.Land then self:PlayAnim(A.Land, false) end
-		elseif A.Rappel and now >= (self.NGLAnimUntil or 0) then
+		elseif not T.oneShot and A.Rappel and now >= (self.NGLAnimUntil or 0) then
 			self:PlayAnim(A.Rappel, false) -- keep the loop going
 		end
 		return
