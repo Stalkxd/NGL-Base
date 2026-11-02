@@ -130,6 +130,26 @@ function ENT:NGLGesture(name)
 	if act then self:RestartGesture(act) end
 end
 
+-- Hand signal (Anims.Signal<kind>): a gesture over whatever the body does,
+-- or, for models with only the full-body signal, that animation while
+-- standing still. Near players only, like every other gesture.
+local GESTURE_SIGNALS = {}
+for _, a in pairs({ ACT_GESTURE_SIGNAL_HALT, ACT_GESTURE_SIGNAL_FORWARD, ACT_GESTURE_SIGNAL_ADVANCE,
+	ACT_GESTURE_SIGNAL_GROUP, ACT_GESTURE_SIGNAL_LEFT, ACT_GESTURE_SIGNAL_RIGHT, ACT_GESTURE_SIGNAL_TAKECOVER }) do
+	GESTURE_SIGNALS[a] = true
+end
+function ENT:NGLSignal(kind)
+	if not self.NGLDetail then return false end
+	local act = self.NGLActs["Signal" .. kind]
+	if not act then return false end
+	if GESTURE_SIGNALS[act] then
+		self:RestartGesture(act)
+		return true
+	end
+	if self.NGLMoving or self:IsBusy() or self.NGLAnimUntil then return false end
+	return self:PlayAnim(act, false) ~= false
+end
+
 -- Aim and strafe pose, and run speed matched to the animation. Called by the
 -- scheduler right after each think, for NPCs within ngl_anim_detail_range of
 -- a player only; pose parameters are interpolated on the client, so 10
