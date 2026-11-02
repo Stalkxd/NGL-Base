@@ -39,7 +39,7 @@ ENT.Squad = {
 	CommandRadius = 3000,              -- APCs (ENT.Commandable) this close take its orders
 	FireSupportDelay = 12,             -- s between rocket barrages it calls in
 	-- Down to 3 soldiers or fewer in a fight: a dropship with 6 more, or 4
-	-- on foot from out of sight on maps with no open sky (sv_reinforce.lua;
+	-- on foot from out of sight indoors or with no place to land (sv_reinforce.lua;
 	-- ngl_reinforce_limit, ngl_reinforce_cooldown, ngl_dropship_max).
 	Reinforce = {
 		Ship = "ngl_dropship", Cargo = "ngl_combine_soldier", Count = 6, OnFootCount = 4, When = 3,
@@ -48,15 +48,25 @@ ENT.Squad = {
 }
 
 local VO = "npc/combine_soldier/vo/"
+local function vo(...)
+	local t = {}
+	for i, name in ipairs({ ... }) do t[i] = VO .. name .. ".wav" end
+	return t
+end
+ENT.SoundLevel = 90 -- the squad has to hear the orders
+ENT.Radio = { On = vo("on1", "on2"), Off = vo("off1", "off2", "off3") }
 ENT.Sounds = {
-	Alert = VO .. "contact.wav",
-	Reload = VO .. "coverme.wav",
-	Halt = { VO .. "lostcontact.wav", VO .. "hardenthatposition.wav" },
-	Search = { VO .. "sweepingin.wav", VO .. "motioncheckallradials.wav" },
-	Engage = { VO .. "movein.wav", VO .. "gosharp.wav" },
-	StandDown = { VO .. "reportingclear.wav", VO .. "thatsitwrapitup.wav" },
-	Reinforce = VO .. "overwatchrequestreinforcement.wav",
-	CallFire = { VO .. "callhotpoint.wav", VO .. "prosecuting.wav" }, -- ordering the APC to fire
+	Alert = vo("contact", "contactconfirmprosecuting", "prepforcontact"),
+	Lost = vo("lostcontact", "targetmyradial"),
+	Kill = vo("onedown", "affirmativewegothimnow", "cleaned"),
+	Idle = vo("stayalert", "reportallpositionsclear", "sightlineisclear", "sectorisnotsecure"),
+	Reload = vo("coverme"),
+	Halt = vo("lostcontact", "hardenthatposition"),
+	Search = vo("sweepingin", "motioncheckallradials"),
+	Engage = vo("movein", "gosharp", "readyweapons"),
+	StandDown = vo("reportingclear", "thatsitwrapitup"),
+	Reinforce = vo("overwatchrequestreinforcement"),
+	CallFire = vo("callhotpoint", "prosecuting"), -- ordering the APC to fire
 	Pain = { "npc/combine_soldier/pain1.wav", "npc/combine_soldier/pain2.wav", "npc/combine_soldier/pain3.wav" },
 	Death = { "npc/combine_soldier/die1.wav", "npc/combine_soldier/die2.wav", "npc/combine_soldier/die3.wav" },
 }

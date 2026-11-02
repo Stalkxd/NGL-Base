@@ -316,7 +316,7 @@ function Core.SetEnemy(npc, enemy)
 		npc.NGLHome = npc:GetPos() -- wander around where the fight ended
 		npc.NGLNextWander = now + Rand(1, 3)
 		if IsValid(old) then
-			if old:Health() > 0 then npc:NGLSound("Lost") end
+			npc:NGLSound(old:Health() > 0 and "Lost" or "Kill")
 			npc:OnLoseEnemy(old)
 		end
 	end
@@ -634,17 +634,28 @@ end
 -- Squads and orders (squads themselves: sv_squad.lua)
 ----------------------------------------------------------------------------
 
--- Formation: a wedge behind the leader, two members per row.
+-- Formations, relative to the leader: (slot, row, side) -> back, sideways.
+--   wedge:  a V behind the leader, two members per row
+--   line:   side by side with the leader, a step behind
+--   column: one behind the other, slightly staggered
 local SLOT_BACK, SLOT_SIDE = 90, 80
 local FOLLOW_OK_SQR = 120 * 120   -- close enough to our slot: stand
 local FOLLOW_RUN_SQR = 500 * 500  -- this far behind: run to catch up
 
-function Core.SlotPos(leader, slot)
+local FORMATIONS = {
+	wedge = function(slot, row, side) return SLOT_BACK * row, SLOT_SIDE * row * side end,
+	line = function(slot, row, side) return 40, SLOT_SIDE * row * side end,
+	column = function(slot, row, side) return SLOT_BACK * 0.8 * slot, 24 * side end,
+}
+Core.Formations = FORMATIONS
+
+function Core.SlotPos(leader, slot, formation)
 	local row = math.ceil(slot / 2)
 	local side = (slot % 2 == 1) and 1 or -1
 	local yaw = math.rad(leader:GetAngles().y)
 	local fx, fy = math.cos(yaw), math.sin(yaw)
-	local back, lat = -SLOT_BACK * row, SLOT_SIDE * row * side
+	local back, lat = (FORMATIONS[formation] or FORMATIONS.wedge)(slot, row, side)
+	back = -back
 	local lp = leader:GetPos()
 	return Vector(lp.x + fx * back - fy * lat, lp.y + fy * back + fx * lat, lp.z)
 end
@@ -654,7 +665,7 @@ function Core.Follow(npc, now, pos, sq)
 	local leader = sq.leader
 	local slot = sq.slots[npc]
 	if not (slot and IsValid(leader) and leader ~= npc) or leader.NGLDying then return false end
-	local goal = Core.SlotPos(leader, slot)
+	local goal = Core.SlotPos(leader, slot, sq.formation)
 	local dSqr = pos:DistToSqr(goal)
 	if dSqr < FOLLOW_OK_SQR then
 		if npc.NGLGoal or npc.NGLPath or npc.NGLPathPending then stopMoving(npc) end

@@ -22,10 +22,22 @@ ENT.Melee = {
 	HitSound = "Flesh.ImpactHard",
 }
 
-ENT.SoundLevel = 75
+-- Combine radio chatter: every voice line comes with a radio click.
+ENT.SoundLevel = 85
+local VO = "npc/combine_soldier/vo/"
+local function vo(...)
+	local t = {}
+	for i, name in ipairs({ ... }) do t[i] = VO .. name .. ".wav" end
+	return t
+end
+ENT.Radio = { On = vo("on1", "on2"), Off = vo("off1", "off2", "off3") }
 ENT.Sounds = {
-	Alert = "npc/combine_soldier/vo/contact.wav",
-	Reload = "npc/combine_soldier/vo/coverme.wav",
+	Alert = vo("contact", "contactconfim", "contactconfirmprosecuting", "weaponsoffsafeprepforcontact", "engaging"),
+	Lost = vo("lostcontact", "targetmyradial", "stayalertreportsightlines"),
+	Kill = vo("onedown", "onecontained", "cleaned", "flatline", "affirmativewegothimnow"),
+	Idle = vo("stayalert", "reportallpositionsclear", "reportallradialsfree", "sightlineisclear", "teamdeployedandscanning", "stabilizationteamholding"),
+	Ack = vo("copy", "copythat", "affirmative", "affirmative2"),
+	Reload = vo("coverme", "suppressing"),
 	Pain = { "npc/combine_soldier/pain1.wav", "npc/combine_soldier/pain2.wav", "npc/combine_soldier/pain3.wav" },
 	Death = { "npc/combine_soldier/die1.wav", "npc/combine_soldier/die2.wav", "npc/combine_soldier/die3.wav" },
 }

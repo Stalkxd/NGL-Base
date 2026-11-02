@@ -61,7 +61,11 @@ end
 -- Plays one of the sounds of a kind (Alert, Idle, Pain, Death, Reload,
 -- Attack, Lost). Only when a player is within ngl_ai_visual_range, and voice
 -- lines don't overlap (VoiceCooldown).
-function ENT:NGLSound(kind)
+-- priority: say it even right after another line (squad commands).
+-- With ENT.Radio, voice lines (not Pain or Death) come with a radio click
+-- before and after, like the HL2 Combine.
+local NO_RADIO = { Pain = true, Death = true }
+function ENT:NGLSound(kind, priority)
 	if not self.NGLNear then return end
 	local list = self.NGLSounds[kind]
 	if not list then return end
@@ -74,8 +78,19 @@ function ENT:NGLSound(kind)
 		return
 	end
 	local now = CurTime()
-	if now < (self.NGLNextVoice or 0) then return end
-	self.NGLNextVoice = now + self.VoiceCooldown
+	if not priority and now < (self.NGLNextVoice or 0) then return end
+	local radio = self.Radio
+	local len = SoundDuration(snd) or 0
+	self.NGLNextVoice = now + math.max(self.VoiceCooldown, len)
+	if radio and not NO_RADIO[kind] then
+		if radio.On then self:EmitSound(radio.On[math.random(#radio.On)], self.SoundLevel, 100, 1, CHAN_ITEM) end
+		if radio.Off and len > 0 then
+			local off = radio.Off[math.random(#radio.Off)]
+			timer.Simple(len, function()
+				if IsValid(self) and not self.NGLDying then self:EmitSound(off, self.SoundLevel, 100, 1, CHAN_ITEM) end
+			end)
+		end
+	end
 	self:EmitSound(snd, self.SoundLevel, self.SoundPitch, 1, CHAN_VOICE)
 end
 
@@ -138,16 +153,20 @@ for _, a in pairs({ ACT_GESTURE_SIGNAL_HALT, ACT_GESTURE_SIGNAL_FORWARD, ACT_GES
 	ACT_GESTURE_SIGNAL_GROUP, ACT_GESTURE_SIGNAL_LEFT, ACT_GESTURE_SIGNAL_RIGHT, ACT_GESTURE_SIGNAL_TAKECOVER }) do
 	GESTURE_SIGNALS[a] = true
 end
+-- Stock HL2 models only have the full-body signals (ACT_SIGNAL_*): the NPC
+-- stops for the second or so the signal takes, like HL2 Combine do.
 function ENT:NGLSignal(kind)
-	if not self.NGLDetail then return false end
+	if not self.NGLNear then return false end
 	local act = self.NGLActs["Signal" .. kind]
 	if not act then return false end
 	if GESTURE_SIGNALS[act] then
+		if not self.NGLDetail then return false end
 		self:RestartGesture(act)
 		return true
 	end
-	if self.NGLMoving or self:IsBusy() or self.NGLAnimUntil then return false end
-	return self:PlayAnim(act, false) ~= false
+	if self.NGLAnimUntil or self.NGLMeleeTarget then return false end
+	self.NGLCrouch = false
+	return self:PlayAnim(act, true) ~= false
 end
 
 -- Aim and strafe pose, and run speed matched to the animation. Called by the

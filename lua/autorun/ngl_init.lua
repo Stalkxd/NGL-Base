@@ -2,7 +2,7 @@
 -- Everything server-side lives under lua/ngl/server, client files under lua/ngl/client.
 
 NGL = NGL or {}
-NGL.Version = "0.10.0"
+NGL.Version = "0.11.0"
 
 if SERVER then
 	AddCSLuaFile()
@@ -20,4 +20,17 @@ if SERVER then
 else
 	include("ngl/client/cl_bench.lua")
 	include("ngl/client/cl_projectile.lua")
+
+	-- Names in the kill feed and other HUD text ("Combine Soldier (NGL)"
+	-- instead of "#ngl_combine_soldier").
+	local function addNames()
+		for class, info in pairs(scripted_ents.GetList()) do
+			local t = info.t
+			if t and t.PrintName and string.sub(class, 1, 4) == "ngl_" then
+				language.Add(class, t.PrintName)
+			end
+		end
+	end
+	hook.Add("InitPostEntity", "NGL.Names", addNames)
+	addNames()
 end
