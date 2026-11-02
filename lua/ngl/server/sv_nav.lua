@@ -59,6 +59,7 @@ local function reset()
 	Nav.Loaded = false
 	Nav.Cache = {}
 	Nav.Pending = {}
+	Nav.Wide = {} -- [half width] = { [node] = true/false }, filled lazily by wide searches
 	-- Searches over the old grid are meaningless now. Their callers time out
 	-- on their own (see chase in sv_core.lua).
 	for k in pairs(searches) do searches[k] = nil end
@@ -398,7 +399,40 @@ local function toWaypoints(chain)
 	return pts
 end
 
-local function search(start, goal)
+-- Wide NPCs (vehicles, big monsters): the grid is checked for a person-sized
+-- hull, so a wide search also tests each node it reaches with a box of the
+-- NPC's half width, once, and remembers the answer for every later search.
+local wideTrace = { mask = MASK_NPCSOLID_BRUSHONLY }
+local wideResult = {}
+wideTrace.output = wideResult
+local WIDE_HEIGHT = 64
+
+local function wideOk(n, width, known)
+	local ok = known[n]
+	if ok == nil then
+		local p = nodePos(n)
+		p.z = p.z + STEP + 4
+		wideTrace.start, wideTrace.endpos = p, p
+		wideTrace.mins = Vector(-width, -width, 0)
+		wideTrace.maxs = Vector(width, width, WIDE_HEIGHT)
+		util.TraceHull(wideTrace)
+		ok = not (wideResult.Hit or wideResult.StartSolid)
+		known[n] = ok
+	end
+	return ok
+end
+Nav.WideOk = function(n, width)
+	Nav.Wide[width] = Nav.Wide[width] or {}
+	return wideOk(n, width, Nav.Wide[width])
+end
+
+local function search(start, goal, width)
+	local known
+	if width then
+		Nav.Wide[width] = Nav.Wide[width] or {}
+		known = Nav.Wide[width]
+	end
+	local traced = 0
 	local hn, hf, size = {}, {}, 0
 	local g, came, closed = { [start] = 0 }, {}, {}
 	size = heapPush(hn, hf, size, start, heuristic(start, goal))
@@ -425,7 +459,12 @@ local function search(start, goal)
 			local gc = g[cur]
 			for k = 1, #nb, 2 do
 				local j = nb[k]
-				if not closed[j] then
+				local pass = true
+				if known and j ~= goal then
+					if known[j] == nil then traced = traced + 1 end
+					pass = wideOk(j, width, known)
+				end
+				if pass and not closed[j] then
 					local ng = gc + nb[k + 1]
 					local old = g[j]
 					if not old or ng < old then
@@ -436,7 +475,10 @@ local function search(start, goal)
 				end
 			end
 
-			if expanded % 64 == 0 then coroutine.yield() end
+			if expanded % 64 == 0 or traced >= 16 then
+				traced = 0
+				coroutine.yield()
+			end
 		end
 	end
 	return nil
@@ -458,7 +500,11 @@ end
 -- `wanted`, if given, is called before each slice of work; when it returns
 -- false for every waiter the search is dropped. Never modify the returned
 -- table: it is shared with other NPCs and the cache.
-function Nav.RequestPath(from, to, callback, wanted)
+-- `width` (half width in units, optional) asks for a path a wide NPC fits
+-- through; anything up to 24 counts as person-sized.
+function Nav.RequestPath(from, to, callback, wanted, width)
+	if width and width <= 24 then width = nil end
+	if width then width = math.ceil(width / 8) * 8 end -- few width classes, more shared work
 	if not Nav.Loaded then return false end
 	local st = Nav.Stats
 	local s, t = Nav.Nearest(from), Nav.Nearest(to)
@@ -469,6 +515,7 @@ function Nav.RequestPath(from, to, callback, wanted)
 	end
 
 	local key = regionKey(s, t)
+	if width then key = "w" .. width .. "|" .. key end
 	local hit = Nav.Cache[key]
 	if hit and CurTime() - hit.t < CACHE_TIME then
 		st.cached = st.cached + 1
@@ -492,7 +539,7 @@ function Nav.RequestPath(from, to, callback, wanted)
 	Nav.Pending[key] = { waiter }
 	searches[#searches + 1] = {
 		key = key,
-		co = coroutine.create(function() return search(s, t) end),
+		co = coroutine.create(function() return search(s, t, width) end),
 	}
 	return true
 end
