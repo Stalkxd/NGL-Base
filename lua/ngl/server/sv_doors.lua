@@ -1,5 +1,7 @@
--- Doors: NPCs open closed doors in their way (ENT.OpenDoors), and the ones
--- with ENT.DoorBreach (Combine, rebels) kick them in, locked ones too.
+-- Doors: NPCs open closed doors in their way (ENT.OpenDoors). The ones with
+-- ENT.DoorBreach (Combine, rebels) kick them in during a fight (an enemy, or
+-- one seen in the last few seconds) and kick locked ones; otherwise they
+-- open them normally too.
 --
 -- The map's doors go into a small grid once (and as they're created), so an
 -- NPC's check costs a table lookup unless a door is right in front of it;
@@ -187,11 +189,19 @@ function D.Think(npc, now, pos)
 	if l < 1 then return end
 	local door = D.Ahead(pos, dx / l, dy / l)
 	if not door then return end
-	if npc.DoorBreach and cvBreach:GetInt() > 0 then
+	-- Kickers only kick in a fight (an enemy, or one seen in the last few
+	-- seconds), or when it's locked; otherwise they open it like anyone.
+	local breach = npc.DoorBreach and cvBreach:GetInt() > 0
+	if breach and (D.InFight(npc, now) or door:GetInternalVariable("m_bLocked")) then
 		D.Kick(npc, door, now)
-	elseif npc.OpenDoors then
+	elseif npc.OpenDoors or npc.DoorBreach then
 		D.Open(npc, door) -- locked: it stays shut, and the stuck check sends the NPC another way
 	end
+end
+
+local FIGHT_MEMORY = 8
+function D.InFight(npc, now)
+	return npc.NGLEnemy ~= nil or now - (npc.NGLLastSeenT or -1000) < FIGHT_MEMORY
 end
 
 if game.GetWorld and IsValid(game.GetWorld()) then D.Scan() end

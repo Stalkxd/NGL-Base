@@ -7,6 +7,7 @@ local cvRagdolls = CreateConVar("ngl_ragdolls", "1", FCVAR_ARCHIVE,
 
 local NEAR_GOAL_SQR = 32 * 32
 local WAYPOINT_SQR = 40 * 40
+local EDGE_MOVE = 24      -- walked this far: look for the grid's edge again
 
 local BASE_ANIMS = ENT.Anims
 local ANIM_FALLBACK = { IdleAim = "Idle", Walk = "Run", WalkAim = "Walk", RunAim = "Run", CrouchAim = "CrouchIdle", CrouchIdle = "CrouchAim" }
@@ -351,7 +352,7 @@ function ENT:BehaveUpdate(interval)
 				idx = idx + 1
 				self.NGLPathIdx = idx
 				wp = path[idx]
-				if L and L.move and wp then self:NGLStartTraverse(L.move, wp) end
+				if L and L.move and wp then self:NGLStartTraverse(L.move, wp, L.h) end
 			end
 		end
 		if wp then
@@ -360,6 +361,7 @@ function ENT:BehaveUpdate(interval)
 			self.NGLPath = nil
 		end
 	end
+	local onPath = goal ~= nil
 
 	-- In the air or climbing: nothing else until we're there.
 	if self.NGLTraverse then
@@ -427,6 +429,47 @@ function ENT:BehaveUpdate(interval)
 			self.NGLPush = nil
 		elseif not goal then
 			goal = Vector(pos.x + push.x * 48, pos.y + push.y * 48, pos.z)
+		end
+	end
+	-- Pressed into another NPC (Core.CrowdCheck): move apart, whatever else
+	-- we're doing, until we're clear.
+	local un = self.NGLUnstick
+	if un then
+		if now >= un.untilT then
+			self.NGLUnstick = nil
+		elseif goal then
+			local dx, dy = goal.x - pos.x, goal.y - pos.y
+			local l = math.sqrt(dx * dx + dy * dy)
+			if l > 1 then
+				goal = Vector(pos.x + dx / l * 24 + un.x * 48, pos.y + dy / l * 24 + un.y * 48, goal.z)
+			end
+		else
+			goal = Vector(pos.x + un.x * 48, pos.y + un.y * 48, pos.z)
+		end
+	end
+	-- Not on a path (walking straight at someone, strafing, stepping aside):
+	-- don't walk off the grid's edge, a drop or ledge it has no jump for.
+	-- Asked of the grid (no traces) about a grid square ahead, again every
+	-- 0.3 s, every EDGE_MOVE units walked, or when we turn.
+	if goal and not onPath and not self.IsVehicleNPC then
+		local nav = NGL.Nav
+		local dx, dy = goal.x - pos.x, goal.y - pos.y
+		local l = math.sqrt(dx * dx + dy * dy)
+		if l > 1 and nav and nav.Loaded then
+			dx, dy = dx / l, dy / l
+			local E = self.NGLEdge
+			if not E or now >= E.t or dx * E.x + dy * E.y < 0.7
+				or (pos.x - E.px) ^ 2 + (pos.y - E.py) ^ 2 > EDGE_MOVE * EDGE_MOVE then
+				local look = math.min(l, nav.S)
+				local ahead = Vector(pos.x + dx * look, pos.y + dy * look, pos.z)
+				E = { t = now + 0.3, x = dx, y = dy, px = pos.x, py = pos.y, blocked = nav.WalkLine(pos, ahead) == false }
+				self.NGLEdge = E
+			end
+			if E.blocked then
+				goal = nil
+				-- Going straight at someone: take the grid's way round instead.
+				if self.NGLDirect then self.NGLForcePathUntil = now + 5 end
+			end
 		end
 	end
 
@@ -498,7 +541,8 @@ end
 -- Getting along a nav link (sv_nav.lua):
 --   jump   down a ledge or across a gap: the engine's jump, with the Jump,
 --          Glide and Land animations
---   up     onto a ledge: a short hop up and over the edge (JumpUp, then Land)
+--   up     onto a ledge, or over something in the way (a low wall, through a
+--          window, over a hole): a short hop up and over (JumpUp, then Land)
 --   climb  up or down a climb link (ENT.Climb): straight up the wall and over
 --          the top, or over the edge and straight down (ClimbUp, ClimbDown)
 -- `up` and `climb` move the NPC along a set curve, so they always land
@@ -506,7 +550,9 @@ end
 local UP_TIME = 0.45     -- s for a hop up, plus a little per unit of height
 local UP_CLEAR = 16      -- how far above the ledge the hop goes
 
-function ENT:NGLStartTraverse(move, to)
+-- `h`: the link's height (start above landing); for a jump over something
+-- (a vault), minus how high it has to go.
+function ENT:NGLStartTraverse(move, to, h)
 	local now = CurTime()
 	local from = self:GetPos()
 	local A = self.NGLActs
@@ -519,15 +565,17 @@ function ENT:NGLStartTraverse(move, to)
 	local T = { move = move, from = from, to = to, t0 = now }
 	self.NGLTraverse = T
 	self.NGLMoving, self.NGLSteer = false, nil
-	local h = to.z - from.z
+	local rise = to.z - from.z
 	if move == "up" then
-		T.dur = UP_TIME + math.max(h, 0) / 400
+		-- High enough to clear the ledge, or what's in the way of a vault.
+		T.clear = math.max(rise, h and -h or 0)
+		T.dur = UP_TIME + math.max(T.clear, 0) / 400
 		local anim = A.JumpUp or A.Jump
 		if anim then self:PlayAnim(anim, false) end
 	elseif move == "climb" then
 		T.over = 0.3 -- across the top
-		T.dur = T.over + math.max(math.abs(h) / (self.ClimbRate or 250), 0.3)
-		local anim = h >= 0 and A.ClimbUp or A.ClimbDown or A.ClimbUp or A.Glide
+		T.dur = T.over + math.max(math.abs(rise) / (self.ClimbRate or 250), 0.3)
+		local anim = rise >= 0 and A.ClimbUp or A.ClimbDown or A.ClimbUp or A.Glide
 		T.anim = anim
 		if anim then self:PlayAnim(anim, false) end
 	else
@@ -542,7 +590,7 @@ local function scriptedPos(T, t)
 	local f = math.Clamp(t / T.dur, 0, 1)
 	if T.move == "up" then
 		-- Rise first, then forward over the edge and down onto it.
-		local top = math.max(from.z, to.z) + UP_CLEAR
+		local top = math.max(from.z + (T.clear or 0), to.z) + UP_CLEAR
 		local z
 		if f < 0.6 then
 			z = from.z + (top - from.z) * math.sin(f / 0.6 * math.pi * 0.5)

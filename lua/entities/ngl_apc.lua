@@ -133,14 +133,63 @@ function ENT:SetupDataTables()
 	self:NetworkVar("Vector", 0, "AimPos")
 end
 
--- Turret angles (pose values, yaw 90 = straight ahead) to aim at `aim` from
--- `from`, in the body's frame so the gun stays on target on slopes. Shared:
--- the server uses it for the muzzle, clients to draw the gun.
-function ENT:NGLAimAngles(from, aim)
-	local d = aim - from
-	local F, R, U = self:GetForward(), self:GetRight(), self:GetUp()
+-- The gun's aiming frame, as HL2's APC has it: the "gun_base" attachment
+-- (fixed to the body; its own axes, which needn't be the body's), kept in
+-- the body's frame so it's measured once. And where the muzzle sits in the
+-- turning gun's frame ("gun_def", which turns with it), so the aim allows
+-- for the barrel being off the turning axis.
+function ENT:NGLGunFrame()
+	local G = self.NGLGun
+	if G then return G end
+	G = { barrel = Vector(0, 0, 0) }
+	local function att(name)
+		local id = self:LookupAttachment(name)
+		return id and id > 0 and self:GetAttachment(id) or nil
+	end
+	local base = att("gun_base")
+	if base then
+		G.pos = self:WorldToLocal(base.Pos)
+		if base.Ang then G.ang = self:WorldToLocalAngles(base.Ang) end
+	else
+		G.pos = Vector(0, 0, self.EyeHeight or 60)
+	end
+	local def, muzzle = att("gun_def"), att("muzzle")
+	if def and muzzle and def.Ang then G.barrel = WorldToLocal(muzzle.Pos, angle_zero, def.Pos, def.Ang) end
+	self.NGLGun = G
+	return G
+end
+
+-- Turret pose angles (yaw, pitch) to aim at `aim`, worked out as HL2's
+-- AimPrimaryWeapon does, so the gun stays on target on slopes too. Shared:
+-- the server uses it for the muzzle, clients to draw the gun. With no `aim`:
+-- straight ahead, the way it drives.
+function ENT:NGLAimAngles(aim)
+	local G = self:NGLGunFrame()
+	local o = self:LocalToWorld(G.pos)
+	if not aim then
+		local h = rad(self:GetAngles().y + self.HeadingOffset)
+		aim = o + Vector(math.cos(h), math.sin(h), 0) * 1000
+	end
+	local F, R, U
+	if G.ang then
+		local a = self:LocalToWorldAngles(G.ang)
+		F, R, U = a:Forward(), a:Right(), a:Up()
+	else
+		F, R, U = self:GetForward(), self:GetRight(), self:GetUp()
+	end
+	local d = aim - o
 	local x, y, z = d:Dot(F), -d:Dot(R), d:Dot(U)
-	return deg(atan2(y, x)), clamp(-deg(atan2(z, math.sqrt(x * x + y * y))), -45, 45)
+	local B = G.barrel
+	local q = x * x + y * y + z * z
+	local yaw, pitch = atan2(y, x), atan2(z, math.sqrt(x * x + y * y))
+	if q > B.x * B.x + B.y * B.y + B.z * B.z + 1 then
+		-- The barrel is off the turning axis: turn so that the line out of
+		-- it (not out of the axis) meets the target. Where that line crosses
+		-- the sphere through the target is this far round from straight out.
+		yaw = yaw - atan2(B.y, math.sqrt(math.max(q - B.y * B.y, 1)))
+		pitch = pitch - atan2(B.z, math.sqrt(math.max(q - B.z * B.z, 1)))
+	end
+	return NormalizeAngle(deg(yaw)), clamp(-deg(pitch), -45, 45)
 end
 
 if CLIENT then
@@ -196,9 +245,6 @@ if CLIENT then
 			end
 		end
 		self.NGLSusp = ok
-		local gb = self:LookupAttachment("gun_base")
-		local a = gb and gb > 0 and self:GetAttachment(gb)
-		self.NGLGunBase = a and self:WorldToLocal(a.Pos) or Vector(0, 0, self.EyeHeight)
 	end
 
 	-- Each wheel's height pose from a trace down to the ground under it.
@@ -236,10 +282,9 @@ if CLIENT then
 	function ENT:NGLTurretClient()
 		local e, p = self:GetAimEnt(), self:GetAimPos()
 		local aim = IsValid(e) and e:WorldSpaceCenter() or (p ~= vector_origin and p) or nil
-		local ay, ap = 90, 0
-		if aim then ay, ap = self:NGLAimAngles(self:LocalToWorld(self.NGLGunBase), aim) end
+		local ay, ap = self:NGLAimAngles(aim)
 		local step = self.TurretTurnSpeed * FrameTime()
-		local cy, cp = self.NGLCAimYaw or 90, self.NGLCAimPitch or 0
+		local cy, cp = self.NGLCAimYaw or ay, self.NGLCAimPitch or 0
 		cy = NormalizeAngle(cy + clamp(AngleDiff(ay, cy), -step, step))
 		cp = cp + clamp(ap - cp, -step, step)
 		self.NGLCAimYaw, self.NGLCAimPitch = cy, cp
@@ -597,9 +642,9 @@ function ENT:NGLMuzzle()
 	if a then return a.Pos, id end
 end
 
--- The gun follows what it shoots at (an enemy, or a fire_at spot): pose
--- angles measured from the gun base, in the model's frame, as HL2 does
--- (yaw 90 = straight ahead).
+-- The gun follows what it shoots at (an enemy, or a fire_at spot), and
+-- points the way it drives otherwise: pose angles from the gun base, in its
+-- own frame, as HL2 does (see NGLAimAngles).
 function ENT:NGLUpdatePose()
 	self.NGLPosed = true
 	local t = self.NGLTurret
@@ -607,12 +652,7 @@ function ENT:NGLUpdatePose()
 	local aim = self.NGLTurretPos
 	local e = self.NGLEnemy
 	if not aim and IsValid(e) and self.NGLEnemyVisible then aim = e:WorldSpaceCenter() end
-	local ay, ap = 90, 0
-	if aim then
-		local base = self.NGLAtt.base and self:GetAttachment(self.NGLAtt.base)
-		local from = base and base.Pos or (self:GetPos() + Vector(0, 0, self.EyeHeight))
-		ay, ap = self:NGLAimAngles(from, aim)
-	end
+	local ay, ap = self:NGLAimAngles(aim)
 	local now = CurTime()
 	local dt = math.min(now - (self.NGLLastPose or now), 0.5)
 	self.NGLLastPose = now

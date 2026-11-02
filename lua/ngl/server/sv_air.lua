@@ -179,16 +179,29 @@ function Air.Path(from, to)
 	return nil
 end
 
--- An edge-of-sky node far from `pos` (where a ship appears or leaves),
--- preferring one away from `avoid`.
+-- An edge-of-sky point for a ship that lands at (or leaves from) `pos`:
+-- out of sight but not across the map, so it changes with where the ship
+-- is going (near the elite who called it). Prefers ENTRY_DIST away, on the
+-- side away from `avoid` (the enemy), with a little chance in it so ships
+-- don't all come the same way.
+local ENTRY_MIN, ENTRY_DIST = 1500, 3000
 function Air.EntryPoint(pos, avoid)
+	local ax, ay
+	if avoid then
+		ax, ay = pos.x - avoid.x, pos.y - avoid.y
+		local l = math.sqrt(ax * ax + ay * ay)
+		if l > 1 then ax, ay = ax / l, ay / l else ax = nil end
+	end
 	local best, bestScore
 	for _, n in ipairs(Air.Edge) do
 		local p = Air.Pos(n)
-		local d = p:Distance(pos)
-		local score = min(d, 6000)
-		if avoid then score = score + 0.5 * min(p:Distance(avoid), 6000) end
-		if d > 1500 and (not bestScore or score > bestScore) then best, bestScore = n, score end
+		local dx, dy = p.x - pos.x, p.y - pos.y
+		local d = math.sqrt(dx * dx + dy * dy)
+		if d > ENTRY_MIN then
+			local score = -abs(d - ENTRY_DIST) / ENTRY_DIST + math.random() * 0.4
+			if ax then score = score + 0.6 * (dx * ax + dy * ay) / d end
+			if not bestScore or score > bestScore then best, bestScore = n, score end
+		end
 	end
 	return best and Air.Pos(best)
 end
