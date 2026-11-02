@@ -33,11 +33,11 @@ local Nav = NGL.Nav
 local floor, sqrt, abs, huge = math.floor, math.sqrt, math.abs, math.huge
 local SysTime, CurTime = SysTime, CurTime
 
-local cvSpacing = CreateConVar("ngl_nav_spacing", "96", FCVAR_ARCHIVE, "Grid spacing used by ngl_nav_generate (units).", 48, 256)
-local cvMaxNodes = CreateConVar("ngl_nav_max_nodes", "150000", FCVAR_ARCHIVE, "Stop ngl_nav_generate after this many grid points.", 1000, 1000000)
+local cvSpacing = CreateConVar("ngl_nav_spacing", "64", FCVAR_ARCHIVE, "Grid spacing used by ngl_nav_generate (units). Smaller: tighter places, more points.", 32, 256)
+local cvMaxNodes = CreateConVar("ngl_nav_max_nodes", "300000", FCVAR_ARCHIVE, "Stop ngl_nav_generate after this many grid points.", 1000, 1000000)
 local cvGenBudget = CreateConVar("ngl_nav_gen_budget", "20", FCVAR_ARCHIVE, "Milliseconds per tick ngl_nav_generate may use.", 1, 500)
 local cvBudget = CreateConVar("ngl_nav_budget", "2", FCVAR_ARCHIVE, "Milliseconds per tick for NPC path-finding.", 0.1, 50)
-local cvMaxExpand = CreateConVar("ngl_nav_max_expand", "8000", FCVAR_ARCHIVE, "Give up a path search after expanding this many grid points.", 100, 1000000)
+local cvMaxExpand = CreateConVar("ngl_nav_max_expand", "16000", FCVAR_ARCHIVE, "Give up a path search after expanding this many grid points.", 100, 1000000)
 local cvMaxQueue = CreateConVar("ngl_nav_max_queue", "64", FCVAR_ARCHIVE, "Path requests beyond this many queued searches fail at once (the NPC walks straight).", 1, 10000)
 local cvAuto = CreateConVar("ngl_nav_auto", "1", FCVAR_ARCHIVE, "Generate the NGL nav grid on its own when a map has none (0 = only with ngl_nav_generate).", 0, 1)
 local cvDrops = CreateConVar("ngl_nav_drops", "1", FCVAR_ARCHIVE, "ngl_nav_generate links ledges up and down, so NPCs can jump onto and off them.", 0, 1)
@@ -82,7 +82,11 @@ local function reset()
 	Nav.Cells = {}
 	Nav.Count = 0
 	Nav.Dead = {}  -- removed by an edit, until the next compact()
-	Nav.Links = {} -- one-way: { a = node, b = node, kind = "drop" | "up" | "jump" | "climb", h = height a above b }
+	-- One-way links: { a = node, b = node, kind, h }. kind: "drop" (jump down),
+	-- "up" (jump up onto a ledge), "vault" (jump over something in the way,
+	-- h = minus how high), "jump" (across a gap), "climb", or "walk" (joined
+	-- by hand with the editor). h: how far a is above b.
+	Nav.Links = {}
 	Nav.LB = {}    -- [node] = { link index, ... } leaving it
 	Nav.Loaded = false
 	Nav.Cache = {}
@@ -154,19 +158,43 @@ local function buildNeighbours()
 		Nav.NB[i] = nb
 		byDir[i] = bd
 	end
-	-- Open squares: i, its east (1), north (3) and north-east (5) neighbours
-	-- all on their grid spots and all linked round the square and across.
+	-- Open areas: every triangle of three points all linked to each other
+	-- (two sides of a grid square and a diagonal). Two triangles make a
+	-- square. Each is listed in every grid square its corners reach into.
+	local TA, TB, TC, TCells = {}, {}, {}, {}
 	local SQ = {}
+	local nt = 0
+	local function addTri(a, b, c)
+		nt = nt + 1
+		TA[nt], TB[nt], TC[nt] = a, b, c
+		local xa, xb, xc = NX[a] * S + OX[a], NX[b] * S + OX[b], NX[c] * S + OX[c]
+		local ya, yb, yc = NY[a] * S + OY[a], NY[b] * S + OY[b], NY[c] * S + OY[c]
+		for cx = floor(math.min(xa, xb, xc) / S), floor(math.max(xa, xb, xc) / S) do
+			for cy = floor(math.min(ya, yb, yc) / S), floor(math.max(ya, yb, yc) / S) do
+				local k = cellKey(cx, cy)
+				local list = TCells[k]
+				if not list then list = {}; TCells[k] = list end
+				list[#list + 1] = nt
+			end
+		end
+	end
 	for i = 1, Nav.Count do
 		local bd = byDir[i]
 		local e, n, ne = bd[1], bd[3], bd[5]
-		if e and n and ne and OX[i] == 0 and OY[i] == 0 and OX[e] == 0 and OY[e] == 0
-			and OX[n] == 0 and OY[n] == 0 and OX[ne] == 0 and OY[ne] == 0
-			and byDir[e][3] == ne and byDir[n][1] == ne and byDir[e][8] == n then
-			SQ[i] = true
-		end
+		local t1 = e and ne and byDir[e][3] == ne            -- i, e, ne
+		local t2 = n and ne and byDir[n][1] == ne            -- i, ne, n
+		local t3 = e and n and byDir[e][8] == n              -- i, e, n
+		local ne2 = e and byDir[e][3]
+		local t4 = t3 and ne2 and byDir[n][1] == ne2         -- e, ne, n
+		if t1 then addTri(i, e, ne) end
+		if t2 then addTri(i, ne, n) end
+		if t3 then addTri(i, e, n) end
+		if t4 then addTri(e, ne2, n) end
+		if (t1 and t2) or (t3 and t4) then SQ[i] = true end -- a whole square
 	end
+	Nav.TA, Nav.TB, Nav.TC, Nav.TCells, Nav.TriCount = TA, TB, TC, TCells, nt
 	Nav.SQ = SQ
+	Nav.Version = (Nav.Version or 0) + 1 -- what the editor view was sent from has changed
 end
 
 -- Links leaving each node, for the search.
@@ -220,43 +248,78 @@ function Nav.Nearest(pos)
 	return nil
 end
 
--- Is the open square containing grid point (u, v) (in squares), at about
--- height z, open floor? On a square's edge or corner, any square touching
--- the point counts.
-local EPS = 1e-4
-local function openAt(u, v, z, tol)
-	local cx, cy = floor(u), floor(v)
-	local onX, onY = u - cx < EPS, v - cy < EPS
-	local SQ = Nav.SQ
-	local j = nodeAt(cx, cy, z, tol)
-	if j and SQ[j] then return true end
-	if onX then
-		j = nodeAt(cx - 1, cy, z, tol)
-		if j and SQ[j] then return true end
-	end
-	if onY then
-		j = nodeAt(cx, cy - 1, z, tol)
-		if j and SQ[j] then return true end
-		if onX then
-			j = nodeAt(cx - 1, cy - 1, z, tol)
-			if j and SQ[j] then return true end
+-- Open areas (triangles, see buildNeighbours) containing the point (x, y),
+-- passed to fn(k) one by one; stops when fn returns true.
+local TRI_EPS = 0.5
+local function eachTriAt(x, y, fn)
+	local list = Nav.TCells and Nav.TCells[cellKey(floor(x / Nav.S), floor(y / Nav.S))]
+	if not list then return end
+	local S, NX, NY, OX, OY = Nav.S, Nav.NX, Nav.NY, Nav.OX, Nav.OY
+	local TA, TB, TC = Nav.TA, Nav.TB, Nav.TC
+	for m = 1, #list do
+		local k = list[m]
+		local a, b, c = TA[k], TB[k], TC[k]
+		local ax, ay = NX[a] * S + OX[a], NY[a] * S + OY[a]
+		local bx, by = NX[b] * S + OX[b], NY[b] * S + OY[b]
+		local cx, cy = NX[c] * S + OX[c], NY[c] * S + OY[c]
+		local d1 = (bx - ax) * (y - ay) - (by - ay) * (x - ax)
+		local d2 = (cx - bx) * (y - by) - (cy - by) * (x - bx)
+		local d3 = (ax - cx) * (y - cy) - (ay - cy) * (x - cx)
+		-- Inside (or on an edge, give or take TRI_EPS units).
+		local e1 = TRI_EPS * math.sqrt((bx - ax) ^ 2 + (by - ay) ^ 2)
+		local e2 = TRI_EPS * math.sqrt((cx - bx) ^ 2 + (cy - by) ^ 2)
+		local e3 = TRI_EPS * math.sqrt((ax - cx) ^ 2 + (ay - cy) ^ 2)
+		if (d1 >= -e1 and d2 >= -e2 and d3 >= -e3) or (d1 <= e1 and d2 <= e2 and d3 <= e3) then
+			if fn(k) then return end
 		end
 	end
-	return false
+end
+Nav.EachTriAt = eachTriAt
+
+local function sharesCorner(k, m)
+	local TA, TB, TC = Nav.TA, Nav.TB, Nav.TC
+	local a, b, c = TA[m], TB[m], TC[m]
+	local p, q, r = TA[k], TB[k], TC[k]
+	return p == a or p == b or p == c or q == a or q == b or q == c or r == a or r == b or r == c
 end
 
--- True when the straight line from a to b stays on open squares, so an NPC
+local function hasCorner(k, node)
+	return Nav.TA[k] == node or Nav.TB[k] == node or Nav.TC[k] == node
+end
+
+-- True when the straight line from a to b stays on open areas, one floor
+-- all the way: each open triangle it crosses into shares a corner with the
+-- last (so not up or down a ledge between two separate floors), so an NPC
 -- can walk it without following the grid lines. Table lookups only.
-function Nav.OpenLine(a, b)
-	if not Nav.Loaded then return false end
+-- `from` (optional): the grid point a is on, to start on the right floor.
+function Nav.OpenLine(a, b, from)
+	if not Nav.Loaded or not Nav.TCells then return false end
 	local S = Nav.S
 	local dx, dy, dz = b.x - a.x, b.y - a.y, b.z - a.z
 	local len = sqrt(dx * dx + dy * dy)
-	local n = math.max(1, math.ceil(len / (S * 0.25)))
-	local tol = linkTol()
+	local n = math.max(1, math.ceil(len / (S / 6)))
+	local prev
 	for k = 0, n do
 		local f = k / n
-		if not openAt((a.x + dx * f) / S, (a.y + dy * f) / S, a.z + dz * f, tol) then return false end
+		local x, y, z = a.x + dx * f, a.y + dy * f, a.z + dz * f
+		local found
+		if prev then
+			eachTriAt(x, y, function(t)
+				if t == prev then found = t return true end
+				if not found and sharesCorner(t, prev) then found = t end
+			end)
+		else
+			eachTriAt(x, y, function(t)
+				if from then
+					if hasCorner(t, from) then found = t return true end
+				elseif abs(Nav.NZ[Nav.TA[t]] - z) < 48 then
+					found = t
+					return true
+				end
+			end)
+		end
+		if not found then return false end
+		prev = found
 	end
 	return true
 end
@@ -271,7 +334,7 @@ local function linked(i, j)
 end
 
 -- Can an NPC walk straight from a to b? Checked on the grid, no traces: the
--- line has to stay on open squares or go from point to linked point (so not
+-- line has to go from grid point to linked grid point all the way (so not
 -- over a ledge, into a wall or off the grid). nil when a isn't on the grid
 -- at all (nothing to go by).
 function Nav.WalkLine(a, b)
@@ -283,12 +346,13 @@ function Nav.WalkLine(a, b)
 	local tol = linkTol()
 	local prev = Nav.Nearest(a)
 	if not prev then return nil end
+	local NZ = Nav.NZ
 	for k = 1, n do
 		local f = k / n
-		local u, v, z = (a.x + dx * f) / S, (a.y + dy * f) / S, a.z + dz * f
-		local cur = nodeAt(floor(u + 0.5), floor(v + 0.5), z, tol)
-		if not cur then return false end
-		if not linked(prev, cur) and not openAt(u, v, z, tol) then return false end
+		local u, v = (a.x + dx * f) / S, (a.y + dy * f) / S
+		-- The point in that square nearest the height we're walking at.
+		local cur = nodeAt(floor(u + 0.5), floor(v + 0.5), NZ[prev], tol)
+		if not cur or not linked(prev, cur) then return false end
 		prev = cur
 	end
 	return true
@@ -302,6 +366,7 @@ function Nav.RandomWalk(pos, home, radius, cells)
 	local cur = Nav.Nearest(pos)
 	if not cur then return nil end
 	local NX, NY, NB, S = Nav.NX, Nav.NY, Nav.NB, Nav.S
+	cells = math.ceil(cells * 96 / S) -- `cells` counts 96-unit steps, whatever the spacing
 	local hx, hy = home.x / S, home.y / S
 	local r2 = (radius / S) ^ 2
 	local d = DIRS[math.random(8)]
@@ -346,9 +411,10 @@ end
 -- The generated grid (edits are kept apart, see sv_nav_edit.lua).
 -- Format: header, one line per point (grid x, y, height, links, offset x, y),
 -- then "LINKS" and one line per link.
-local KIND_CODE, CODE_KIND = { drop = 1, jump = 2, up = 3, climb = 4 }, { "drop", "jump", "up", "climb" }
+local KIND_CODE, CODE_KIND = { drop = 1, jump = 2, up = 3, climb = 4, walk = 5, vault = 6 },
+	{ "drop", "jump", "up", "climb", "walk", "vault" }
 Nav.KindCode, Nav.CodeKind = KIND_CODE, CODE_KIND
-local FORMAT = 3 -- older grids are made again (they miss narrow halls and treat ledges as walkable)
+local FORMAT = 4 -- older grids are made again (coarser, no vaults, stairs often missing)
 
 function Nav.Save()
 	local parts = { string.format("NGLNAV%d %d %d", FORMAT, Nav.S, Nav.Count) }
@@ -418,114 +484,175 @@ hullTrace.output = hullResult
 -- Doors don't block the grid: NPCs open them or kick them in (sv_doors.lua).
 local DOOR_CLASSES = { "prop_door_rotating", "func_door", "func_door_rotating" }
 local function doorFilter()
-    local list = {}
-    for _, cls in ipairs(DOOR_CLASSES) do
-        for _, e in ipairs(ents.FindByClass(cls)) do list[#list + 1] = e end
-    end
-    groundTrace.filter, hullTrace.filter = list, list
+	local list = {}
+	for _, cls in ipairs(DOOR_CLASSES) do
+		for _, e in ipairs(ents.FindByClass(cls)) do list[#list + 1] = e end
+	end
+	groundTrace.filter, hullTrace.filter = list, list
 end
 
 -- Ground height at (x, y) searching from zTop down to zBottom, or nil.
 local function groundAt(x, y, zTop, zBottom)
-    groundTrace.start = Vector(x, y, zTop)
-    groundTrace.endpos = Vector(x, y, zBottom)
-    util.TraceLine(groundTrace)
-    if groundResult.StartSolid or not groundResult.Hit or groundResult.HitNormal.z < MIN_NORMAL_Z then
-        return nil
-    end
-    return groundResult.HitPos.z
+	groundTrace.start = Vector(x, y, zTop)
+	groundTrace.endpos = Vector(x, y, zBottom)
+	util.TraceLine(groundTrace)
+	if groundResult.StartSolid or not groundResult.Hit or groundResult.HitNormal.z < MIN_NORMAL_Z then
+		return nil
+	end
+	return groundResult.HitPos.z
 end
 
 local function hullClear(ax, ay, az, bx, by, bz)
-    hullTrace.start = Vector(ax, ay, az)
-    hullTrace.endpos = Vector(bx, by, bz)
-    util.TraceHull(hullTrace)
-    return not hullResult.Hit and not hullResult.StartSolid
+	hullTrace.start = Vector(ax, ay, az)
+	hullTrace.endpos = Vector(bx, by, bz)
+	util.TraceHull(hullTrace)
+	return not hullResult.Hit and not hullResult.StartSolid
 end
 
 local function walkable(ax, ay, az, bx, by, bz)
-    return hullClear(ax, ay, az + STEP, bx, by, bz + STEP)
+	return hullClear(ax, ay, az + STEP, bx, by, bz + STEP)
 end
 
 -- The ground all along a to b is walkable for a NextBot: no ledge higher than
 -- a step (more on a slope, as steep as the ground there), no hole, nothing
--- too steep. Samples the ground every SAMPLE units.
-local function smoothGround(ax, ay, az, bx, by, bz)
-    local dx, dy = bx - ax, by - ay
-    local n = math.ceil(sqrt(dx * dx + dy * dy) / SAMPLE)
-    if n < 2 then return abs(bz - az) <= STEP end
-    local step = sqrt(dx * dx + dy * dy) / n
-    local pz, pslope = az, 0
-    for k = 1, n do
-        local f = k / n
-        local z, slope
-        if k == n then
-            z, slope = bz, pslope
-        else
-            local reach = STEP + step * 1.05 + 4
-            z = groundAt(ax + dx * f, ay + dy * f, pz + reach, pz - reach)
-            if not z then return false end
-            local nz = groundResult.HitNormal.z
-            slope = nz < 0.999 and sqrt(1 - nz * nz) / nz or 0
-        end
-        if abs(z - pz) > STEP + step * math.max(slope, pslope) then return false end
-        pz, pslope = z, slope
-    end
-    return true
+-- too steep. Samples the ground every SAMPLE units; where two samples differ
+-- by more than a step it looks in between (stairs: two small steps, fine; a
+-- ledge: one big one, not).
+local MIN_SPLIT = 4
+local function groundBetween(x1, y1, z1, s1, x2, y2, z2, s2, depth)
+	local dx, dy = x2 - x1, y2 - y1
+	local d = sqrt(dx * dx + dy * dy)
+	if abs(z2 - z1) <= STEP + d * math.max(s1, s2) then return true end
+	if d < MIN_SPLIT or depth > 6 then return false end
+	local mx, my = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+	local hi, lo = math.max(z1, z2), math.min(z1, z2)
+	local mz = groundAt(mx, my, hi + STEP + 4, lo - STEP - 4)
+	if not mz then return false end
+	local nz = groundResult.HitNormal.z
+	local ms = nz < 0.999 and sqrt(1 - nz * nz) / nz or 0
+	return groundBetween(x1, y1, z1, s1, mx, my, mz, ms, depth + 1)
+		and groundBetween(mx, my, mz, ms, x2, y2, z2, s2, depth + 1)
 end
 
+local function smoothGround(ax, ay, az, bx, by, bz)
+	local dx, dy = bx - ax, by - ay
+	local len = sqrt(dx * dx + dy * dy)
+	local n = math.max(1, math.ceil(len / SAMPLE))
+	local step = len / n
+	local px, py, pz, pslope = ax, ay, az, 0
+	for k = 1, n do
+		local f = k / n
+		local x, y = ax + dx * f, ay + dy * f
+		local z, slope
+		if k == n then
+			z, slope = bz, pslope
+		else
+			local reach = STEP * 2 + step * 1.05 + 4
+			z = groundAt(x, y, pz + reach, pz - reach)
+			if not z then return false end
+			local nz = groundResult.HitNormal.z
+			slope = nz < 0.999 and sqrt(1 - nz * nz) / nz or 0
+		end
+		if not groundBetween(px, py, pz, pslope, x, y, z, slope, 0) then return false end
+		px, py, pz, pslope = x, y, z, slope
+	end
+	return true
+end
+
+-- A hull trace with a lower box (crouched, for vaulting through windows).
+local VAULT_TALL = 36
+local function hullClearLow(ax, ay, az, bx, by, bz)
+	local top = hullTrace.maxs
+	hullTrace.maxs = Vector(top.x, top.y, VAULT_TALL)
+	local ok = hullClear(ax, ay, az, bx, by, bz)
+	hullTrace.maxs = top
+	return ok
+end
+
+-- Why links weren't made, for the editor's report.
+Nav.Why = Nav.Why or {}
+local why = Nav.Why
+
 -- How a person gets from a point at (ax, ay, az) to one at (bx, by, bz) next
--- to it: "walk", "up" (jump up onto a ledge), "drop" (jump down), or nil.
-local function connect(ax, ay, az, bx, by, bz, maxDrop, maxUp)
-    local dz = bz - az
-    if walkable(ax, ay, az, bx, by, bz) and smoothGround(ax, ay, az, bx, by, bz) then return "walk" end
-    if dz > STEP then
-        -- Room to jump straight up, then across onto the ledge?
-        if dz <= maxUp and hullClear(ax, ay, az + STEP, ax, ay, bz + STEP)
-            and hullClear(ax, ay, bz + STEP, bx, by, bz + STEP) then
-            return "up"
-        end
-    elseif dz < -STEP and maxDrop and -dz <= maxDrop then
-        -- Room to step off the edge, then to fall straight down?
-        if hullClear(ax, ay, az + STEP, bx, by, az + STEP) and hullClear(bx, by, az + STEP, bx, by, bz + STEP) then
-            return "drop"
-        end
-    end
-    return nil
+-- to it: "walk", "up" (jump up onto a ledge), "drop" (jump down), "vault"
+-- (jump over something in the way, or through a window, or over a hole), or
+-- nil. Second result: the link's height (a above b; for a vault minus how
+-- high it has to go). `vault`: also try vaulting.
+local VAULT_HEIGHTS = { 24, 36, 48, 60, 72 }
+local function connect(ax, ay, az, bx, by, bz, maxDrop, maxUp, vault)
+	local dz = bz - az
+	local clear = walkable(ax, ay, az, bx, by, bz)
+	if clear and smoothGround(ax, ay, az, bx, by, bz) then return "walk", az - bz end
+	if dz > STEP then
+		-- Room to jump straight up, then across onto the ledge?
+		if dz <= maxUp and hullClear(ax, ay, az + STEP, ax, ay, bz + STEP)
+			and hullClear(ax, ay, bz + STEP, bx, by, bz + STEP) then
+			return "up", az - bz
+		end
+		why.ledge = (why.ledge or 0) + 1
+	elseif dz < -STEP and maxDrop and -dz <= maxDrop then
+		-- Room to step off the edge, then to fall straight down?
+		if hullClear(ax, ay, az + STEP, bx, by, az + STEP) and hullClear(bx, by, az + STEP, bx, by, bz + STEP) then
+			return "drop", az - bz
+		end
+		why.ledge = (why.ledge or 0) + 1
+	elseif vault and maxUp > 0 and abs(dz) <= STEP then
+		-- Something in the way (a low wall, a window sill, a hole): over it?
+		local top = math.max(az, bz)
+		local best = nil
+		for k = #VAULT_HEIGHTS, 1, -1 do
+			local v = VAULT_HEIGHTS[k]
+			if v <= maxUp then
+				if hullClearLow(ax, ay, top + v, bx, by, top + v) then best = v
+				elseif best then break end
+			end
+		end
+		-- Up from here crouched, down there, and room to stand up there.
+		if best and hullClearLow(ax, ay, az + STEP, ax, ay, top + best)
+			and hullClearLow(bx, by, top + best, bx, by, bz + STEP)
+			and hullClear(bx, by, bz + STEP, bx, by, bz + STEP) then
+			return "vault", -(top + best - az)
+		end
+		why[clear and "step" or "wall"] = (why[clear and "step" or "wall"] or 0) + 1
+	else
+		why[clear and "step" or "wall"] = (why[clear and "step" or "wall"] or 0) + 1
+	end
+	return nil
 end
 
 -- Where in a square a point may go when its grid spot doesn't fit: nearest
 -- the spot first. Rebuilt when the spacing changes.
 local offsets, offsetsFor = nil, nil
 local function cellOffsets(S)
-    if offsetsFor == S then return offsets end
-    local v = { 0, floor(S * 0.25), -floor(S * 0.25), floor(S * 0.42), -floor(S * 0.42) }
-    offsets = {}
-    for _, x in ipairs(v) do
-        for _, y in ipairs(v) do offsets[#offsets + 1] = { x, y } end
-    end
-    table.sort(offsets, function(p, q) return p[1] * p[1] + p[2] * p[2] < q[1] * q[1] + q[2] * q[2] end)
-    offsetsFor = S
-    return offsets
+	if offsetsFor == S then return offsets end
+	local v = { 0 }
+	for _, f in ipairs({ 0.15, 0.3, 0.44 }) do v[#v + 1] = floor(S * f); v[#v + 1] = -floor(S * f) end
+	offsets = {}
+	for _, x in ipairs(v) do
+		for _, y in ipairs(v) do offsets[#offsets + 1] = { x, y } end
+	end
+	table.sort(offsets, function(p, q) return p[1] * p[1] + p[2] * p[2] < q[1] * q[1] + q[2] * q[2] end)
+	offsetsFor = S
+	return offsets
 end
 
 local function seedPositions()
-    local seeds = {}
-    for _, cls in ipairs({ "info_player_start", "info_player_deathmatch", "info_player_combine",
-        "info_player_rebel", "info_player_terrorist", "info_player_counterterrorist", "gmod_player_start" }) do
-        for _, e in ipairs(ents.FindByClass(cls)) do seeds[#seeds + 1] = e:GetPos() end
-    end
-    for _, ply in ipairs(player.GetAll()) do seeds[#seeds + 1] = ply:GetPos() end
-    return seeds
+	local seeds = {}
+	for _, cls in ipairs({ "info_player_start", "info_player_deathmatch", "info_player_combine",
+		"info_player_rebel", "info_player_terrorist", "info_player_counterterrorist", "gmod_player_start" }) do
+		for _, e in ipairs(ents.FindByClass(cls)) do seeds[#seeds + 1] = e:GetPos() end
+	end
+	for _, ply in ipairs(player.GetAll()) do seeds[#seeds + 1] = ply:GetPos() end
+	return seeds
 end
 
-local function joinNodes(i, j, d, kind, az, bz)
-    if kind == "walk" then
-        Nav.NM[i] = bit.bor(Nav.NM[i], bit.lshift(1, d - 1))
-        Nav.NM[j] = bit.bor(Nav.NM[j], bit.lshift(1, OPP[d] - 1))
-    else
-        addLink(i, j, kind, az - bz)
-    end
+local function joinNodes(i, j, d, kind, h)
+	if kind == "walk" then
+		Nav.NM[i] = bit.bor(Nav.NM[i], bit.lshift(1, d - 1))
+		Nav.NM[j] = bit.bor(Nav.NM[j], bit.lshift(1, OPP[d] - 1))
+	else
+		addLink(i, j, kind, h)
+	end
 end
 
 -- Links node i to its 8 neighbours where a person can walk, jump up or jump
@@ -537,92 +664,92 @@ end
 -- highest drop to link (nil: none, nor jumps up).
 local tried = {}
 local function expandNode(i, queue, maxNodes, canAdd, drops)
-    local S = Nav.S
-    local maxUp = drops and cvMaxUp:GetFloat() or 0
-    local top = math.max(maxUp, S * 1.05) + 8
-    local ix, iy, z = Nav.NX[i], Nav.NY[i], Nav.NZ[i]
-    local ax, ay = ix * S + Nav.OX[i], iy * S + Nav.OY[i]
-    for d = 1, 8 do
-        if bit.band(Nav.NM[i], bit.lshift(1, d - 1)) == 0 then
-            local nx, ny = ix + DIRS[d][1], iy + DIRS[d][2]
-            -- Try spots in the square, nearest its grid spot first, until one
-            -- can be walked to (an existing point there, or a new one). With
-            -- none, the first that can be jumped to (straight ahead only, so
-            -- each ledge gets one jump per grid line, not three).
-            local done, best = false, nil
-            for k in pairs(tried) do tried[k] = nil end
-            local solid = 0
-            for c, o in ipairs(cellOffsets(S)) do
-                -- The middle of the square and the four spots round it all
-                -- inside a wall: the square is wall, don't try the rest.
-                if c == 6 and solid == 5 then break end
-                local bx, by = nx * S + o[1], ny * S + o[2]
-                -- From just above a step first (works under low ceilings); if
-                -- that's inside something, it may be a ledge to jump up on:
-                -- look from higher up.
-                local gz = groundAt(bx, by, z + STEP + 8, z - (drops or 64))
-                if not gz and groundResult.StartSolid then
-                    gz = groundAt(bx, by, z + top, z - (drops or 64))
-                    if not gz and groundResult.StartSolid then solid = solid + 1 end
-                end
-                if gz then
-                    local j = nodeAt(nx, ny, gz, 32)
-                    if j then
-                        if not tried[j] then
-                            tried[j] = true
-                            local jz = Nav.NZ[j]
-                            local kind = connect(ax, ay, z, nx * S + Nav.OX[j], ny * S + Nav.OY[j], jz, drops, maxUp)
-                            if kind == "walk" then
-                                joinNodes(i, j, d, kind, z, jz)
-                                done = true
-                                break
-                            elseif kind and not best and d <= 4 then
-                                best = { kind = kind, j = j, z = jz }
-                            end
-                        end
-                    elseif Nav.Count < maxNodes and (not canAdd or canAdd(nx, ny, gz)) then
-                        local kind = connect(ax, ay, z, bx, by, gz, drops, maxUp)
-                        if kind == "walk" then
-                            j = addNode(nx, ny, gz, o[1], o[2])
-                            queue[#queue + 1] = j
-                            joinNodes(i, j, d, kind, z, gz)
-                            done = true
-                            break
-                        elseif kind and not best and d <= 4 then
-                            best = { kind = kind, z = gz, o = o }
-                        end
-                    end
-                end
-            end
-            if not done and best then
-                local j = best.j
-                if not j then
-                    j = addNode(nx, ny, best.z, best.o[1], best.o[2])
-                    queue[#queue + 1] = j
-                end
-                joinNodes(i, j, d, best.kind, z, best.z)
-            end
-        end
-    end
+	local S = Nav.S
+	local maxUp = drops and cvMaxUp:GetFloat() or 0
+	local top = math.max(maxUp, S * 1.05) + 8
+	local ix, iy, z = Nav.NX[i], Nav.NY[i], Nav.NZ[i]
+	local ax, ay = ix * S + Nav.OX[i], iy * S + Nav.OY[i]
+	for d = 1, 8 do
+		if bit.band(Nav.NM[i], bit.lshift(1, d - 1)) == 0 then
+			local nx, ny = ix + DIRS[d][1], iy + DIRS[d][2]
+			-- Try spots in the square, nearest its grid spot first, until one
+			-- can be walked to (an existing point there, or a new one). With
+			-- none, the first that can be jumped to (straight ahead only, so
+			-- each ledge gets one jump per grid line, not three).
+			local done, best = false, nil
+			for k in pairs(tried) do tried[k] = nil end
+			local solid = 0
+			for c, o in ipairs(cellOffsets(S)) do
+				-- The middle of the square and the four spots round it all
+				-- inside a wall: the square is wall, don't try the rest.
+				if c == 6 and solid == 5 then why.wall = (why.wall or 0) + 1 break end
+				local bx, by = nx * S + o[1], ny * S + o[2]
+				-- From just above a step first (works under low ceilings); if
+				-- that's inside something, it may be a ledge to jump up on:
+				-- look from higher up.
+				local gz = groundAt(bx, by, z + STEP + 8, z - (drops or 64))
+				if not gz and groundResult.StartSolid then
+					gz = groundAt(bx, by, z + top, z - (drops or 64))
+					if not gz and groundResult.StartSolid then solid = solid + 1 end
+				end
+				if gz then
+					local j = nodeAt(nx, ny, gz, 32)
+					if j then
+						if not tried[j] then
+							tried[j] = true
+							local jz = Nav.NZ[j]
+							local kind, h = connect(ax, ay, z, nx * S + Nav.OX[j], ny * S + Nav.OY[j], jz, drops, maxUp, d <= 4)
+							if kind == "walk" then
+								joinNodes(i, j, d, kind, h)
+								done = true
+								break
+							elseif kind and not best and d <= 4 then
+								best = { kind = kind, j = j, z = jz, h = h }
+							end
+						end
+					elseif Nav.Count < maxNodes and (not canAdd or canAdd(nx, ny, gz)) then
+						local kind, h = connect(ax, ay, z, bx, by, gz, drops, maxUp, d <= 4 and c == 1)
+						if kind == "walk" then
+							j = addNode(nx, ny, gz, o[1], o[2])
+							queue[#queue + 1] = j
+							joinNodes(i, j, d, kind, h)
+							done = true
+							break
+						elseif kind and not best and d <= 4 then
+							best = { kind = kind, z = gz, o = o, h = h }
+						end
+					end
+				end
+			end
+			if not done and best then
+				local j = best.j
+				if not j then
+					j = addNode(nx, ny, best.z, best.o[1], best.o[2])
+					queue[#queue + 1] = j
+				end
+				joinNodes(i, j, d, best.kind, best.h)
+			end
+		end
+	end
 end
 
 -- Flood-fills from the queue (all of it, or `budget` seconds at a time when
 -- run in a coroutine, with `report` now and then).
 local function flood(queue, maxNodes, canAdd, drops, budget, report)
-    local head = 1
-    local t0, lastReport = SysTime(), SysTime()
-    while head <= #queue do
-        expandNode(queue[head], queue, maxNodes, canAdd, drops)
-        head = head + 1
-        if budget and SysTime() - t0 > budget then
-            if report and SysTime() - lastReport > 2 then
-                lastReport = SysTime()
-                report(string.format("Generating... %d points, %d queued", Nav.Count, #queue - head + 1))
-            end
-            coroutine.yield()
-            t0 = SysTime()
-        end
-    end
+	local head = 1
+	local t0, lastReport = SysTime(), SysTime()
+	while head <= #queue do
+		expandNode(queue[head], queue, maxNodes, canAdd, drops)
+		head = head + 1
+		if budget and SysTime() - t0 > budget then
+			if report and SysTime() - lastReport > 2 then
+				lastReport = SysTime()
+				report(string.format("Generating... %d points, %d queued", Nav.Count, #queue - head + 1))
+			end
+			coroutine.yield()
+			t0 = SysTime()
+		end
+	end
 end
 
 local genRoutine = nil
@@ -630,57 +757,57 @@ local genRoutine = nil
 -- A point right where p is (on the ground below it, within `down`), in
 -- whichever square it falls in. Returns it and whether it is new.
 local function seedNode(p, down)
-    local S = Nav.S
-    local ix, iy = floor(p.x / S + 0.5), floor(p.y / S + 0.5)
-    local z = groundAt(p.x, p.y, p.z + 32, p.z - down)
-    if not z then return nil end
-    local j = nodeAt(ix, iy, z, 32)
-    if j then return j, false end
-    local ox, oy = floor(p.x - ix * S + 0.5), floor(p.y - iy * S + 0.5)
-    -- Right on the grid spot when it's close, so open squares stay open.
-    if ox * ox + oy * oy < 64 * 64 and hullClear(ix * S, iy * S, z + STEP, ix * S, iy * S, z + STEP) then ox, oy = 0, 0 end
-    return addNode(ix, iy, z, ox, oy), true
+	local S = Nav.S
+	local ix, iy = floor(p.x / S + 0.5), floor(p.y / S + 0.5)
+	local z = groundAt(p.x, p.y, p.z + 32, p.z - down)
+	if not z then return nil end
+	local j = nodeAt(ix, iy, z, 32)
+	if j then return j, false end
+	local ox, oy = floor(p.x - ix * S + 0.5), floor(p.y - iy * S + 0.5)
+	-- Right on the grid spot when it's close, so open squares stay open.
+	if ox * ox + oy * oy < 64 * 64 and hullClear(ix * S, iy * S, z + STEP, ix * S, iy * S, z + STEP) then ox, oy = 0, 0 end
+	return addNode(ix, iy, z, ox, oy), true
 end
 
 local function generate(report)
-    reset()
-    local S = Nav.S
-    local maxNodes = cvMaxNodes:GetInt()
-    local queue = {}
-    doorFilter()
+	reset()
+	local S = Nav.S
+	local maxNodes = cvMaxNodes:GetInt()
+	local queue = {}
+	doorFilter()
 
-    for _, p in ipairs(seedPositions()) do
-        local j, new = seedNode(p, 256)
-        if new then queue[#queue + 1] = j end
-    end
-    if #queue == 0 then
-        report("No spawn points or players to start from. Stand on the map and try again.")
-        return
-    end
+	for _, p in ipairs(seedPositions()) do
+		local j, new = seedNode(p, 256)
+		if new then queue[#queue + 1] = j end
+	end
+	if #queue == 0 then
+		report("No spawn points or players to start from. Stand on the map and try again.")
+		return
+	end
 
-    flood(queue, maxNodes, nil, cvDrops:GetBool() and cvMaxDrop:GetFloat() or nil, cvGenBudget:GetFloat() / 1000, report)
+	flood(queue, maxNodes, nil, cvDrops:GetBool() and cvMaxDrop:GetFloat() or nil, cvGenBudget:GetFloat() / 1000, report)
 
-    buildNeighbours()
-    buildLinks()
-    Nav.Loaded = Nav.Count > 0
-    Nav.Save()
-    local base = Nav.Count
-    if Nav.ApplyEdits then Nav.ApplyEdits() end
-    report(string.format("Done: %d points, %d ledge links at %d-unit spacing%s. Saved to garrysmod/data/%s%s",
-        base, #Nav.Links, S, base >= maxNodes and " (hit ngl_nav_max_nodes, map may be partly covered)" or "", navPath(),
-        (Nav.Edits and #Nav.Edits > 0) and string.format(" (+ %d edits)", #Nav.Edits) or ""))
+	buildNeighbours()
+	buildLinks()
+	Nav.Loaded = Nav.Count > 0
+	Nav.Save()
+	local base = Nav.Count
+	if Nav.ApplyEdits then Nav.ApplyEdits() end
+	report(string.format("Done: %d points, %d ledge links at %d-unit spacing%s. Saved to garrysmod/data/%s%s",
+		base, #Nav.Links, S, base >= maxNodes and " (hit ngl_nav_max_nodes, map may be partly covered)" or "", navPath(),
+		(Nav.Edits and #Nav.Edits > 0) and string.format(" (+ %d edits)", #Nav.Edits) or ""))
 end
 
 -- For the editor (sv_nav_edit.lua).
 Nav._I = {
-    addNode = addNode, nodeAt = nodeAt, addLink = addLink, cellKey = cellKey,
-    groundAt = groundAt, walkable = walkable, flood = flood, doorFilter = doorFilter,
-    seedNode = seedNode, connect = connect, smoothGround = smoothGround, linkTol = linkTol,
-    maxUp = function() return cvDrops:GetBool() and cvMaxUp:GetFloat() or 0 end,
-    buildNeighbours = buildNeighbours, buildLinks = buildLinks, reset = reset,
-    clearSearches = function() for k in pairs(searches) do searches[k] = nil end end,
-    maxNodes = function() return cvMaxNodes:GetInt() end,
-    maxDrop = function() return cvDrops:GetBool() and cvMaxDrop:GetFloat() or nil end,
+	addNode = addNode, nodeAt = nodeAt, addLink = addLink, cellKey = cellKey,
+	groundAt = groundAt, walkable = walkable, flood = flood, doorFilter = doorFilter,
+	seedNode = seedNode, connect = connect, smoothGround = smoothGround, linkTol = linkTol,
+	maxUp = function() return cvDrops:GetBool() and cvMaxUp:GetFloat() or 0 end,
+	buildNeighbours = buildNeighbours, buildLinks = buildLinks, reset = reset,
+	clearSearches = function() for k in pairs(searches) do searches[k] = nil end end,
+	maxNodes = function() return cvMaxNodes:GetInt() end,
+	maxDrop = function() return cvDrops:GetBool() and cvMaxDrop:GetFloat() or nil end,
 }
 
 ----------------------------------------------------------------------------
@@ -734,11 +861,12 @@ end
 -- gets along a link: "jump" (down a ledge or across a gap), "up" (jump up
 -- onto a ledge), "climb", or nil when it can't.
 local function linkMove(L, caps)
-	if not caps then return nil end
 	local kind, h = L.kind, L.h or 0
+	if kind == "walk" then return "walk" end -- everyone
+	if not caps then return nil end
 	if kind == "jump" then return caps.gap and "jump" or nil end
 	if kind == "drop" and h <= caps.drop then return "jump" end
-	if kind == "up" and -h <= caps.up then return "up" end
+	if (kind == "up" or kind == "vault") and -h <= caps.up then return "up" end
 	if abs(h) <= caps.climb and (kind == "climb" or kind == "up" or kind == "drop") then return "climb" end
 	return nil
 end
@@ -774,7 +902,7 @@ local function toWaypoints(chain, linkIn, caps)
 					brk = true
 				else
 					work = work + (k + 1 - anchor)
-					brk = not Nav.OpenLine(nodePos(chain[anchor]), nodePos(c))
+					brk = not Nav.OpenLine(nodePos(chain[anchor]), nodePos(c), chain[anchor])
 				end
 			end
 		end
@@ -791,9 +919,10 @@ local function toWaypoints(chain, linkIn, caps)
 	for k = 1, n do
 		if keep[k] then pts[#pts + 1] = nodePos(chain[k]) end
 		local L = linkIn and linkIn[k + 1]
-		if L then
+		local move = L and linkMove(L, caps)
+		if move and move ~= "walk" then -- a link joined by hand is just walked
 			pts.links = pts.links or {}
-			pts.links[#pts] = { move = linkMove(L, caps), h = L.h or 0 }
+			pts.links[#pts] = { move = move, h = L.h or 0 }
 		end
 	end
 	return pts
@@ -835,8 +964,8 @@ local function search(start, goal, width, caps)
 	local traced = 0
 	local hn, hf, size = {}, {}, 0
 	local g, came, closed = { [start] = 0 }, {}, {}
-	local LB, Links = caps and Nav.LB, Nav.Links
-	local viaLink = LB and {}
+	local LB, Links = Nav.LB, Nav.Links
+	local viaLink = {}
 	size = heapPush(hn, hf, size, start, heuristic(start, goal))
 	local maxExpand = cvMaxExpand:GetInt()
 	local expanded = 0
@@ -845,17 +974,15 @@ local function search(start, goal, width, caps)
 		local cur
 		cur, size = heapPop(hn, hf, size)
 		if cur == goal then
-			local chain, linkIn = { cur }, viaLink and {}
-			local rev = { viaLink and viaLink[cur] or false }
+			local chain, linkIn = { cur }, {}
+			local rev = { viaLink[cur] or false }
 			while came[cur] do
 				cur = came[cur]
 				table.insert(chain, 1, cur)
-				table.insert(rev, 1, viaLink and viaLink[cur] or false)
+				table.insert(rev, 1, viaLink[cur] or false)
 			end
-			if linkIn then
-				for k = 1, #chain do if rev[k] then linkIn[k] = rev[k] end end
-				if next(linkIn) == nil then linkIn = nil end
-			end
+			for k = 1, #chain do if rev[k] then linkIn[k] = rev[k] end end
+			if next(linkIn) == nil then linkIn = nil end
 			return toWaypoints(chain, linkIn, caps)
 		end
 		if not closed[cur] then
@@ -878,21 +1005,22 @@ local function search(start, goal, width, caps)
 					if not old or ng < old then
 						g[j] = ng
 						came[j] = cur
-						if viaLink then viaLink[j] = nil end
+						viaLink[j] = nil
 						size = heapPush(hn, hf, size, j, ng + heuristic(j, goal))
 					end
 				end
 			end
 
-			-- Jumps and drops this NPC can take.
-			local out = LB and LB[cur]
+			-- Jumps and drops this NPC can take, and links joined by hand.
+			local out = LB[cur]
 			if out then
 				for k = 1, #out do
 					local L = Links[out[k]]
 					local j = L.b
 					if not closed[j] and linkMove(L, caps) then
 						local dx, dy = Nav.NX[j] - Nav.NX[cur], Nav.NY[j] - Nav.NY[cur]
-						local ng = gc + sqrt(dx * dx + dy * dy) + 3 -- a bit dearer than walking
+						-- Jumps a bit dearer than walking; links joined by hand cost their length.
+						local ng = gc + sqrt(dx * dx + dy * dy) + (L.kind == "walk" and 0 or 3)
 						local old = g[j]
 						if not old or ng < old then
 							g[j] = ng
@@ -953,7 +1081,7 @@ end
 -- across gaps or climb; such paths have `path.links` (see toWaypoints).
 function Nav.RequestPath(from, to, callback, wanted, width, caps)
 	if width and width <= 24 then width = nil end
-	if caps and #Nav.Links == 0 then caps = nil end
+	if caps and #Nav.Links == 0 then caps = nil end -- every path the same: share them
 	if width then width = math.ceil(width / 8) * 8 end -- few width classes, more shared work
 	if not Nav.Loaded then return false end
 	local st = Nav.Stats

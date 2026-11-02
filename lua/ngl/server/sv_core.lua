@@ -302,6 +302,69 @@ local function crowdCheck(npc, now, pos)
 end
 Core.CrowdCheck = crowdCheck
 
+-- Pressed into each other (side-stepping in a fight, two strafing the same
+-- way): both get moved apart (NGLUnstick, see BehaveUpdate) until they're
+-- clear. Stuck like that for a second: a small nudge apart, if there's room.
+-- Positions from the spatial grid, so no traces unless really stuck.
+local UNSTICK_TIME = 0.5
+local NUDGE_AFTER = 1
+local nudgeTrace = { mask = MASK_NPCSOLID_BRUSHONLY, output = {} }
+local function overlapCheck(npc, now, pos)
+	if npc.IsVehicleNPC then return end
+	local myR = radiusOf(npc)
+	local reach = myR + 40
+	local best, bestD, bx, by
+	local x0, x1 = floor((pos.x - reach) / CELL) + OFFSET, floor((pos.x + reach) / CELL) + OFFSET
+	local y0, y1 = floor((pos.y - reach) / CELL) + OFFSET, floor((pos.y + reach) / CELL) + OFFSET
+	for x = x0, x1 do
+		local base = x * 4096
+		for y = y0, y1 do
+			local c = cells[base + y]
+			if c then
+				for e in pairs(c) do
+					local p = e.NGLGridPos
+					if p and e ~= npc and not e.NGLDying and not e.IsVehicleNPC and abs(p.z - pos.z) < 64 then
+						local ox, oy = pos.x - p.x, pos.y - p.y
+						local d = math.sqrt(ox * ox + oy * oy)
+						local gap = d - myR - radiusOf(e)
+						if gap < 2 and (not bestD or gap < bestD) then best, bestD, bx, by = e, gap, ox, oy end
+					end
+				end
+			end
+		end
+	end
+	if not best then
+		npc.NGLOverlapSince = nil
+		return
+	end
+	local d = math.sqrt(bx * bx + by * by)
+	if d < 1 then
+		-- Right on top of each other: any way will do.
+		local a = random() * 2 * math.pi
+		bx, by, d = math.cos(a), math.sin(a), 1
+	end
+	bx, by = bx / d, by / d
+	npc.NGLUnstick = { x = bx, y = by, untilT = now + UNSTICK_TIME }
+	if not best.NGLTraverse then best.NGLUnstick = { x = -bx, y = -by, untilT = now + UNSTICK_TIME } end
+	local since = npc.NGLOverlapSince
+	if not since then
+		npc.NGLOverlapSince = now
+	elseif now - since > NUDGE_AFTER and not npc.NGLTraverse then
+		-- Still pressed together: step half the overlap (and a bit) apart.
+		local step = math.min(-bestD * 0.5 + 4, 24)
+		local to = Vector(pos.x + bx * step, pos.y + by * step, pos.z)
+		local t = nudgeTrace
+		t.start, t.endpos = pos + Vector(0, 0, 4), to + Vector(0, 0, 4)
+		if npc.GetCollisionBounds then t.mins, t.maxs = npc:GetCollisionBounds() end
+		t.mins, t.maxs = t.mins or Vector(-16, -16, 0), t.maxs or Vector(16, 16, 72)
+		t.filter = npc
+		local tr = util.TraceHull(t)
+		if not tr.Hit and not tr.StartSolid then npc:SetPos(to) end
+		npc.NGLOverlapSince = now
+	end
+end
+Core.OverlapCheck = overlapCheck
+
 -- NGL NPCs within `radius` of `pos` for which `filter(npc)` is true (all
 -- if no filter). Uses the spatial grid, so it only looks at nearby cells.
 function Core.FindInRadius(pos, radius, filter)
@@ -771,6 +834,23 @@ end
 -- the spot), standing (hold it) or a sidestep across the line of fire.
 -- stand, crouch: chances 0..1. minD/maxD: sidestep length (100..250).
 -- home/leash: never step further than leash from home.
+local STRAFE_TRIES = { 1, -1, 0.5, -0.5 }
+local STRAFE_ROOM = 48
+local function strafeOk(npc, pos, goal, home, leash)
+	if home and leash and goal:DistToSqr(home) > leash * leash then return false end
+	local nav = NGL.Nav
+	if nav and nav.Loaded and nav.WalkLine(pos, goal) == false then return false end
+	-- Someone standing there, or halfway (the spatial grid, no traces).
+	local mid = (pos + goal) * 0.5
+	for _, p in ipairs({ goal, mid }) do
+		for _, e in ipairs(Core.FindInRadius(p, STRAFE_ROOM)) do
+			if e ~= npc and not e.IsVehicleNPC then return false end
+		end
+	end
+	return true
+end
+Core.StrafeOk = strafeOk
+
 function Core.Strafe(npc, now, pos, tPos, stand, crouch, minD, maxD, home, leash)
 	npc.NGLPath = nil
 	npc.NGLDirect = nil
@@ -794,10 +874,12 @@ function Core.Strafe(npc, now, pos, tPos, stand, crouch, minD, maxD, home, leash
 			dir:Normalize()
 			local side = (random(2) == 1) and 1 or -1
 			local step = Vector(-dir.y, dir.x, 0) * Rand(minD or 100, maxD or 250)
-			local goal = pos + step * side
-			if home and leash and goal:DistToSqr(home) > leash * leash then
-				goal = pos - step * side
-				if goal:DistToSqr(home) > leash * leash then goal = nil end
+			-- One side, else the other, else half as far: somewhere inside the
+			-- leash, on the grid with nothing in the way, and not into someone.
+			local goal
+			for _, f in ipairs(STRAFE_TRIES) do
+				local g = pos + step * (side * f)
+				if strafeOk(npc, pos, g, home, leash) then goal = g break end
 			end
 			npc.NGLGoal = goal
 		end
@@ -1124,6 +1206,7 @@ local function think(npc, now, dt, nearestPlayerSqr)
 	npc.NGLGridPos = pos
 	if not npc.NGLTraverse then
 		crowdCheck(npc, now, pos)
+		overlapCheck(npc, now, pos)
 		-- A closed door in the way: open it or kick it in (sv_doors.lua).
 		local D = NGL.Doors
 		if D and npc.NGLMoving and (npc.OpenDoors or npc.DoorBreach) then D.Think(npc, now, pos) end

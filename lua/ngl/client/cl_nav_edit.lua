@@ -1,31 +1,97 @@
--- Draws the NGL nav grid round the player while the NGL Nav Editor tool is
--- out (the server sends it, see sv_nav_edit.lua), and the tool's circle.
--- Open squares (NPCs walk straight across them) are filled with a faint
--- outline; elsewhere the walk links are drawn as lines.
-NGL.NavView = NGL.NavView or { nodes = {}, squares = {}, edges = {}, links = {}, until_ = 0 }
+-- Draws the NGL nav grid inside a sphere round the player while the NGL Nav
+-- Editor tool is out (the server sends it, see sv_nav_edit.lua), and the
+-- tool's circle. The sphere's size is ngl_nav_view_radius: turn it up to see
+-- the whole map. Open area (NPCs walk straight across it) is filled, with a
+-- faint outline; elsewhere the walk connections are drawn as blue lines.
+NGL.NavView = NGL.NavView or { nodes = {}, links = {}, meshes = {} }
 local V = NGL.NavView
 
-local UP = Vector(0, 0, 3)
+local radiusCvar = CreateClientConVar("ngl_nav_view_radius", "1500", true, true,
+	"How far round you the NGL Nav Editor shows the grid", 200, 20000)
 
-net.Receive("ngl_nav_view", function()
-	local nodes, squares, edges, links = {}, {}, {}, {}
-	for i = 1, net.ReadUInt(12) do nodes[i] = net.ReadVector() + UP end
-	for i = 1, net.ReadUInt(12) do
-		squares[i] = { net.ReadUInt(12), net.ReadUInt(12), net.ReadUInt(12), net.ReadUInt(12) }
-	end
-	for i = 1, net.ReadUInt(14) * 2 do edges[i] = net.ReadUInt(12) end
-	for i = 1, net.ReadUInt(10) do
-		links[i] = { a = net.ReadVector() + UP, b = net.ReadVector() + UP, kind = net.ReadUInt(3) }
-	end
-	V.linkA = net.ReadBool() and net.ReadVector() or nil
-	V.nodes, V.squares, V.edges, V.links = nodes, squares, edges, links
-	V.until_ = CurTime() + 2
-end)
+local UP = 3
+local TRIS_PER_MESH = 10000
+local LINES_PER_MESH = 15000
 
 local BLUE, WHITE, RED = Color(0, 170, 255), Color(255, 255, 255), Color(255, 60, 60)
 local FILL, OUTLINE = Color(0, 170, 255, 28), Color(120, 210, 255, 70)
--- Link colours by kind (Nav.KindCode): drop, gap jump, jump up, climb.
-local LINK_COLOR = { Color(255, 210, 0), Color(60, 255, 90), Color(255, 130, 0), Color(200, 90, 255) }
+-- Link colours by kind (Nav.KindCode): drop, gap jump, jump up, climb, walk
+-- (joined by hand), vault (over or through something).
+local LINK_COLOR = { Color(255, 210, 0), Color(60, 255, 90), Color(255, 130, 0), Color(200, 90, 255),
+	Color(0, 170, 255), Color(255, 90, 160) }
+V.LINK_COLOR = LINK_COLOR
+
+local mat
+local function material()
+	mat = mat or CreateMaterial("ngl_nav_view", "UnlitGeneric", {
+		["$basetexture"] = "color/white", ["$vertexcolor"] = 1, ["$vertexalpha"] = 1, ["$nocull"] = 1,
+	})
+	return mat
+end
+
+local function freeMeshes()
+	for _, m in ipairs(V.meshes) do if m.mesh and m.mesh.Destroy then m.mesh:Destroy() end end
+	V.meshes = {}
+end
+
+-- Meshes of `count` pieces (triangles or lines) of `per` corners each.
+local function buildMeshes(kind, list, per, color, maxPer)
+	local nodes = V.nodes
+	local count = #list / per
+	local first = 0
+	while first < count do
+		local n = math.min(maxPer, count - first)
+		local m = Mesh()
+		mesh.Begin(m, kind, n)
+		for k = first * per + 1, (first + n) * per do
+			local p = nodes[list[k]]
+			mesh.Position(p)
+			mesh.Color(color.r or color[1], color.g or color[2], color.b or color[3], color.a or color[4])
+			mesh.AdvanceVertex()
+		end
+		mesh.End()
+		V.meshes[#V.meshes + 1] = { mesh = m }
+		first = first + n
+	end
+end
+
+-- Reads what the server sent (see Nav.ViewData) and builds the meshes.
+function V.Parse(text)
+	local nums, n = {}, 0
+	for w in string.gmatch(text, "%S+") do n = n + 1; nums[n] = tonumber(w) end
+	local k = 0
+	local function get() k = k + 1; return nums[k] or 0 end
+	local nodes = {}
+	for i = 1, get() do nodes[i] = Vector(get(), get(), get() + UP) end
+	local tris, outline, lines, links = {}, {}, {}, {}
+	for i = 1, get() * 3 do tris[i] = get() end
+	for i = 1, get() * 2 do outline[i] = get() end
+	for i = 1, get() * 2 do lines[i] = get() end
+	for i = 1, get() do
+		links[i] = { a = Vector(get(), get(), get() + UP), b = Vector(get(), get(), get() + UP), kind = get() }
+	end
+	V.linkA = get() == 1 and Vector(get(), get(), get()) or nil
+	V.nodes, V.links = nodes, links
+	V.tris, V.outline, V.lines = tris, outline, lines
+	freeMeshes()
+	if Mesh then
+		buildMeshes(MATERIAL_TRIANGLES, tris, 3, FILL, TRIS_PER_MESH)
+		buildMeshes(MATERIAL_LINES, outline, 2, OUTLINE, LINES_PER_MESH)
+		buildMeshes(MATERIAL_LINES, lines, 2, BLUE, LINES_PER_MESH)
+	end
+end
+
+local pieces = {}
+net.Receive("ngl_nav_view", function()
+	local id, k, total = net.ReadUInt(16), net.ReadUInt(8), net.ReadUInt(8)
+	local data = net.ReadData(net.ReadUInt(32))
+	if pieces.id ~= id then pieces = { id = id } end
+	pieces[k] = data
+	for i = 1, total do if not pieces[i] then return end end
+	local text = util.Decompress(table.concat(pieces, "", 1, total))
+	pieces = {}
+	if text then V.Parse(text) end
+end)
 
 local function holdingTool()
 	local ply = LocalPlayer()
@@ -34,26 +100,15 @@ local function holdingTool()
 	local t = ply:GetTool()
 	return t and t.Mode == "ngl_nav"
 end
+V.HoldingTool = holdingTool
 
 hook.Add("PostDrawTranslucentRenderables", "NGL.NavView", function(depth, sky)
-	if sky or CurTime() > V.until_ or not holdingTool() then return end
-	local nodes, edges = V.nodes, V.edges
+	if sky or not holdingTool() then return end
+	if #V.meshes > 0 then
+		render.SetMaterial(material())
+		for _, m in ipairs(V.meshes) do m.mesh:Draw() end
+	end
 	render.SetColorMaterial()
-	for _, q in ipairs(V.squares) do
-		local a, b, c, d = nodes[q[1]], nodes[q[2]], nodes[q[3]], nodes[q[4]]
-		if a and b and c and d then
-			render.DrawQuad(a, b, c, d, FILL)
-			render.DrawQuad(a, d, c, b, FILL) -- seen from below too
-			render.DrawLine(a, b, OUTLINE, true)
-			render.DrawLine(b, c, OUTLINE, true)
-			render.DrawLine(c, d, OUTLINE, true)
-			render.DrawLine(d, a, OUTLINE, true)
-		end
-	end
-	for k = 1, #edges, 2 do
-		local a, b = nodes[edges[k]], nodes[edges[k + 1]]
-		if a and b then render.DrawLine(a, b, BLUE, true) end
-	end
 	for _, L in ipairs(V.links) do
 		local c = LINK_COLOR[L.kind] or LINK_COLOR[1]
 		render.DrawLine(L.a, L.b, c, false)
@@ -66,7 +121,21 @@ hook.Add("PostDrawTranslucentRenderables", "NGL.NavView", function(depth, sky)
 	if tr.Hit then
 		local r = GetConVarNumber("ngl_nav_radius")
 		local mode = GetConVarString("ngl_nav_mode")
-		if mode == "link" or mode == "climb" then r = 24 end
+		if mode ~= "area" then
+			r = 24
+			-- The grid point a click here would use.
+			local now = CurTime()
+			if now >= (V.snapT or 0) then
+				V.snapT = now + 0.1
+				local best, bd = nil, 160 * 160
+				for _, p in ipairs(V.nodes) do
+					local d = p:DistToSqr(tr.HitPos)
+					if d < bd then best, bd = p, d end
+				end
+				V.snap = best
+			end
+			if V.snap then render.DrawWireframeSphere(V.snap, 8, 6, 6, WHITE, false) end
+		end
 		local prev
 		for i = 0, 24 do
 			local a = i / 24 * math.pi * 2
