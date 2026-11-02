@@ -63,19 +63,22 @@ function ENT:NGLResolveAnims()
 	self.NGLPoses = p
 end
 
--- Plays a gesture (Fire, Reload, Flinch) over the body. Only NPCs near a
--- player bother: nobody would see it, and each one is networked.
+-- Plays a gesture (Fire, Reload, Flinch) over the body. Only NPCs within
+-- ngl_anim_detail_range of a player bother: each gesture is networked and
+-- makes every client blend an extra animation layer.
 function ENT:NGLGesture(name)
-	if not self.NGLNear then return end
+	if not self.NGLDetail then return end
 	local act = self.NGLActs[name]
 	if act then self:RestartGesture(act) end
 end
 
 -- Aim and strafe pose, and run speed matched to the animation. Called by the
--- scheduler right after each think, for NPCs near a player only; pose
--- parameters are interpolated on the client, so 10 updates a second look smooth.
+-- scheduler right after each think, for NPCs within ngl_anim_detail_range of
+-- a player only; pose parameters are interpolated on the client, so 10
+-- updates a second look smooth.
 local AngleDiff, deg, atan2 = math.AngleDifference, math.deg, math.atan2
 function ENT:NGLUpdatePose()
+	self.NGLPosed = true
 	local p = self.NGLPoses
 	local yaw = self:GetAngles().y
 
@@ -116,6 +119,23 @@ function ENT:NGLUpdatePose()
 	elseif self:GetPlaybackRate() ~= 1 then
 		self:SetPlaybackRate(1)
 	end
+end
+
+-- Left full-detail range: put the poses back to neutral once, then leave
+-- them alone (no more pose updates to network).
+function ENT:NGLResetPose()
+	self.NGLPosed = false
+	local p = self.NGLPoses
+	if p.aim and ((self.NGLAimYaw or 0) ~= 0 or (self.NGLAimPitch or 0) ~= 0) then
+		self.NGLAimYaw, self.NGLAimPitch = 0, 0
+		self:SetPoseParameter("aim_yaw", 0)
+		self:SetPoseParameter("aim_pitch", 0)
+	end
+	if p.move and (self.NGLMoveYaw or 0) ~= 0 then
+		self.NGLMoveYaw = 0
+		self:SetPoseParameter("move_yaw", 0)
+	end
+	if self:GetPlaybackRate() ~= 1 then self:SetPlaybackRate(1) end
 end
 
 function ENT:NGLSetMoveMode(mode)
@@ -167,9 +187,9 @@ end
 
 -- Engine calls this every tick. Same cost as the stock NextBot version, but
 -- it handles every movement activity (the stock one only knows ACT_WALK and
--- ACT_RUN). Far from players the cheaper FrameAdvance is enough.
+-- ACT_RUN). Outside full-detail range the cheaper FrameAdvance is enough.
 function ENT:BodyUpdate()
-	if self.NGLMoving and self.NGLNear then
+	if self.NGLMoving and self.NGLDetail then
 		self:BodyMoveXY() -- also advances the frame
 	else
 		self:FrameAdvance()
@@ -218,8 +238,10 @@ function ENT:BehaveUpdate(interval)
 		end
 	end
 
+	-- Aimed variants (with their extra aim layers) only in full-detail range;
+	-- further away the plain cycles look the same at that size.
 	local A = self.NGLActs
-	local fighting = self.NGLEnemy ~= nil
+	local fighting = self.NGLDetail and self.NGLEnemy ~= nil
 	if goal then
 		self.loco:Approach(goal, 1)
 		self.NGLMoving = true

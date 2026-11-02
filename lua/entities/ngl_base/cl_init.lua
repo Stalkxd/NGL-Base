@@ -2,6 +2,8 @@ include("shared.lua")
 
 local cvRagdollTime = CreateClientConVar("ngl_cl_ragdoll_time", "20", true, false,
 	"Seconds before NGL client-side ragdolls are removed.", 0, 600)
+local cvWeaponRange = CreateClientConVar("ngl_cl_weapon_range", "4000", true, false,
+	"NGL NPC weapons are drawn within this distance (a bonemerged weapon costs about as much to draw as a second NPC). 0 = always.", 0, 50000)
 
 function ENT:Draw()
 	if self:GetNGLDead() then
@@ -22,7 +24,9 @@ function ENT:Draw()
 	self:DrawModel()
 
 	-- Weapon is a client-only bonemerged model: no extra server entity.
-	if self.WeaponModel then
+	-- Skipped far away, where it's a few pixels but still costs a bone merge.
+	local wr = cvWeaponRange:GetFloat()
+	if self.WeaponModel and (wr <= 0 or EyePos():DistToSqr(self:GetPos()) < wr * wr) then
 		local wm = self.NGLWeaponEnt
 		if not IsValid(wm) then
 			wm = ClientsideModel(self.WeaponModel, RENDERGROUP_OPAQUE)
