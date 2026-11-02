@@ -9,6 +9,9 @@ if SERVER then
 	AddCSLuaFile("ngl/client/cl_bench.lua")
 	AddCSLuaFile("ngl/client/cl_projectile.lua")
 	AddCSLuaFile("ngl/client/cl_nav_edit.lua")
+	-- The Combine rope animations (clients without the addon's files download them).
+	resource.AddSingleFile("models/ngl/combine_rappel.mdl")
+	resource.AddSingleFile("models/ngl/combine_rappel.ani")
 
 	include("ngl/server/sv_core.lua")
 	include("ngl/server/sv_aimodes.lua")

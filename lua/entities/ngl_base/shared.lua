@@ -46,6 +46,8 @@ ENT.JumpDown = 200              -- jumps down ledges up to this high (units); 0 
 ENT.JumpGap = true              -- jumps across gaps (jump links placed with the NGL Nav Editor tool)
 ENT.Rappel = false              -- slides down a rope from higher ledges, up to RappelMax (Combine)
 ENT.RappelMax = 1000
+ENT.RappelAnimModel = nil       -- animation-only model with the RappelDrop animations, used just while roping down
+								-- (the Combine: models/ngl/combine_rappel.mdl); the NPC's own model is drawn on it
 ENT.OpenDoors = true            -- opens closed doors in its way
 ENT.DoorBreach = false          -- kicks doors in instead, locked ones too (Combine, rebels); see ngl_door_breach
 ENT.Squad = nil                 -- set to lead a squad on its own, see sv_squad.lua:
@@ -129,17 +131,17 @@ ENT.Anims = {
 	Melee   = { ACT_MELEE_ATTACK1, ACT_MELEE_ATTACK_SWING },
 	-- Jumping down or across (nav links), rappelling (Rappel) and breaking a
 	-- door in (DoorBreach). Sequence names work too, like activities.
-	-- With Unit1's Mixed Combine Animation Pack (Workshop 3773503767)
-	-- installed, Combine kick doors ("melee_kick") and rope down with its
-	-- full rappel animations (RappelDrop: stepping off the edge and sliding
-	-- down, sped up or slowed to fit the drop). Without it: HL2's rifle-butt
-	-- hit and the rappel loop.
+	-- RappelDrop: one animation for the whole way down a rope (stepping off
+	-- the edge and sliding down), played to fit the drop; looked up on
+	-- ENT.RappelAnimModel when the NPC has one (the Combine), else on its
+	-- own model. Without one: the Rappel loop. Kick: HL2's Combine hit the
+	-- door with the rifle butt.
 	Jump    = { "jump_holding_jump", ACT_JUMP },
 	Glide   = { "jump_holding_glide", ACT_GLIDE },
 	Land    = { "jump_holding_land", ACT_LAND },
 	Rappel  = { "rappelloop", ACT_RAPPEL_LOOP },
 	RappelDrop = { "Rappel_b", "Rappel_c", "Rappel_f" },
-	Kick    = { "melee_kick", ACT_MELEE_ATTACK1, ACT_MELEE_ATTACK_SWING },
+	Kick    = { ACT_MELEE_ATTACK1, ACT_MELEE_ATTACK_SWING },
 	-- Squad leader hand signals (see ENT.Squad): an upper-body gesture when
 	-- the model has one, otherwise the full-body signal while standing.
 	SignalHalt      = { ACT_GESTURE_SIGNAL_HALT, ACT_SIGNAL_HALT },
@@ -198,4 +200,8 @@ ENT.Anims = {
 
 function ENT:SetupDataTables()
 	self:NetworkVar("Bool", 0, "NGLDead")
+	-- While roping down: the NPC's own model (drawn on the rappel animation
+	-- model) and the top of the rope.
+	self:NetworkVar("String", 0, "NGLBody")
+	self:NetworkVar("Vector", 1, "NGLRope")
 end
