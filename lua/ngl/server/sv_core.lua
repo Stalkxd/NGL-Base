@@ -14,7 +14,7 @@ local Core = NGL.Core
 
 local SysTime, CurTime = SysTime, CurTime
 local IsValid = IsValid
-local floor, min, abs, random, Rand = math.floor, math.min, math.abs, math.random, math.Rand
+local floor, min, max, abs, random, Rand = math.floor, math.min, math.max, math.abs, math.random, math.Rand
 
 local cvBudget = CreateConVar("ngl_ai_budget", "3", FCVAR_ARCHIVE,
 	"Max milliseconds of NGL AI decisions per server tick. Leftover NPCs think next tick.", 0.1, 50)
@@ -249,6 +249,37 @@ local function alertAllies(npc, pos, now)
 	end
 end
 
+-- NGL NPCs within `radius` of `pos` for which `filter(npc)` is true (all
+-- if no filter). Uses the spatial grid, so it only looks at nearby cells.
+function Core.FindInRadius(pos, radius, filter)
+	local out = {}
+	local rSqr = radius * radius
+	local r = math.ceil(radius / CELL)
+	local cx, cy = floor(pos.x / CELL) + OFFSET, floor(pos.y / CELL) + OFFSET
+	for x = cx - r, cx + r do
+		local base = x * 4096
+		for y = cy - r, cy + r do
+			local c = cells[base + y]
+			if c then
+				for ent in pairs(c) do
+					if not ent.NGLDying and pos:DistToSqr(ent:GetPos()) <= rSqr and (not filter or filter(ent)) then
+						out[#out + 1] = ent
+					end
+				end
+			end
+		end
+	end
+	return out
+end
+NGL.FindInRadius = Core.FindInRadius
+
+function Core.CanSee(npc, ent)
+	local from = npc:GetPos()
+	from.z = from.z + npc.EyeHeight
+	return canSee(npc, from, ent)
+end
+Core.FindEnemy = findEnemy
+
 function Core.SetEnemy(npc, enemy)
 	local old = npc.NGLEnemy
 	if old == enemy then return end
@@ -265,7 +296,10 @@ function Core.SetEnemy(npc, enemy)
 		npc.NGLLastSeenPos, npc.NGLLastSeenT = ePos, now
 		npc.NGLInvestigate = nil
 		npc:NGLSetMoveMode("run")
-		if not IsValid(old) then alertAllies(npc, ePos, now) end
+		if not IsValid(old) then
+			alertAllies(npc, ePos, now)
+			npc:NGLSound("Alert")
+		end
 		npc:OnSeeEnemy(enemy)
 	else
 		npc.NGLEnemy = nil
@@ -273,7 +307,10 @@ function Core.SetEnemy(npc, enemy)
 		npc.NGLFace = nil
 		npc.NGLHome = npc:GetPos() -- wander around where the fight ended
 		npc.NGLNextWander = now + Rand(1, 3)
-		if IsValid(old) then npc:OnLoseEnemy(old) end
+		if IsValid(old) then
+			if old:Health() > 0 then npc:NGLSound("Lost") end
+			npc:OnLoseEnemy(old)
+		end
 	end
 end
 
@@ -285,10 +322,32 @@ local shotTrace = { mask = MASK_SHOT }
 local shotResult = {}
 shotTrace.output = shotResult
 
+-- Deals damage from an NGL NPC (melee hits, custom attacks).
+function Core.Damage(attacker, target, amount, dmgType, pos, force)
+	local dmg = DamageInfo()
+	dmg:SetDamage(amount)
+	dmg:SetDamageType(dmgType or DMG_GENERIC)
+	dmg:SetAttacker(attacker)
+	dmg:SetInflictor(attacker)
+	dmg:SetDamagePosition(pos or target:WorldSpaceCenter())
+	if force then dmg:SetDamageForce(force) end
+	target:TakeDamageInfo(dmg)
+end
+
 local function fire(npc, enemy, shots, visual)
 	local w = npc.Weapon
 	local src = npc:GetPos() + Vector(0, 0, npc.EyeHeight)
 	local dst = enemy:WorldSpaceCenter()
+
+	-- Projectile weapon (rockets, grenades...): see sv_projectile.lua.
+	if w.Projectile then
+		if visual then
+			npc:NGLGesture("Fire")
+			if w.Sound then npc:EmitSound(w.Sound) end
+		end
+		for _ = 1, shots do NGL.Proj.Fire(npc, w.Projectile, src, dst, visual) end
+		return
+	end
 
 	if visual then
 		npc:NGLGesture("Fire")
@@ -322,6 +381,58 @@ local function fire(npc, enemy, shots, visual)
 		dmg:SetDamagePosition(shotResult.HitPos)
 		enemy:TakeDamageInfo(dmg)
 	end
+end
+
+Core.Fire = fire
+
+----------------------------------------------------------------------------
+-- Melee
+----------------------------------------------------------------------------
+
+local function pick(s)
+	if type(s) == "table" then return s[random(#s)] end
+	return s
+end
+
+-- Starts a swing at `target`. The blow lands HitDelay seconds later (the NPC
+-- thinks again right then), if the target is still in reach and in front.
+function Core.StartMelee(npc, target, now)
+	local m = npc.Melee
+	if not m or not IsValid(target) then return false end
+	npc.NGLNextMelee = now + (m.Delay or 1.5)
+	npc.NGLMeleeTarget = target
+	npc.NGLMeleeHitAt = now + (m.HitDelay or 0.4)
+	Core.StopMoving(npc)
+	npc.NGLFace = target:GetPos()
+	local dur = npc:NGLPlayMeleeAnim() or m.Duration or 1
+	npc.NGLBusyUntil = max(npc.NGLBusyUntil or 0, now + dur)
+	npc:NGLSound("Attack")
+	if npc.NGLNextThink and npc.NGLNextThink > npc.NGLMeleeHitAt then npc.NGLNextThink = npc.NGLMeleeHitAt end
+	return true
+end
+
+local function resolveMelee(npc)
+	local m = npc.Melee
+	local t = npc.NGLMeleeTarget
+	npc.NGLMeleeHitAt, npc.NGLMeleeTarget = nil, nil
+	if not m or not IsValid(t) or (t.NGLDying) then return end
+
+	local pos, tPos = npc:GetPos(), t:GetPos()
+	local reach = (m.Range or 70) * 1.3
+	local to = tPos - pos
+	local hit = to:LengthSqr() <= reach * reach and abs(to.z) < 80
+	if hit then
+		to.z = 0
+		to:Normalize()
+		hit = to:Dot(npc:GetForward()) > 0.3
+	end
+	if hit then
+		Core.Damage(npc, t, m.Damage or 10, m.DamageType or DMG_SLASH, t:WorldSpaceCenter(), to * (m.Force or 0))
+		if m.HitSound and npc.NGLNear then npc:EmitSound(pick(m.HitSound)) end
+	elseif m.MissSound and npc.NGLNear then
+		npc:EmitSound(pick(m.MissSound))
+	end
+	npc:OnMeleeHit(t, hit)
 end
 
 local ATTACK_KEEP_SQR_PAD = 1.2 * 1.2
@@ -411,9 +522,17 @@ local function stopMoving(npc)
 	npc.NGLPathPending = false
 	npc.NGLPathReq = (npc.NGLPathReq or 0) + 1
 end
+Core.StopMoving = stopMoving
+Core.Chase = chase
 
 -- No enemy: go and look where an ally saw one, otherwise stroll around home.
 local function idle(npc, now, pos)
+	if npc.NGLNear and now >= (npc.NGLNextIdleSound or 0) then
+		local d = npc.IdleSoundDelay
+		npc.NGLNextIdleSound = now + Rand(d[1], d[2])
+		npc:NGLSound("Idle")
+	end
+	if npc:OnIdle() == true then return end
 	npc.NGLFace = nil
 
 	local inv = npc.NGLInvestigate
@@ -462,7 +581,12 @@ local function think(npc, now, dt, nearestPlayerSqr)
 	npc.NGLNear = nearestPlayerSqr < cvVisual:GetFloat() ^ 2
 	local detailSqr = cvDetail:GetFloat() ^ 2
 	npc.NGLDetail = nearestPlayerSqr < (npc.NGLDetail and detailSqr * DETAIL_LEAVE or detailSqr)
+	if npc.NGLMeleeHitAt and now >= npc.NGLMeleeHitAt then resolveMelee(npc) end
 	if npc:OnAIThink(dt) == true then return end
+	if now < (npc.NGLBusyUntil or 0) then -- mid-swing or playing a locked animation
+		gridUpdate(npc, npc:GetPos())
+		return
+	end
 
 	local pos = npc:GetPos()
 	gridUpdate(npc, pos)
@@ -516,6 +640,8 @@ local function think(npc, now, dt, nearestPlayerSqr)
 		if npc.NGLEnemyVisible then npc.NGLLastSeenPos, npc.NGLLastSeenT = tPos, now end
 	end
 	local visible = npc.NGLEnemyVisible
+	local distSqr = pos:DistToSqr(tPos)
+	if npc:OnCombat(enemy, math.sqrt(distSqr), visible) == true then return end
 
 	-- Out of sight: hunt it down where we last saw it (no seeing through walls).
 	if not visible then
@@ -533,7 +659,28 @@ local function think(npc, now, dt, nearestPlayerSqr)
 		return
 	end
 
-	local distSqr = pos:DistToSqr(tPos)
+	-- Melee: in reach -> swing (also for NPCs that have a gun).
+	local m = npc.Melee
+	local reach = m and (m.Range or 70)
+	if m and distSqr < reach * reach and abs(tPos.z - pos.z) < 72 and now >= (npc.NGLNextMelee or 0) then
+		if npc:OnAttack(enemy, "melee") ~= true then Core.StartMelee(npc, enemy, now) end
+		return
+	end
+
+	local w = npc.Weapon
+	if not w then
+		-- Melee only: close in (straight, since we can see it) and wait for the next swing.
+		npc:NGLSetMoveMode("run")
+		npc.NGLFace = tPos
+		npc.NGLDirect = true
+		if m and distSqr < (reach * 0.8) ^ 2 then
+			npc.NGLPath, npc.NGLGoal = nil, nil
+		else
+			chase(npc, now, pos, tPos, true)
+		end
+		return
+	end
+
 	local range = npc.AttackRange
 	if distSqr > range * range * ATTACK_KEEP_SQR_PAD then
 		npc:NGLSetMoveMode("run")
@@ -558,11 +705,6 @@ local function think(npc, now, dt, nearestPlayerSqr)
 	end
 	npc.NGLFace = tPos
 
-	local w = npc.Weapon
-	if not w then
-		npc.NGLFireAccum = 0
-		return
-	end
 	if now < (npc.NGLReloadUntil or 0) then
 		npc.NGLFireAccum = 0
 		return
@@ -577,6 +719,7 @@ local function think(npc, now, dt, nearestPlayerSqr)
 		return
 	end
 	npc.NGLFireAccum = acc - shots * w.Delay
+	if npc:OnAttack(enemy, "ranged") == true then return end
 
 	local clipSize = w.Clip or 0
 	if clipSize > 0 then
@@ -591,6 +734,7 @@ local function think(npc, now, dt, nearestPlayerSqr)
 		npc.NGLReloadUntil = now + (w.ReloadTime or 2)
 		npc.NGLFireAccum = 0
 		npc:NGLGesture("Reload")
+		npc:NGLSound("Reload")
 		npc:OnReload()
 	end
 end
