@@ -34,6 +34,9 @@ ENT.CrouchChance = 0.35         -- chance, each time it picks a new spot while f
 ENT.Squad = nil                 -- set to lead a squad on its own, see sv_squad.lua:
 --                                 { Max = 10, Recruit = { "ngl_combine_soldier" }, RecruitRadius = 1500,
 --                                   Scouts = 3, ScoutRadius = 400, ScoutTime = 20, LostDelay = 2 }
+ENT.NavWidth = nil              -- half width for path-finding when wider than a person (vehicles: ~80)
+ENT.DriveLikeVehicle = false    -- turns to face where it goes before moving, never strafes
+ENT.Commandable = false         -- squad leaders of its faction nearby may order it (vehicles)
 ENT.OrderKinds = nil            -- { mykind = true }: extra order kinds this NPC runs itself (in OnAIThink)
 ENT.EnemyMemory = 8             -- seconds it keeps hunting an enemy it can't see (heads to where it last saw it)
 ENT.AlertRadius = 1500          -- allies this close with nothing to do come to help when it spots an enemy; 0 = never

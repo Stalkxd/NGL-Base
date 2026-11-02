@@ -360,7 +360,13 @@ function ENT:BehaveUpdate(interval)
 	local fighting = self.NGLDetail and self.NGLEnemy ~= nil
 	local crouch = self.NGLCrouch
 	if goal then
-		self.loco:Approach(goal, 1)
+		if self.DriveLikeVehicle then
+			-- Vehicles drive forward: turn towards the goal first, then go.
+			local off = math.abs(AngleDiff(deg(atan2(goal.y - pos.y, goal.x - pos.x)), self:GetAngles().y))
+			if off < 40 then self.loco:Approach(goal, 1) end
+		else
+			self.loco:Approach(goal, 1)
+		end
 		self.NGLMoving = true
 		local f = self.NGLFace
 		local aim = fighting and f ~= nil
@@ -393,7 +399,7 @@ function ENT:BehaveUpdate(interval)
 	-- so walk where we face there too.
 	self.NGLSteer = goal
 	local face = self.NGLFace
-	if goal and (not face or self.NGLMoveMode ~= "walk" or not self.NGLNear) then face = goal end
+	if goal and (not face or self.NGLMoveMode ~= "walk" or not self.NGLNear or self.DriveLikeVehicle) then face = goal end
 	if face then
 		if goal then
 			self.NGLTurning = nil

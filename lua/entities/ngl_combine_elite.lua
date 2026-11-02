@@ -36,6 +36,8 @@ ENT.Squad = {
 	ScoutRadius = 400,
 	ScoutTime = 20,
 	LostDelay = 2,
+	CommandRadius = 3000,              -- APCs (ENT.Commandable) this close take its orders
+	FireSupportDelay = 12,             -- s between rocket barrages it calls in
 }
 
 local VO = "npc/combine_soldier/vo/"
@@ -46,6 +48,7 @@ ENT.Sounds = {
 	Search = { VO .. "sweepingin.wav", VO .. "motioncheckallradials.wav" },
 	Engage = { VO .. "movein.wav", VO .. "gosharp.wav" },
 	StandDown = { VO .. "reportingclear.wav", VO .. "thatsitwrapitup.wav" },
+	CallFire = { VO .. "callhotpoint.wav", VO .. "prosecuting.wav" }, -- ordering the APC to fire
 	Pain = { "npc/combine_soldier/pain1.wav", "npc/combine_soldier/pain2.wav", "npc/combine_soldier/pain3.wav" },
 	Death = { "npc/combine_soldier/die1.wav", "npc/combine_soldier/die2.wav", "npc/combine_soldier/die3.wav" },
 }

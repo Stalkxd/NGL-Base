@@ -25,6 +25,7 @@ function NGL.NewSquad(leader, maxSize)
 		leader = nil,
 		members = {}, -- array, leader included
 		slots = {},   -- [npc] = formation slot (1..), leader has none
+		assets = {},  -- [vehicle] = true: Commandable NPCs taking the leader's orders (not members)
 		max = maxSize or 10,
 	}, Squad)
 	if IsValid(leader) then
@@ -117,6 +118,10 @@ function Squad:Disband()
 	for _, npc in ipairs(self.members) do
 		if IsValid(npc) and npc.NGLSquad == self then npc.NGLSquad = nil end
 	end
+	for v in pairs(self.assets) do
+		if IsValid(v) and v.NGLCommander == self.leader then v.NGLCommander = nil end
+	end
+	self.assets = {}
 	self.members, self.slots, self.leader = {}, {}, nil
 end
 
@@ -250,6 +255,60 @@ local function anyoneSees(sq)
 	end
 end
 
+-- Fire support: the nearest free vehicle (ENT.Commandable) pounds `pos`.
+local function callFire(npc, sq, pos, now, cfg)
+	if now < (npc.NGLNextFireCall or 0) then return false end
+	local best, bestD
+	local myPos = npc:GetPos()
+	for v in pairs(sq.assets) do
+		if alive(v) and not v.NGLOrder and not v:IsBusy() then
+			local d = myPos:DistToSqr(v:GetPos())
+			if not bestD or d < bestD then best, bestD = v, d end
+		end
+	end
+	if not best then return false end
+	npc.NGLNextFireCall = now + (cfg.FireSupportDelay or 12)
+	signal(npc, "CallFire")
+	later(npc, now, function()
+		if alive(best) then best:GiveOrder({ kind = "fire_at", pos = pos, time = 8 }) end
+	end)
+	return true
+end
+Squad.CallFire = callFire
+
+-- Vehicles of our faction nearby report to us; ones that drove off or lost
+-- their commander are let go.
+local function scanAssets(npc, now, pos, sq, cfg)
+	if now < (npc.NGLNextAssetScan or 0) then return end
+	npc.NGLNextAssetScan = now + 2
+	local r = cfg.CommandRadius or 3000
+	for v in pairs(sq.assets) do
+		if not alive(v) or v.NGLCommander ~= npc or v:GetPos():DistToSqr(pos) > (r * 1.2) ^ 2 then
+			sq.assets[v] = nil
+			if IsValid(v) and v.NGLCommander == npc then v.NGLCommander = nil end
+		end
+	end
+	local found = NGL.FindInRadius(pos, r, function(e)
+		if not e.Commandable or not alive(e) or NGL.GetRelation(e.Faction, npc.Faction) ~= D_LI then return false end
+		local c = e.NGLCommander
+		return c == nil or c == npc or not alive(c)
+	end)
+	for _, v in ipairs(found) do
+		v.NGLCommander = npc
+		sq.assets[v] = true
+	end
+end
+
+-- The enemy has friends packed around it: worth a rocket barrage.
+local function crowded(npc, enemy)
+	local n = 0
+	for _, e in ipairs(NGL.FindInRadius(enemy:GetPos(), 300, function(e) return NGL.Core.IsHostile(npc, e) end)) do
+		n = n + 1
+		if n >= 3 then return true end
+	end
+	return false
+end
+
 local function lostTarget(npc, now, sq, cfg)
 	local L = npc.NGLLost
 	if not L then
@@ -283,6 +342,13 @@ local function lostTarget(npc, now, sq, cfg)
 		if now < L.at then return end
 		L.stage = "search"
 		L.giveUp = now + (cfg.ScoutTime or 20) + 5
+		-- The target is hiding: a vehicle shells the spot while scouts go in.
+		if not L.called and callFire(npc, sq, L.last, now, cfg) then
+			L.at = now + 1 -- scouts right after the call
+			L.stage = "halt"
+			L.called = true
+			return
+		end
 		signal(npc, "Search")
 		later(npc, now, function()
 			if npc.NGLLost ~= L then return end
@@ -339,7 +405,14 @@ function Squad.LeaderThink(npc, now, pos)
 	end
 
 	if sq then
+		scanAssets(npc, now, pos, sq, cfg)
 		lostTarget(npc, now, sq, cfg)
+		-- A packed group around our target: call in the vehicles.
+		local e = npc.NGLEnemy
+		if next(sq.assets) and not npc.NGLLost and IsValid(e) and npc.NGLEnemyVisible
+			and now >= (npc.NGLNextFireCall or 0) and crowded(npc, e) then
+			callFire(npc, sq, e:GetPos(), now, cfg)
+		end
 		if npc.OnLeaderThink then npc:OnLeaderThink(sq, now) end
 	end
 end

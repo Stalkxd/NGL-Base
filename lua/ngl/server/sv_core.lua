@@ -557,7 +557,7 @@ local function chase(npc, now, pos, tPos, visible)
 		end
 	end, function()
 		return IsValid(npc) and npc.NGLPathReq == req
-	end)
+	end, npc.NavWidth)
 	if npc.NGLPathPending and not npc.NGLPath then
 		npc.NGLGoal = (not forcePath) and tPos or nil
 	end
