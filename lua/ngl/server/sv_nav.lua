@@ -7,8 +7,10 @@
 --
 -- Paths are found with A* in coroutines that share one CPU budget per tick
 -- (`ngl_nav_budget`), so a burst of path requests never causes a lag spike.
--- Identical requests share one search, and results are cached briefly so a
--- squad heading the same way pays for one path.
+-- Requests from roughly the same spot to roughly the same goal share one
+-- search, results are cached briefly, the queue is capped, and searches nobody
+-- is waiting for any more are dropped, so a squad pays for one path and a
+-- flood of requests can't build an endless backlog.
 
 NGL.Nav = NGL.Nav or {}
 local Nav = NGL.Nav
@@ -20,7 +22,8 @@ local cvSpacing = CreateConVar("ngl_nav_spacing", "96", FCVAR_ARCHIVE, "Grid spa
 local cvMaxNodes = CreateConVar("ngl_nav_max_nodes", "150000", FCVAR_ARCHIVE, "Stop ngl_nav_generate after this many grid points.", 1000, 1000000)
 local cvGenBudget = CreateConVar("ngl_nav_gen_budget", "20", FCVAR_ARCHIVE, "Milliseconds per tick ngl_nav_generate may use.", 1, 500)
 local cvBudget = CreateConVar("ngl_nav_budget", "2", FCVAR_ARCHIVE, "Milliseconds per tick for NPC path-finding.", 0.1, 50)
-local cvMaxExpand = CreateConVar("ngl_nav_max_expand", "30000", FCVAR_ARCHIVE, "Give up a path search after expanding this many grid points.", 100, 1000000)
+local cvMaxExpand = CreateConVar("ngl_nav_max_expand", "8000", FCVAR_ARCHIVE, "Give up a path search after expanding this many grid points.", 100, 1000000)
+local cvMaxQueue = CreateConVar("ngl_nav_max_queue", "64", FCVAR_ARCHIVE, "Path requests beyond this many queued searches fail at once (the NPC walks straight).", 1, 10000)
 
 -- Hull the generator checks against: a standing NPC above step height.
 local STEP = 18
@@ -45,6 +48,9 @@ local function cellKey(ix, iy)
 	return (ix + 32768) * 65536 + (iy + 32768)
 end
 
+local searches = {}   -- running path searches (coroutines), oldest first
+Nav.Stats = Nav.Stats or { ok = 0, fail = 0, dropped = 0, rejected = 0, cached = 0 }
+
 local function reset()
 	Nav.S = cvSpacing:GetInt()
 	Nav.NX, Nav.NY, Nav.NZ, Nav.NM, Nav.NB = {}, {}, {}, {}, {}
@@ -53,6 +59,9 @@ local function reset()
 	Nav.Loaded = false
 	Nav.Cache = {}
 	Nav.Pending = {}
+	-- Searches over the old grid are meaningless now. Their callers time out
+	-- on their own (see chase in sv_core.lua).
+	for k in pairs(searches) do searches[k] = nil end
 end
 
 if not Nav.NX then reset() end
@@ -288,8 +297,10 @@ end
 -- Path-finding (A* in budgeted coroutines)
 ----------------------------------------------------------------------------
 
-local searches = {}   -- running coroutines
 local CACHE_TIME = 4
+local REGION = 3        -- start points within REGION x REGION cells share a search
+local GOAL_REGION = 2   -- same for goal points
+local Z_BAND = 128      -- ...as long as they are on the same floor
 
 -- Binary min-heap on f-score, stored in two parallel arrays.
 local function heapPush(hn, hf, size, node, f)
@@ -390,35 +401,70 @@ local function search(start, goal)
 	return nil
 end
 
+local function regionKey(s, t)
+	local NX, NY, NZ = Nav.NX, Nav.NY, Nav.NZ
+	return string.format("%d:%d:%d|%d:%d:%d",
+		floor(NX[s] / REGION), floor(NY[s] / REGION), floor(NZ[s] / Z_BAND),
+		floor(NX[t] / GOAL_REGION), floor(NY[t] / GOAL_REGION), floor(NZ[t] / Z_BAND))
+end
+
 -- Asks for a path from `from` to `to`. `callback(waypoints or nil)` is called
--- later (possibly the same tick if cached). Returns false if there is no nav.
-function Nav.RequestPath(from, to, callback)
+-- later, or right away for a cached path, an unreachable spot or a full queue.
+-- Returns false if there is no nav grid.
+--
+-- The path may start a few cells away from `from` (requests from the same
+-- area share one search), so callers should pick the nearest early waypoint.
+-- `wanted`, if given, is called before each slice of work; when it returns
+-- false for every waiter the search is dropped. Never modify the returned
+-- table: it is shared with other NPCs and the cache.
+function Nav.RequestPath(from, to, callback, wanted)
 	if not Nav.Loaded then return false end
+	local st = Nav.Stats
 	local s, t = Nav.Nearest(from), Nav.Nearest(to)
 	if not s or not t then
+		st.fail = st.fail + 1
 		callback(nil)
 		return true
 	end
 
-	local key = s * 1048576 + t
+	local key = regionKey(s, t)
 	local hit = Nav.Cache[key]
 	if hit and CurTime() - hit.t < CACHE_TIME then
+		st.cached = st.cached + 1
 		callback(hit.path)
 		return true
 	end
 
+	local waiter = { cb = callback, wanted = wanted }
 	local waiting = Nav.Pending[key]
 	if waiting then
-		waiting[#waiting + 1] = callback
+		waiting[#waiting + 1] = waiter
 		return true
 	end
-	Nav.Pending[key] = { callback }
 
+	if #searches >= cvMaxQueue:GetInt() then
+		st.rejected = st.rejected + 1
+		callback(nil)
+		return true
+	end
+
+	Nav.Pending[key] = { waiter }
 	searches[#searches + 1] = {
 		key = key,
 		co = coroutine.create(function() return search(s, t) end),
 	}
 	return true
+end
+
+-- True while at least one waiter of this search still wants the result.
+local function stillWanted(key)
+	local ws = Nav.Pending[key]
+	if not ws then return false end
+	for i = 1, #ws do
+		local f = ws[i].wanted
+		if not f or f() then return true end
+	end
+	return false
 end
 
 hook.Add("Tick", "NGL.Nav", function()
@@ -437,18 +483,29 @@ hook.Add("Tick", "NGL.Nav", function()
 	local start = SysTime()
 	local budget = cvBudget:GetFloat() / 1000
 
+	local st = Nav.Stats
+	local checked = nil
 	while #searches > 0 and SysTime() - start < budget do
 		local job = searches[1]
-		local ok, res = coroutine.resume(job.co)
-		if not ok or coroutine.status(job.co) == "dead" then
+		if checked ~= job and not stillWanted(job.key) then
+			-- Everyone who asked gave up (timed out, died, changed target).
 			table.remove(searches, 1)
-			local path = ok and res or nil
-			if not ok then print("[NGL] Path search error: " .. tostring(res)) end
-			Nav.Cache[job.key] = { path = path, t = CurTime() }
-			local cbs = Nav.Pending[job.key]
 			Nav.Pending[job.key] = nil
-			if cbs then
-				for _, cb in ipairs(cbs) do cb(path) end
+			st.dropped = st.dropped + 1
+		else
+			checked = job
+			local ok, res = coroutine.resume(job.co)
+			if not ok or coroutine.status(job.co) == "dead" then
+				table.remove(searches, 1)
+				local path = ok and res or nil
+				if not ok then print("[NGL] Path search error: " .. tostring(res)) end
+				if path then st.ok = st.ok + 1 else st.fail = st.fail + 1 end
+				Nav.Cache[job.key] = { path = path, t = CurTime() }
+				local ws = Nav.Pending[job.key]
+				Nav.Pending[job.key] = nil
+				if ws then
+					for i = 1, #ws do ws[i].cb(path) end
+				end
 			end
 		end
 	end
@@ -487,10 +544,11 @@ end)
 
 concommand.Add("ngl_nav_info", function(ply)
 	if not allowed(ply) then return end
-	tell(ply, Nav.Loaded
-		and string.format("Nav loaded: %d points, %d-unit spacing, %d searches running, %d cached paths",
-			Nav.Count, Nav.S, #searches, table.Count(Nav.Cache))
-		or "No nav grid for this map. Run ngl_nav_generate.")
+	if genRoutine then tell(ply, "Generation is running.") return end
+	if not Nav.Loaded then tell(ply, "No nav grid for this map. Run ngl_nav_generate.") return end
+	local st = Nav.Stats
+	tell(ply, string.format("Nav loaded: %d points, %d-unit spacing. Searches: %d queued, %d cached. Since start: %d found, %d failed, %d served from cache, %d dropped, %d rejected (queue full)",
+		Nav.Count, Nav.S, #searches, table.Count(Nav.Cache), st.ok, st.fail, st.cached, st.dropped, st.rejected))
 end)
 
 -- Draws the grid around the caller for 15 s. debugoverlay only shows on a

@@ -14,7 +14,7 @@ local Core = NGL.Core
 
 local SysTime, CurTime = SysTime, CurTime
 local IsValid = IsValid
-local floor, min, random, Rand = math.floor, math.min, math.random, math.Rand
+local floor, min, abs, random, Rand = math.floor, math.min, math.abs, math.random, math.Rand
 
 local cvBudget = CreateConVar("ngl_ai_budget", "3", FCVAR_ARCHIVE,
 	"Max milliseconds of NGL AI decisions per server tick. Leftover NPCs think next tick.", 0.1, 50)
@@ -224,6 +224,8 @@ function Core.SetEnemy(npc, enemy)
 	npc.NGLEnemy = enemy
 	npc.NGLFireAccum = 0
 	npc.NGLPath = nil
+	npc.NGLPathPending = false
+	npc.NGLPathReq = (npc.NGLPathReq or 0) + 1 -- a path to the old enemy is no use
 	npc.NGLEnemyVisible = true -- found by sight (or it just shot us); rechecked shortly
 	npc.NGLNextVis = CurTime() + 0.5
 	if IsValid(enemy) then
@@ -280,40 +282,82 @@ local function fire(npc, enemy, shots, visual)
 end
 
 local ATTACK_KEEP_SQR_PAD = 1.2 * 1.2
-local DIRECT_SQR = 1500 * 1500
 local STUCK_SQR = 16 * 16
+local REPATH_SQR = 300 * 300
+local PATH_TIMEOUT = 3   -- s to wait for a path before walking straight
+local FAIL_BACKOFF = 3   -- s of walking straight after a failed request
+local FORCE_PATH = 5     -- s of path-only movement after getting stuck going straight
 
--- Move towards the enemy: straight line when it's in clear view and close,
--- otherwise along a path from our nav grid (requested in the background).
-local function chase(npc, now, pos, tPos, visible, distSqr)
+-- Index of the nearest of the first few waypoints. Paths are shared by NPCs
+-- that started near each other, so ours may begin a few cells away.
+local function firstWaypoint(path, pos)
+	local best, bestD = 1, math.huge
+	for k = 1, min(#path, 4) do
+		local d = pos:DistToSqr(path[k])
+		if d < bestD then best, bestD = k, d end
+	end
+	-- Standing on it already: aim for the next one.
+	if bestD < 64 * 64 and best < #path then best = best + 1 end
+	return best
+end
+
+-- Move towards the enemy. Straight line when it's in view on the same level
+-- (no path-finding at all), otherwise along a path from our nav grid,
+-- requested in the background. The NPC never stands still waiting: until the
+-- path arrives (or if it fails) it keeps walking straight at the target.
+local function chase(npc, now, pos, tPos, visible)
 	local nav = NGL.Nav
-	if not (nav and nav.Loaded) or (visible and distSqr < DIRECT_SQR and math.abs(tPos.z - pos.z) < 96) then
+	local forcePath = now < (npc.NGLForcePathUntil or 0)
+	if not (nav and nav.Loaded) or now < (npc.NGLPathFailUntil or 0)
+		or (visible and not forcePath and abs(tPos.z - pos.z) < 96) then
 		npc.NGLPath = nil
 		npc.NGLGoal = tPos
+		npc.NGLDirect = true
+		return
+	end
+	npc.NGLDirect = false
+
+	-- Waiting for a path: keep moving, give up after PATH_TIMEOUT.
+	if npc.NGLPathPending then
+		if now - npc.NGLPathPendingSince > PATH_TIMEOUT then
+			npc.NGLPathPending = false
+			npc.NGLPathReq = npc.NGLPathReq + 1 -- the late answer is ignored
+			npc.NGLPathFailUntil = now + FAIL_BACKOFF
+			npc.NGLGoal = tPos
+		elseif not npc.NGLPath then
+			npc.NGLGoal = (not forcePath) and tPos or nil
+		end
 		return
 	end
 
 	-- Keep the current path while the enemy hasn't moved far from its end.
 	local tgt = npc.NGLPathTarget
-	if npc.NGLPath and tgt and tgt:DistToSqr(tPos) < 300 * 300 and now < (npc.NGLRepathAt or 0) then return end
-	if npc.NGLPathPending then return end
+	if npc.NGLPath and tgt and tgt:DistToSqr(tPos) < REPATH_SQR and now < (npc.NGLRepathAt or 0) then return end
 
+	local req = (npc.NGLPathReq or 0) + 1
+	npc.NGLPathReq = req
 	npc.NGLPathPending = true
+	npc.NGLPathPendingSince = now
 	npc.NGLRepathAt = now + 3
 	local target = Vector(tPos.x, tPos.y, tPos.z)
 	nav.RequestPath(pos, target, function(path)
-		if not IsValid(npc) then return end
+		if not IsValid(npc) or npc.NGLPathReq ~= req then return end
 		npc.NGLPathPending = false
 		npc.NGLGoal = target -- final leg after the last waypoint
 		if path and #path > 0 then
 			npc.NGLPath = path
-			npc.NGLPathIdx = (#path > 1) and 2 or 1
+			npc.NGLPathIdx = firstWaypoint(path, npc:GetPos())
 			npc.NGLPathTarget = target
 		else
 			npc.NGLPath = nil
+			npc.NGLPathFailUntil = CurTime() + FAIL_BACKOFF
 		end
+	end, function()
+		return IsValid(npc) and npc.NGLPathReq == req
 	end)
-	if not npc.NGLPath then npc.NGLGoal = tPos end
+	if npc.NGLPathPending and not npc.NGLPath then
+		npc.NGLGoal = (not forcePath) and tPos or nil
+	end
 end
 
 -- One AI decision for one NPC. `dt` is the time since its last think.
@@ -330,9 +374,16 @@ local function think(npc, now, dt, nearestPlayerSqr)
 		if not sp or pos:DistToSqr(sp) >= STUCK_SQR then
 			npc.NGLStuckPos, npc.NGLStuckT = pos, now
 		elseif now - npc.NGLStuckT > 2 then
+			-- Walking straight into something: use the grid for a while.
+			if npc.NGLDirect then npc.NGLForcePathUntil = now + FORCE_PATH end
 			npc.NGLPath, npc.NGLGoal, npc.NGLStuckPos = nil, nil, nil
+			npc.NGLPathPending = false
+			npc.NGLPathReq = (npc.NGLPathReq or 0) + 1 -- forget any answer in flight
+			npc.NGLPathFailUntil = 0
 			npc.NGLRepathAt, npc.NGLNextStrafe = 0, 0
 		end
+	else
+		npc.NGLStuckPos = nil
 	end
 
 	local enemy = npc.NGLEnemy
@@ -365,13 +416,14 @@ local function think(npc, now, dt, nearestPlayerSqr)
 	local visible = npc.NGLEnemyVisible
 
 	if distSqr > rangeSqr * ATTACK_KEEP_SQR_PAD or not visible then
-		chase(npc, now, pos, tPos, visible, distSqr)
+		chase(npc, now, pos, tPos, visible)
 		npc.NGLNextStrafe = 0
 		npc.NGLFireAccum = 0
 		npc.NGLFace = visible and tPos or nil -- look where we walk when it's out of sight
 		return
 	else
 		npc.NGLPath = nil
+		npc.NGLDirect = nil
 		if now >= npc.NGLNextStrafe then
 			npc.NGLNextStrafe = now + Rand(2, 3.5)
 			local dir = tPos - pos

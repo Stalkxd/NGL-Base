@@ -64,22 +64,27 @@ NGL NPCs use their own walk grid instead of the navmesh or AI nodes.
 
 How NPCs use it:
 
-- Enemy in clear view and within 1500 units: straight line, no path-finding at all.
-- Otherwise: an A* path is requested in the background. All searches share `ngl_nav_budget` ms per tick (default 2), identical requests share one search, and results are cached for 4 s, so a squad chasing the same target pays for one path.
+- Enemy in view on the same level: straight line at any distance, no path-finding at all.
+- Otherwise: an A* path is requested in the background. All searches share `ngl_nav_budget` ms per tick (default 2). Requests from roughly the same spot (within 3 grid cells) to roughly the same goal share one search, and results are cached for 4 s, so a squad chasing the same target pays for one or a few paths.
+- An NPC never stands still waiting for a path. It walks straight at the target until the path arrives, gives up after 3 s, and walks straight for 3 s after a failed search.
+- Searches nobody is waiting for any more are dropped, and when `ngl_nav_max_queue` searches are queued new requests fail at once, so a flood of requests can't build a backlog.
 - Waypoints advance in the per-tick steering, so far-away NPCs that think once a second still walk paths smoothly.
-- An NPC that hasn't moved for 2 s drops its path and decides again.
+- An NPC that hasn't moved for 2 s drops its path and decides again. If it got stuck walking straight, it uses the grid for the next 5 s even with the enemy in view.
 - No grid for the map: NPCs fall back to straight lines.
+- NPCs only move when they have an enemy. There is no idle wandering yet, so NPCs that can't see anyone hostile stay where they were spawned.
+- Generating the grid takes effect at once; no restart needed.
 
 | Command / ConVar | Meaning |
 | --- | --- |
 | `ngl_nav_generate` | Build and save the grid for the current map |
-| `ngl_nav_info` | Points, spacing, running searches, cached paths |
+| `ngl_nav_info` | Points, spacing, queued searches, cached paths, and counts of found, failed, cached, dropped and rejected paths |
 | `ngl_nav_draw [radius]` | Draw the grid around you for 15 s (listen server with `developer 1`) |
 | `ngl_nav_reload` | Reload the saved grid |
 | `ngl_nav_spacing` (96) | Grid spacing for generation. Smaller = more precise, more points |
 | `ngl_nav_max_nodes` (150000) | Generation stops at this many points |
 | `ngl_nav_budget` (2) | ms per tick for path-finding |
-| `ngl_nav_max_expand` (30000) | A search gives up after this many points |
+| `ngl_nav_max_expand` (8000) | A search gives up after this many points |
+| `ngl_nav_max_queue` (64) | Requests beyond this many queued searches fail at once (the NPC walks straight) |
 
 ## Installing
 
