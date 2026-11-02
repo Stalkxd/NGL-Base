@@ -1,10 +1,17 @@
 -- Combine APC: an NGL NPC like the others (same scheduler, budget and level
--- of detail), driven like a vehicle. A turret machine gun for infantry and
--- rockets for groups, players and other vehicles. Keeps its distance, backs
--- off when enemies get close. A squad leader of its faction nearby (the
--- elite Combine) commands it: rocket barrages on a spot, and it follows the
+-- of detail), but it drives like a car: it speeds up and brakes, steers
+-- with its front wheels, can't turn on the spot and backs up to get round
+-- tight corners or away from enemies. Wheels spin and steer on clients.
+-- A turret machine gun fires from the barrel with HL2's tracers, and guided
+-- rockets go up out of the launcher and curve down onto the target like
+-- HL2's APC missiles. A squad leader of its faction nearby (the elite
+-- Combine) commands it: rocket barrages on a spot, and it follows the
 -- leader when there's nothing to fight. Alone, it decides for itself.
+--
+-- Source vehicle models face +Y, so the entity's angles are the model's and
+-- the direction it drives is 90 degrees from them (HeadingOffset).
 AddCSLuaFile()
+DEFINE_BASECLASS("ngl_base")
 
 ENT.Base = "ngl_base"
 ENT.PrintName = "Combine APC (NGL)"
@@ -18,7 +25,7 @@ ENT.WalkSpeed = 160
 ENT.SightRange = 5000
 ENT.AttackRange = 2500
 ENT.MinRange = 500              -- closer than this it backs off
-ENT.EyeHeight = 90              -- turret height: shots and sight start here
+ENT.EyeHeight = 90              -- turret height: sight starts here
 ENT.EnemyMemory = 10
 ENT.AlertRadius = 2000
 ENT.WanderRadius = 0            -- parks instead of strolling
@@ -31,29 +38,48 @@ ENT.Commandable = true
 ENT.IsVehicleNPC = true
 ENT.BulletDamageScale = 0.15    -- bullets, clubs and claws barely scratch it
 ENT.Hull = { Vector(-80, -80, 0), Vector(80, 80, 96) }
+ENT.WaypointRadius = 120        -- a car can't hit path points exactly
 
--- Turret machine gun (the normal weapon, so orders and far-away silent
--- shots work as for every NPC).
+-- Driving.
+ENT.HeadingOffset = 90          -- drives along the model's +Y
+ENT.WheelBase = 140             -- front to rear axle: sets how tight it turns
+ENT.WheelRadius = 26
+ENT.MaxSteer = 35               -- degrees
+ENT.Accel = 220                 -- units per second^2
+ENT.Brake = 500
+ENT.ReverseSpeed = 150
+
+-- Turret machine gun (HL2's APC: bursts of 10, 2 seconds apart, AR2 rounds,
+-- helicopter tracers and muzzle flash from the "muzzle" attachment).
 ENT.Weapon = {
 	Damage = 8,
-	Delay = 0.1,
-	Spread = 0.03,
+	Delay = 0.075,
+	Spread = 0.07,
 	Accuracy = 0.55,
-	Sound = "Weapon_AR2.NPC_Single",
-	Clip = 60,
-	ReloadTime = 3,
+	Sound = "Weapon_AR2.Single",
+	Tracer = "HelicopterTracer",
+	MuzzleEffect = "ChopperMuzzleFlash",
+	Clip = 10,
+	ReloadTime = 2,
 }
 
--- Rockets: entity-free projectiles (sv_projectile.lua).
+-- Rockets: entity-free guided projectiles (sv_projectile.lua) that start
+-- like HL2's: launched up out of "cannon_muzzle" at 800 units/s, lit after
+-- 0.3 s, then turn onto the target.
 ENT.Rockets = {
 	Damage = 90,
 	Radius = 220,
-	Speed = 1500,
+	Speed = 800,
 	Gravity = 0,
-	Model = "models/weapons/w_missile_closed.mdl",
+	Spread = 0,
+	Homing = { Delay = 0.3, Turn = 180, Speed = 1500, Accel = 1000 },
+	Trail = true,
+	Life = 8,
+	Model = "models/weapons/w_missile_launch.mdl",
 	HitSound = "BaseExplosionEffect.Sound",
-	Sound = "PropAPC.FireRocket",
+	Sound = "weapons/rpg/rocketfire1.wav",
 	Delay = 4,                  -- seconds between rockets in normal combat
+	MinRange = 800,
 	Barrage = 3,                -- rockets per fire_at order
 	BarrageSpread = 200,
 }
@@ -63,6 +89,10 @@ ENT.TurretPoses = {
 	yaw = { "vehicle_weapon_yaw", "weapon_yaw", "aim_yaw" },
 	pitch = { "vehicle_weapon_pitch", "weapon_pitch", "aim_pitch" },
 }
+ENT.TurretTurnSpeed = 180       -- degrees per second
+
+-- Engine (client).
+ENT.EngineSounds = { Idle = "vehicles/apc/apc_idle1.wav", Drive = "vehicles/apc/apc_cruise_loop3.wav" }
 
 list.Set("NPC", "ngl_apc", {
 	Name = "Combine APC (NGL)",
@@ -70,7 +100,99 @@ list.Set("NPC", "ngl_apc", {
 	Category = "NGL Base",
 })
 
-if CLIENT then return end
+local AngleDiff, deg, rad, atan2 = math.AngleDifference, math.deg, math.rad, math.atan2
+local clamp = math.Clamp
+
+if CLIENT then
+	-- Wheels spin with the distance driven and steer with the turn rate, all
+	-- worked out here from how the APC moves: nothing extra is networked.
+	local ENGINE_RANGE = 3000
+
+	function ENT:NGLFindWheelPoses()
+		local spin, steer = {}, nil
+		for i = 0, self:GetNumPoseParameters() - 1 do
+			local name = self:GetPoseParameterName(i)
+			local lo, hi = self:GetPoseParameterRange(i)
+			if string.find(name, "spin", 1, true) then
+				spin[#spin + 1] = { name, lo, hi }
+			elseif string.find(name, "steer", 1, true) then
+				steer = { name, lo, hi }
+			end
+		end
+		self.NGLWheelSpin, self.NGLWheelSteer = spin, steer
+	end
+
+	function ENT:NGLWheels()
+		if not self.NGLWheelSpin then self:NGLFindWheelPoses() end
+		local now = CurTime()
+		local pos, yaw = self:GetPos(), self:GetAngles().y
+		local lastPos, lastYaw, lastT = self.NGLLastPos, self.NGLLastYaw, self.NGLLastT
+		self.NGLLastPos, self.NGLLastYaw, self.NGLLastT = pos, yaw, now
+		if not lastPos then return end
+		local dt = now - lastT
+		if dt <= 0 then return end
+		local h = rad(yaw + self.HeadingOffset)
+		local speed = ((pos.x - lastPos.x) * math.cos(h) + (pos.y - lastPos.y) * math.sin(h)) / dt
+		self.NGLSpeed = speed
+		self.NGLSpin = ((self.NGLSpin or 0) + deg(speed * dt / self.WheelRadius)) % 360
+		for _, p in ipairs(self.NGLWheelSpin) do
+			self:SetPoseParameter(p[1], p[2] + (p[3] - p[2]) * self.NGLSpin / 360)
+		end
+		local st = self.NGLWheelSteer
+		if st then
+			local want = 0
+			if math.abs(speed) > 20 then
+				local yawRate = rad(AngleDiff(yaw, lastYaw)) / dt
+				want = clamp(deg(math.atan(yawRate * self.WheelBase / speed)) / self.MaxSteer, -1, 1)
+			end
+			self.NGLSteerF = (self.NGLSteerF or 0) + (want - (self.NGLSteerF or 0)) * math.min(dt * 6, 1)
+			local f = (self.NGLSteerF + 1) / 2
+			self:SetPoseParameter(st[1], st[2] + (st[3] - st[2]) * f)
+		end
+		self:InvalidateBoneCache()
+	end
+
+	function ENT:Draw()
+		self:NGLWheels()
+		BaseClass.Draw(self)
+	end
+
+	function ENT:Think()
+		local snd = self.EngineSounds
+		if snd then
+			local near = EyePos():DistToSqr(self:GetPos()) < ENGINE_RANGE * ENGINE_RANGE
+			if near and not self.NGLEngine then
+				self.NGLEngine = {}
+				for k, path in pairs(snd) do
+					local s = CreateSound(self, path)
+					s:SetSoundLevel(80)
+					s:PlayEx(0, 100)
+					self.NGLEngine[k] = s
+				end
+			elseif not near and self.NGLEngine then
+				for _, s in pairs(self.NGLEngine) do s:Stop() end
+				self.NGLEngine = nil
+			end
+			local E = self.NGLEngine
+			if E then
+				local f = clamp(math.abs(self.NGLSpeed or 0) / self.RunSpeed, 0, 1)
+				if E.Idle then E.Idle:ChangeVolume(0.6 * (1 - f), 0.2) end
+				if E.Drive then
+					E.Drive:ChangeVolume(0.3 + 0.7 * f, 0.2)
+					E.Drive:ChangePitch(80 + 40 * f, 0.2)
+				end
+			end
+		end
+		self:SetNextClientThink(CurTime() + 0.1)
+		return true
+	end
+
+	function ENT:OnRemove()
+		for _, s in pairs(self.NGLEngine or {}) do s:Stop() end
+		if BaseClass.OnRemove then BaseClass.OnRemove(self) end
+	end
+	return
+end
 
 local IsValid, CurTime = IsValid, CurTime
 local Rand = math.Rand
@@ -83,11 +205,13 @@ function ENT:NGLSignal() return false end
 function ENT:OnSpawned()
 	local h = self.Hull
 	self:SetCollisionBounds(h[1], h[2])
-	self.loco:SetAcceleration(250)
-	self.loco:SetDeceleration(500)
+	-- Our own driving sets the speed; the locomotion just follows it.
+	self.loco:SetAcceleration(2000)
+	self.loco:SetDeceleration(2000)
 	self.loco:SetStepHeight(24)
-	self.loco:SetMaxYawRate(70)
 	self.NGLNextRocket = 0
+	self.NGLSpeed = 0
+	self.NGLHeading = self:GetAngles().y + self.HeadingOffset
 	self.NGLTurret = {}
 	for k, names in pairs(self.TurretPoses) do
 		for _, n in ipairs(names) do
@@ -97,9 +221,93 @@ function ENT:OnSpawned()
 			end
 		end
 	end
+	local function att(name) local id = self:LookupAttachment(name); return id and id > 0 and id or nil end
+	self.NGLAtt = { muzzle = att("muzzle"), base = att("gun_base"), rocket = att("cannon_muzzle") }
+	self.NGLAimYaw, self.NGLAimPitch = 90, 0 -- HL2's rest pose: gun forward
+	if self.NGLTurret.yaw then self:SetPoseParameter(self.NGLTurret.yaw, 90) end
 end
 
--- Turret follows what it shoots at (an enemy, or a fire_at spot).
+-- Driving ------------------------------------------------------------------
+
+-- Called every tick by the base BehaveUpdate with the current goal (or nil).
+-- A bicycle model: speed along the heading, the heading turns by
+-- speed * tan(steer) / wheelbase. Goals far off to the side and close by
+-- are reached by backing up while steering the other way (a three-point
+-- turn); goals behind and close (backing away from enemies) by reversing.
+function ENT:NGLDrive(goal, dt)
+	dt = dt or engine.TickInterval()
+	local pos = self:GetPos()
+	local heading = self.NGLHeading or (self:GetAngles().y + self.HeadingOffset)
+	local speed = self.NGLSpeed or 0
+	local want, steer = 0, 0
+	local now = CurTime()
+
+	if goal then
+		local dx, dy = goal.x - pos.x, goal.y - pos.y
+		local dist = math.sqrt(dx * dx + dy * dy)
+		local off = AngleDiff(deg(atan2(dy, dx)), heading)
+		local top = self.NGLMoveMode == "walk" and self.WalkSpeed or self.RunSpeed
+		-- Reverse: goal behind and close, a corner too tight, or stuck.
+		local back = self.NGLBacking
+		if back and (now > back or math.abs(off) < 45) then back = nil end
+		if not back and math.abs(off) > 110 and dist < 700 then back = now + 3 end
+		if (self.NGLStuckUntil or 0) > now then back = back or self.NGLStuckUntil end
+		self.NGLBacking = back
+		if back then
+			-- Backing up: steer the other way, so the nose swings to the goal;
+			-- with the goal right behind, keep the tail pointed at it.
+			steer = clamp(-off, -self.MaxSteer, self.MaxSteer)
+			if math.abs(off) > 150 then
+				steer = clamp(-AngleDiff(deg(atan2(dy, dx)), heading + 180), -self.MaxSteer, self.MaxSteer)
+			end
+			want = -math.min(self.ReverseSpeed, 60 + dist)
+		else
+			steer = clamp(off, -self.MaxSteer, self.MaxSteer)
+			want = top * clamp(1 - math.abs(off) / 150, 0.35, 1) -- slow into turns
+			want = math.min(want, 60 + dist * 1.2)              -- and towards the end
+		end
+	end
+
+	local rate = (want == 0 or (want > 0) ~= (speed > 0)) and self.Brake or self.Accel
+	if speed < want then speed = math.min(want, speed + rate * dt)
+	elseif speed > want then speed = math.max(want, speed - rate * dt) end
+
+	if speed ~= 0 then
+		heading = heading + deg(speed * math.tan(rad(steer)) / self.WheelBase) * dt
+		local h = rad(heading)
+		local fwd = Vector(math.cos(h), math.sin(h), 0)
+		self.loco:SetDesiredSpeed(math.abs(speed))
+		self.loco:Approach(pos + fwd * (speed > 0 and 100 or -100), 1)
+		-- Not getting anywhere (pushing into a wall): back up for a moment.
+		local moved = self.NGLLastDrivePos and pos:DistToSqr(self.NGLLastDrivePos) or 1e9
+		if math.abs(speed) > 80 and moved < 0.25 then
+			self.NGLStuckT = (self.NGLStuckT or 0) + dt
+			if self.NGLStuckT > 1.5 then
+				self.NGLStuckUntil = now + 1.5
+				self.NGLStuckT = 0
+			end
+		else
+			self.NGLStuckT = 0
+		end
+	end
+	self.NGLLastDrivePos = pos
+	self.NGLHeading = heading
+	self.NGLSpeed = speed
+	self:SetAngles(Angle(0, heading - self.HeadingOffset, 0))
+	self.NGLMoving = math.abs(speed) > 5
+end
+
+-- Turret -------------------------------------------------------------------
+
+function ENT:NGLMuzzle()
+	local id = self.NGLAtt and self.NGLAtt.muzzle
+	local a = id and self:GetAttachment(id)
+	if a then return a.Pos, id end
+end
+
+-- The gun follows what it shoots at (an enemy, or a fire_at spot): pose
+-- angles measured from the gun base, in the model's frame, as HL2 does
+-- (yaw 90 = straight ahead).
 function ENT:NGLUpdatePose()
 	self.NGLPosed = true
 	local t = self.NGLTurret
@@ -107,17 +315,23 @@ function ENT:NGLUpdatePose()
 	local aim = self.NGLTurretPos
 	local e = self.NGLEnemy
 	if not aim and IsValid(e) and self.NGLEnemyVisible then aim = e:WorldSpaceCenter() end
-	local ay, ap = 0, 0
+	local ay, ap = 90, 0
 	if aim then
-		local eye = self:GetPos()
-		eye.z = eye.z + self.EyeHeight
-		local a = (aim - eye):Angle()
-		ay, ap = math.AngleDifference(a.y, self:GetAngles().y), math.AngleDifference(a.p, 0)
+		local base = self.NGLAtt.base and self:GetAttachment(self.NGLAtt.base)
+		local from = base and base.Pos or (self:GetPos() + Vector(0, 0, self.EyeHeight))
+		local a = (aim - from):Angle()
+		ay, ap = AngleDiff(a.y, self:GetAngles().y), AngleDiff(a.p, 0)
 	end
-	if math.abs(ay - (self.NGLAimYaw or 0)) > 2 or math.abs(ap - (self.NGLAimPitch or 0)) > 2 then
-		self.NGLAimYaw, self.NGLAimPitch = ay, ap
-		self:SetPoseParameter(t.yaw, ay)
-		if t.pitch then self:SetPoseParameter(t.pitch, ap) end
+	local now = CurTime()
+	local dt = math.min(now - (self.NGLLastPose or now), 0.5)
+	self.NGLLastPose = now
+	local step = self.TurretTurnSpeed * math.max(dt, 0.05)
+	local ny = self.NGLAimYaw + clamp(AngleDiff(ay, self.NGLAimYaw), -step, step)
+	local np = self.NGLAimPitch + clamp(ap - self.NGLAimPitch, -step, step)
+	if math.abs(ny - self.NGLAimYaw) > 0.5 or math.abs(np - self.NGLAimPitch) > 0.5 then
+		self.NGLAimYaw, self.NGLAimPitch = ny, np
+		self:SetPoseParameter(t.yaw, ny)
+		if t.pitch then self:SetPoseParameter(t.pitch, np) end
 	end
 end
 
@@ -131,17 +345,31 @@ function ENT:OnDamaged(dmg)
 	end
 end
 
-local function fireRocket(self, target)
+-- Rockets ------------------------------------------------------------------
+
+-- HL2's launch directions: up at 45 degrees, fanned from forward to
+-- backward, one after the other.
+local SIDES = { 0.966, 0.866, 0.5, -0.5, -0.866, -0.966 }
+
+function ENT:NGLFireRocket(target, dst)
 	local r = self.Rockets
-	self:FireProjectile(target, r)
-	if self.NGLNear and r.Sound then self:EmitSound(r.Sound) end
+	local id = self.NGLAtt and self.NGLAtt.rocket
+	local a = id and self:GetAttachment(id)
+	local src = a and a.Pos or (self:GetPos() + Vector(0, 0, self.EyeHeight + 20))
+	self.NGLRocketSide = (self.NGLRocketSide or 0) % #SIDES + 1
+	local side = SIDES[self.NGLRocketSide]
+	local h = rad(self:GetAngles().y + self.HeadingOffset)
+	local dir = Vector(math.cos(h) * side, math.sin(h) * side, 1)
+	dst = dst or target:WorldSpaceCenter()
+	NGL.Proj.Fire(self, r, src, dst, self.NGLNear, { dir = dir, target = target })
+	if self.NGLNear and r.Sound then self:EmitSound(r.Sound, 90) end
 end
 
 -- Worth a rocket: players, vehicles, enemies far away, or packed groups.
 local function rocketWorthy(self, enemy, dist)
 	if enemy:IsPlayer() or enemy.IsVehicleNPC or dist > 1500 then return true end
 	local n = 0
-	for _, e in ipairs(NGL.FindInRadius(enemy:GetPos(), 250, function(e) return NGL.Core.IsHostile(self, e) end)) do
+	for _ in ipairs(NGL.FindInRadius(enemy:GetPos(), 250, function(e) return NGL.Core.IsHostile(self, e) end)) do
 		n = n + 1
 		if n >= 2 then return true end
 	end
@@ -164,7 +392,7 @@ function ENT:OnAIThink(dt)
 	if now >= o.nextShot then
 		local r = self.Rockets
 		local sp = o.spread or r.BarrageSpread
-		fireRocket(self, o.pos + Vector(Rand(-sp, sp), Rand(-sp, sp), 0))
+		self:NGLFireRocket(nil, o.pos + Vector(Rand(-sp, sp), Rand(-sp, sp), 0))
 		o.fired = (o.fired or 0) + 1
 		o.nextShot = now + 0.7
 		if o.fired >= (o.rockets or r.Barrage) then
@@ -175,8 +403,8 @@ function ENT:OnAIThink(dt)
 	return true
 end
 
--- Own fight: keep between MinRange and AttackRange, machine gun always,
--- rockets when worth it. Never strafes.
+-- Own fight: keep between MinRange and AttackRange (backing away when too
+-- close), machine gun always, rockets when worth it. Never strafes.
 function ENT:OnCombat(enemy, dist, visible)
 	local Core = NGL.Core
 	local now = CurTime()
@@ -202,11 +430,11 @@ function ENT:OnCombat(enemy, dist, visible)
 		self:NGLSetMoveMode("run")
 		Core.Chase(self, now, pos, tPos, true)
 	elseif dist < self.MinRange then
-		-- Too close: drive away from it.
+		-- Too close: back away from it (the goal is behind, so it reverses).
 		local away = pos - tPos
 		away.z = 0
 		away:Normalize()
-		if not self.NGLGoal or self.NGLGoal:DistToSqr(pos) < 64 * 64 then
+		if not self.NGLGoal or self.NGLGoal:DistToSqr(pos) < 96 * 96 then
 			Core.StopMoving(self)
 			self:NGLSetMoveMode("run")
 			self.NGLGoal = pos + away * 500
@@ -218,9 +446,9 @@ function ENT:OnCombat(enemy, dist, visible)
 	if dist < self.AttackRange * 1.2 then
 		Core.Shoot(self, now, dt, enemy)
 		local r = self.Rockets
-		if r and now >= self.NGLNextRocket and dist > 300 and rocketWorthy(self, enemy, dist) then
+		if r and now >= self.NGLNextRocket and dist > (r.MinRange or 300) and rocketWorthy(self, enemy, dist) then
 			self.NGLNextRocket = now + r.Delay
-			fireRocket(self, enemy)
+			self:NGLFireRocket(enemy)
 		end
 	end
 	return true
