@@ -314,9 +314,29 @@ local VIEW_PIECE = 60000
 --   link count, then ax ay az bx by bz kind for each (Nav.KindCode)
 --   1 and x y z of the link start being placed, or 0
 --   point count, then x y z of each grid point in the sphere
--- Every area with a point in the sphere is drawn whole, as a square (see
--- Nav.BuildAreas for how far each reaches round its points).
+-- Every area with a point in the sphere is drawn whole, as the squares of
+-- its points, each corner at the height of the points round it so it lies
+-- on hills (see Nav.BuildAreas for how far each area reaches round its points).
 local VIEW_MAX_AREAS = 20000
+local DIRS = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }, { 1, 1 }, { -1, -1 }, { 1, -1 }, { -1, 1 } } -- as in sv_nav.lua
+
+-- The points of each area (rebuilt when the areas are).
+local nodesCache, nodesFor
+local function areaNodes()
+	local AreaOf = Nav.AreaOf
+	if nodesFor == AreaOf and nodesCache then return nodesCache end
+	local t, dead = {}, Nav.Dead
+	for i = 1, Nav.Count do
+		local a = AreaOf[i]
+		if a and not dead[i] then
+			local l = t[a]
+			if not l then l = {}; t[a] = l end
+			l[#l + 1] = i
+		end
+	end
+	nodesCache, nodesFor = t, AreaOf
+	return t
+end
 function Nav.ViewData(center, radius, linkA)
 	local out, n = {}, 0
 	local function put(v) n = n + 1; out[n] = v end
@@ -346,25 +366,78 @@ function Nav.ViewData(center, radius, linkA)
 			if a and not seenArea[a] and #areas < VIEW_MAX_AREAS then seenArea[a] = true; areas[#areas + 1] = a end
 		end
 	end
-	put(#areas * 4)
-	for _, a in ipairs(areas) do
-		local A = Areas[a]
-		local z00, z10, z11, z01 = Nav.NZ[A.c00], Nav.NZ[A.c10], Nav.NZ[A.c11], Nav.NZ[A.c01]
-		for _, c in ipairs({ { A.ex0, A.ey0, z00 }, { A.ex1, A.ey0, z10 }, { A.ex1, A.ey1, z11 }, { A.ex0, A.ey1, z01 } }) do
-			put(floor(c[1] + 0.5)); put(floor(c[2] + 0.5)); put(floor(c[3] + 0.5))
+	-- Every area is drawn as the squares of its points, each corner at the
+	-- height of the points round it (the ones walked to from here), so the
+	-- squares lie on hills and ramps instead of cutting into them; outlined
+	-- where the area ends.
+	local verts, nv, vkey = {}, 0, {}
+	local tris, outline = {}, {}
+	if Nav.Loaded and #areas > 0 then
+		local NX, NY, NZ, OX, OY, NM = Nav.NX, Nav.NY, Nav.NZ, Nav.OX, Nav.OY, Nav.NM
+		local S = Nav.S
+		local half = S * 0.5
+		local tol = I.linkTol and I.linkTol() or S * 1.05 + 16
+		local nodesOf = areaNodes()
+		local function nb(i, d)
+			if bit.band(NM[i], bit.lshift(1, d - 1)) == 0 then return nil end
+			return I.nodeAt(NX[i] + DIRS[d][1], NY[i] + DIRS[d][2], NZ[i], tol)
+		end
+		local function vert(x, y, z)
+			x, y, z = floor(x + 0.5), floor(y + 0.5), floor(z + 0.5)
+			local k = x .. " " .. y .. " " .. z
+			local v = vkey[k]
+			if not v then
+				nv = nv + 1; v = nv; vkey[k] = v
+				verts[#verts + 1] = x; verts[#verts + 1] = y; verts[#verts + 1] = z
+			end
+			return v
+		end
+		for _, a in ipairs(areas) do
+			local A = Areas[a]
+			for _, i in ipairs(nodesOf[a] or {}) do
+				local px, py, pz = NX[i] * S + OX[i], NY[i] * S + OY[i], NZ[i]
+				local x0, x1 = math.max(px - half, A.ex0), math.min(px + half, A.ex1)
+				local y0, y1 = math.max(py - half, A.ey0), math.min(py + half, A.ey1)
+				local e, w, nn, ss = nb(i, 1), nb(i, 2), nb(i, 3), nb(i, 4)
+				-- How the ground slopes here, from the points either side.
+				local function px_(n) return NX[n] * S + OX[n] end
+				local function py_(n) return NY[n] * S + OY[n] end
+				local function slope(a1, a2, pos, z1)
+					if a1 and a2 then return (NZ[a1] - NZ[a2]) / math.max(pos(a1) - pos(a2), 1) end
+					if a1 then return (NZ[a1] - z1) / math.max(pos(a1) - (pos == px_ and px or py), 1) end
+					if a2 then return (z1 - NZ[a2]) / math.max((pos == px_ and px or py) - pos(a2), 1) end
+					return 0
+				end
+				local gx, gy = slope(e, w, px_, pz), slope(nn, ss, py_, pz)
+				-- A corner: with all four points round it (this one, the two
+				-- next to it on that side and the one across), their average,
+				-- which the squares next door get too, so they meet. At the
+				-- edge of the floor: this point's height carried along the slope.
+				local function cz(xn, yn, dn, cx, cy)
+					local dg = nb(i, dn)
+					if xn and yn and dg then return (pz + NZ[xn] + NZ[yn] + NZ[dg]) * 0.25 end
+					return pz + gx * (cx - px) + gy * (cy - py)
+				end
+				local v00 = vert(x0, y0, cz(w, ss, 6, x0, y0))
+				local v10 = vert(x1, y0, cz(e, ss, 7, x1, y0))
+				local v11 = vert(x1, y1, cz(e, nn, 5, x1, y1))
+				local v01 = vert(x0, y1, cz(w, nn, 8, x0, y1))
+				local t = #tris
+				tris[t + 1], tris[t + 2], tris[t + 3] = v00, v10, v11
+				tris[t + 4], tris[t + 5], tris[t + 6] = v00, v11, v01
+				local function edge(n, p, q)
+					if not (n and AreaOf[n] == a) then outline[#outline + 1] = p; outline[#outline + 1] = q end
+				end
+				edge(ss, v00, v10); edge(e, v10, v11); edge(nn, v11, v01); edge(w, v01, v00)
+			end
 		end
 	end
-	put(#areas * 2)
-	for k = 1, #areas do
-		local b = (k - 1) * 4
-		put(b + 1); put(b + 2); put(b + 3)
-		put(b + 1); put(b + 3); put(b + 4)
-	end
-	put(#areas * 4)
-	for k = 1, #areas do
-		local b = (k - 1) * 4
-		put(b + 1); put(b + 2); put(b + 2); put(b + 3); put(b + 3); put(b + 4); put(b + 4); put(b + 1)
-	end
+	put(nv)
+	for k = 1, #verts do put(verts[k]) end
+	put(#tris / 3)
+	for k = 1, #tris do put(tris[k]) end
+	put(#outline / 2)
+	for k = 1, #outline do put(outline[k]) end
 	put(0)
 	local idx = {}
 	for _, i in ipairs(list) do idx[i] = true end
