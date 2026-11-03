@@ -195,7 +195,93 @@ local function buildNeighbours()
 	end
 	Nav.TA, Nav.TB, Nav.TC, Nav.TCells, Nav.TriCount = TA, TB, TC, TCells, nt
 	Nav.SQ, Nav.InTri = SQ, InTri
+	Nav.BuildAreas(byDir)
 	Nav.Version = (Nav.Version or 0) + 1 -- what the editor view was sent from has changed
+end
+
+----------------------------------------------------------------------------
+-- Areas: the grid merged into rectangles, like the Source navmesh's areas.
+-- A rectangle is a block of grid points, each on its own grid spot, where
+-- every square inside is open floor (all four sides and a diagonal walkable),
+-- so anywhere inside it can be walked to in a straight line. Points that
+-- don't fit in one (narrow halls, doorways, ledges) are areas of their own.
+-- Paths are searched over areas (far fewer than points) and drawn straight
+-- through them (see areaSearch).
+--   Areas[a] = { x0, y0, x1, y1 (grid coords), n (corner node), big }
+--   AreaOf[node] = a
+----------------------------------------------------------------------------
+
+local AREA_MAX = 16 -- grid squares a side, at most
+
+-- The square with grid corners a (low x, low y), b (+x), c (+y), d (+x +y):
+-- all four sides walkable and open floor.
+local function squareWhole(byDir, a, b, c, d)
+	local bd = byDir[a]
+	return bd and bd[1] == b and bd[3] == c and byDir[b] and byDir[b][3] == d
+		and byDir[c] and byDir[c][1] == d and Nav.SQ[a] or false
+end
+
+function Nav.BuildAreas(byDir)
+	local NX, NY, NZ, OX, OY, dead = Nav.NX, Nav.NY, Nav.NZ, Nav.OX, Nav.OY, Nav.Dead
+	local AreaOf, Areas = {}, {}
+	local order = {}
+	for i = 1, Nav.Count do if not dead[i] then order[#order + 1] = i end end
+	table.sort(order, function(a, b)
+		if NY[a] ~= NY[b] then return NY[a] < NY[b] end
+		if NX[a] ~= NX[b] then return NX[a] < NX[b] end
+		return NZ[a] < NZ[b]
+	end)
+	local function free(i) return i and not AreaOf[i] and OX[i] == 0 and OY[i] == 0 end
+	for _, i in ipairs(order) do
+		if not AreaOf[i] then
+			local rows, w = nil, 0
+			if free(i) then
+				-- First row: as far +x as the points go.
+				local row, cur = { i }, i
+				while #row < AREA_MAX do
+					local e = byDir[cur][1]
+					if not free(e) then break end
+					row[#row + 1] = e
+					cur = e
+				end
+				rows, w = { row }, #row
+				-- Then rows above while every square between is open floor;
+				-- narrower if that makes a bigger rectangle.
+				while #rows < AREA_MAX and w >= 2 do
+					local prev, nxt = rows[#rows], {}
+					local ok = 0
+					for k = 1, w do
+						local n = byDir[prev[k]][3]
+						if not free(n) then break end
+						if k > 1 and not squareWhole(byDir, prev[k - 1], prev[k], nxt[k - 1], n) then break end
+						nxt[k] = n
+						ok = k
+					end
+					if ok >= 2 and ok * (#rows + 1) > w * #rows then
+						if ok < w then
+							for _, r in ipairs(rows) do for k = ok + 1, w do r[k] = nil end end
+							w = ok
+						end
+						for k = w + 1, #nxt do nxt[k] = nil end
+						rows[#rows + 1] = nxt
+					else
+						break
+					end
+				end
+			end
+			local a = #Areas + 1
+			if rows and w >= 2 and #rows >= 2 then
+				for _, r in ipairs(rows) do for _, n in ipairs(r) do AreaOf[n] = a end end
+				local top = rows[#rows]
+				Areas[a] = { x0 = NX[i], y0 = NY[i], x1 = NX[i] + w - 1, y1 = NY[i] + #rows - 1, big = true,
+					c00 = i, c10 = rows[1][w], c01 = top[1], c11 = top[w] }
+			else
+				AreaOf[i] = a
+				Areas[a] = { x0 = NX[i], y0 = NY[i], x1 = NX[i], y1 = NY[i], big = false, c00 = i, c10 = i, c01 = i, c11 = i }
+			end
+		end
+	end
+	Nav.Areas, Nav.AreaOf, Nav.AreaEdges = Areas, AreaOf, nil
 end
 
 -- Links leaving each node, for the search.
@@ -207,6 +293,7 @@ local function buildLinks()
 		t[#t + 1] = k
 	end
 	Nav.LB = LB
+	Nav.AreaEdges = nil -- rebuilt on the next search
 end
 Nav.BuildLinks = buildLinks
 
@@ -965,7 +1052,260 @@ Nav.WideOk = function(n, width)
 	return wideOk(n, width, Nav.Wide[width])
 end
 
+-- Area edges, built on the first search after the grid or its links change:
+--   AreaEdges[a] = list of { to, cost, kind, ... }
+--     "portal": a run of open squares between two big areas along one side:
+--               p1, p2 (ends on a's side), q1, q2 (on the other's side)
+--     "pair":   one walk link between two grid points i, j
+--     "link":   a jump, climb or hand-made link L
+local function areaCenter(A)
+	local p, q = nodePos(A.c00), nodePos(A.c11)
+	return Vector((p.x + q.x) * 0.5, (p.y + q.y) * 0.5, (p.z + q.z) * 0.5)
+end
+
+local function buildAreaEdges()
+	local Areas, AreaOf, NB, NX, NY = Nav.Areas, Nav.AreaOf, Nav.NB, Nav.NX, Nav.NY
+	local S = Nav.S
+	local tol = linkTol()
+	local centers = {}
+	for a, A in ipairs(Areas) do centers[a] = areaCenter(A) end
+	local edges = {}
+	local function add(a, e)
+		local m = e.mid
+		e.cost = centers[a]:Distance(m) + m:Distance(centers[e.to]) + (e.extra or 0)
+		local list = edges[a]
+		if not list then list = {}; edges[a] = list end
+		list[#list + 1] = e
+	end
+	-- the grid point next to i in direction (dx, dy), on i's floor
+	local function step(i, dx, dy) return nodeAt(NX[i] + dx, NY[i] + dy, Nav.NZ[i], tol) end
+	local function linked(i, j)
+		local nb = NB[i]
+		for k = 1, #nb, 2 do if nb[k] == j then return true end end
+		return false
+	end
+	for i = 1, Nav.Count do
+		local a = AreaOf[i]
+		if a then
+			local A = Areas[a]
+			local nb = NB[i]
+			for k = 1, #nb, 2 do
+				local j = nb[k]
+				local b = AreaOf[j]
+				if b and b ~= a then
+					local B = Areas[b]
+					local dx, dy = NX[j] - NX[i], NY[j] - NY[i]
+					if A.big and B.big and (dx == 0 or dy == 0) then
+						-- Straight across between two big areas: start a portal
+						-- run here if the point before along the side isn't one.
+						local ax, ay = dy ~= 0 and 1 or 0, dx ~= 0 and 1 or 0 -- along the side
+						local pi = step(i, -ax, -ay)
+						local pj = pi and step(j, -ax, -ay)
+						local low = dx + dy > 0 -- i is on the low side of the square between
+						local continues = pi and pj and AreaOf[pi] == a and AreaOf[pj] == b and linked(pi, pj)
+							and linked(pi, i) and linked(pj, j) and Nav.SQ[low and pi or pj]
+						if not continues then
+							local ii, jj, n = i, j, 1
+							while true do
+								local ni, nj = step(ii, ax, ay), step(jj, ax, ay)
+								if not (ni and nj and AreaOf[ni] == a and AreaOf[nj] == b and linked(ni, nj)
+									and linked(ii, ni) and linked(jj, nj)) then break end
+								-- the square between has to be open floor too
+								if not Nav.SQ[low and ii or jj] then break end
+								ii, jj, n = ni, nj, n + 1
+							end
+							if n >= 2 then
+								local p1, p2, q1, q2 = nodePos(i), nodePos(ii), nodePos(j), nodePos(jj)
+								add(a, { to = b, kind = "portal", p1 = p1, p2 = p2, q1 = q1, q2 = q2,
+									mid = (p1 + p2 + q1 + q2) * 0.25 })
+							else
+								add(a, { to = b, kind = "pair", i = i, j = j, mid = (nodePos(i) + nodePos(j)) * 0.5 })
+							end
+						end
+					else
+						add(a, { to = b, kind = "pair", i = i, j = j, mid = (nodePos(i) + nodePos(j)) * 0.5 })
+					end
+				end
+			end
+			local out = Nav.LB and Nav.LB[i]
+			if out then
+				for k = 1, #out do
+					local L = Nav.Links[out[k]]
+					local b = AreaOf[L.b]
+					if b then
+						local pa, pb = nodePos(L.a), nodePos(L.b)
+						add(a, { to = b, kind = "link", L = L, mid = (pa + pb) * 0.5, extra = L.kind == "walk" and 0 or 3 * S })
+					end
+				end
+			end
+		end
+	end
+	Nav.AreaEdges, Nav.AreaCenters = edges, centers
+	return edges
+end
+Nav.BuildAreaEdges = buildAreaEdges
+
+-- The shortest line through a list of portals ({ l, r } pairs of points, a
+-- single point when l == r), from the first to the last ("simple stupid
+-- funnel"). Left is the side a positive cross product points to, seen
+-- along the way. Returns the corner points, the same Vector objects.
+local function cross(o, a, b) return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x) end
+local function same(a, b) return a.x == b.x and a.y == b.y end
+local function funnel(portals)
+	local out = { portals[1].l }
+	local apex, left, right = portals[1].l, portals[1].l, portals[1].r
+	local ai, li, ri = 1, 1, 1
+	local i = 2
+	local n = #portals
+	local guard = 0
+	while i <= n do
+		guard = guard + 1
+		if guard > n * 8 + 64 then break end
+		local l, r = portals[i].l, portals[i].r
+		local restart = false
+		-- right side tightens when r is not right of the right edge
+		if cross(apex, right, r) >= 0 then
+			if same(apex, right) or cross(apex, left, r) < 0 then
+				right, ri = r, i
+			else
+				-- crossed over the left edge: its end is a corner
+				out[#out + 1] = left
+				apex, ai = left, li
+				right, ri = apex, ai
+				i = ai + 1
+				restart = true
+			end
+		end
+		if not restart then
+			if cross(apex, left, l) <= 0 then
+				if same(apex, left) or cross(apex, right, l) > 0 then
+					left, li = l, i
+				else
+					out[#out + 1] = right
+					apex, ai = right, ri
+					left, li = apex, ai
+					i = ai + 1
+					restart = true
+				end
+			end
+		end
+		if not restart then i = i + 1 end
+	end
+	local last = portals[n].l
+	if not same(out[#out], last) then out[#out + 1] = last end
+	return out
+end
+Nav.Funnel = funnel
+
+-- A portal from segment (p, q) for going from `from` towards `to`.
+local function portalOf(p, q, from, to)
+	local d = { x = to.x - from.x, y = to.y - from.y }
+	local c = d.x * (q.y - p.y) - d.y * (q.x - p.x)
+	if c > 0 then return { l = q, r = p } end
+	return { l = p, r = q }
+end
+
+-- A* over areas, then the path straightened through them. Same result as
+-- the point search (waypoints, .links for jumps, .tight for narrow places).
+local function areaSearch(start, goal, caps)
+	local edges = Nav.AreaEdges or buildAreaEdges()
+	local AreaOf, Areas, centers = Nav.AreaOf, Nav.Areas, Nav.AreaCenters
+	local sa, ga = AreaOf[start], AreaOf[goal]
+	if not sa or not ga then return nil end
+	local goalPos = nodePos(goal)
+	local hn, hf, size = {}, {}, 0
+	local g, came, cameBy, closed = { [sa] = 0 }, {}, {}, {}
+	size = heapPush(hn, hf, size, sa, centers[sa]:Distance(goalPos))
+	local maxExpand = cvMaxExpand:GetInt()
+	local expanded = 0
+	local found = false
+	while size > 0 do
+		local cur
+		cur, size = heapPop(hn, hf, size)
+		if cur == ga then found = true break end
+		if not closed[cur] then
+			closed[cur] = true
+			expanded = expanded + 1
+			if expanded > maxExpand then return nil end
+			local list = edges[cur]
+			if list then
+				local gc = g[cur]
+				for k = 1, #list do
+					local e = list[k]
+					local b = e.to
+					if not closed[b] and (e.kind ~= "link" or linkMove(e.L, caps)) then
+						local ng = gc + e.cost
+						if not g[b] or ng < g[b] then
+							g[b], came[b], cameBy[b] = ng, cur, e
+							size = heapPush(hn, hf, size, b, ng + centers[b]:Distance(goalPos))
+						end
+					end
+				end
+			end
+			if expanded % 64 == 0 then coroutine.yield() end
+		end
+	end
+	if not found then return nil end
+	-- The areas and edges from start to goal.
+	local seq = {}
+	local cur = ga
+	while came[cur] do
+		table.insert(seq, 1, cameBy[cur])
+		cur = came[cur]
+	end
+	-- Portals; jumps split it into stretches, each straightened on its own.
+	local pts, tight = {}, {}
+	local links, tightIdx = nil, nil
+	local stretch = { }
+	local startPos = nodePos(start)
+	stretch[1] = { l = startPos, r = startPos }
+	local function point(p) stretch[#stretch + 1] = { l = p, r = p } end
+	local function flush()
+		local corners = funnel(stretch)
+		for _, c in ipairs(corners) do
+			if not (pts[#pts] and same(pts[#pts], c) and pts[#pts].z == c.z) then
+				pts[#pts + 1] = c
+				if tight[c] then tightIdx = tightIdx or {}; tightIdx[#pts] = true end
+			end
+		end
+	end
+	for _, e in ipairs(seq) do
+		if e.kind == "portal" then
+			local mp, mq = (e.p1 + e.p2) * 0.5, (e.q1 + e.q2) * 0.5
+			stretch[#stretch + 1] = portalOf(e.p1, e.p2, mp, mq)
+			stretch[#stretch + 1] = portalOf(e.q1, e.q2, mp, mq)
+		elseif e.kind == "pair" then
+			local pi, pj = nodePos(e.i), nodePos(e.j)
+			if not Areas[AreaOf[e.i]].big then tight[pi] = true end
+			if not Areas[AreaOf[e.j]].big then tight[pj] = true end
+			point(pi)
+			point(pj)
+		else
+			local L = e.L
+			local pa, pb = nodePos(L.a), nodePos(L.b)
+			point(pa)
+			flush()
+			local move = linkMove(L, caps)
+			if move and move ~= "walk" then
+				links = links or {}
+				links[#pts] = { move = move, h = L.h or 0 }
+			end
+			stretch = { { l = pb, r = pb } }
+			if not Areas[AreaOf[L.b]].big then tight[pb] = true end
+		end
+	end
+	point(goalPos)
+	flush()
+	if #pts == 1 then pts[2] = goalPos end
+	pts.links, pts.tight = links, tightIdx
+	return pts
+end
+Nav.AreaSearch = areaSearch
+
 local function search(start, goal, width, caps)
+	-- People search over areas; wide NPCs over points (each point's width is
+	-- checked on the way).
+	if not width and Nav.Areas then return areaSearch(start, goal, caps) end
 	local known
 	if width then
 		Nav.Wide[width] = Nav.Wide[width] or {}
