@@ -269,17 +269,85 @@ function Nav.BuildAreas(byDir)
 					end
 				end
 			end
-			local a = #Areas + 1
 			if rows and w >= 2 and #rows >= 2 then
+				local a = #Areas + 1
 				for _, r in ipairs(rows) do for _, n in ipairs(r) do AreaOf[n] = a end end
 				local top = rows[#rows]
 				Areas[a] = { x0 = NX[i], y0 = NY[i], x1 = NX[i] + w - 1, y1 = NY[i] + #rows - 1, big = true,
 					c00 = i, c10 = rows[1][w], c01 = top[1], c11 = top[w] }
+			end
+		end
+	end
+	-- Narrow places: straight runs of points along a hall (all moved the
+	-- same way off their grid spots, linked one to the next) become thin
+	-- rectangles. Walking along one is a straight line.
+	local function run(i, dir)
+		local list, cur = { i }, i
+		local ox, oy = OX[i], OY[i]
+		while #list < AREA_MAX do
+			local n = byDir[cur][dir]
+			if not (n and not AreaOf[n] and OX[n] == ox and OY[n] == oy) then break end
+			-- linked both ways
+			if byDir[n][OPP[dir]] ~= cur then break end
+			list[#list + 1] = n
+			cur = n
+		end
+		return list
+	end
+	for _, i in ipairs(order) do
+		if not AreaOf[i] then
+			local a = #Areas + 1
+			local h, v = run(i, 1), run(i, 3)
+			local strip = #h >= #v and h or v
+			if #strip >= 2 then
+				for _, n in ipairs(strip) do AreaOf[n] = a end
+				local last = strip[#strip]
+				if strip == h then
+					Areas[a] = { x0 = NX[i], y0 = NY[i], x1 = NX[last], y1 = NY[i], big = false, strip = true,
+						c00 = i, c10 = last, c01 = i, c11 = last }
+				else
+					Areas[a] = { x0 = NX[i], y0 = NY[i], x1 = NX[i], y1 = NY[last], big = false, strip = true,
+						c00 = i, c10 = i, c01 = last, c11 = last }
+				end
 			else
 				AreaOf[i] = a
 				Areas[a] = { x0 = NX[i], y0 = NY[i], x1 = NX[i], y1 = NY[i], big = false, c00 = i, c10 = i, c01 = i, c11 = i }
 			end
 		end
+	end
+	-- How far each area reaches round its points, for drawing it as a
+	-- square like the Source navmesh: half way to the next point where
+	-- there is one on every point of that side, else a person's half width
+	-- (a wall or a ledge there).
+	local S = Nav.S
+	local HALF = 16
+	local function side(A, dir)
+		local nodes = {}
+		local function at(c) nodes[#nodes + 1] = c end
+		-- the points along that side, walking from one corner to the other
+		-- +x side: up the x1 column from c10; -x: up the x0 column from c00;
+		-- +y side: along the y1 row from c01; -y: along the y0 row from c00
+		local from = (dir == 1 and A.c10) or (dir == 3 and A.c01) or A.c00
+		local step = (dir == 1 or dir == 2) and 3 or 1
+		at(from)
+		local cur, guard = from, 0
+		local stopAt = (dir == 1 and A.c11) or (dir == 2 and A.c01) or (dir == 3 and A.c11) or A.c10
+		while cur ~= stopAt and guard < AREA_MAX do
+			cur = byDir[cur][step]
+			if not cur then break end
+			at(cur)
+			guard = guard + 1
+		end
+		for _, n in ipairs(nodes) do
+			local o = byDir[n][dir]
+			if not o or byDir[o][OPP[dir]] ~= n then return HALF end
+		end
+		return S * 0.5
+	end
+	for _, A in ipairs(Areas) do
+		local p00, p11 = nodePos(A.c00), nodePos(A.c11)
+		A.ex0, A.ex1 = p00.x - side(A, 2), p11.x + side(A, 1)
+		A.ey0, A.ey1 = p00.y - side(A, 4), p11.y + side(A, 3)
 	end
 	Nav.Areas, Nav.AreaOf, Nav.AreaEdges = Areas, AreaOf, nil
 end
@@ -743,6 +811,23 @@ local function joinNodes(i, j, d, kind, h)
 	end
 end
 
+-- A moved spot within 0.6 of a square of a point next to it: that point
+-- already covers it, and a second one there would make a hall two rows of
+-- points side by side.
+local function crowded(nx, ny, bx, by, z)
+	local S = Nav.S
+	local lim = (S * 0.6) ^ 2
+	for d = 1, 8 do
+		local cx, cy = nx + DIRS[d][1], ny + DIRS[d][2]
+		local j = nodeAt(cx, cy, z, 32)
+		if j then
+			local dx, dy = cx * S + Nav.OX[j] - bx, cy * S + Nav.OY[j] - by
+			if dx * dx + dy * dy < lim then return true end
+		end
+	end
+	return false
+end
+
 -- Links node i to its 8 neighbours where a person can walk, jump up or jump
 -- down, adding new points to `queue`. A neighbour square with no point yet
 -- gets one at its grid spot, or, when a person doesn't fit there or can't get
@@ -766,11 +851,8 @@ local function expandNode(i, queue, maxNodes, canAdd, drops)
 			-- each ledge gets one jump per grid line, not three).
 			local done, best = false, nil
 			for k in pairs(tried) do tried[k] = nil end
-			local solid = 0
-			for c, o in ipairs(cellOffsets(S)) do
-				-- The middle of the square and the four spots round it all
-				-- inside a wall: the square is wall, don't try the rest.
-				if c == 6 and solid == 5 then why.wall = (why.wall or 0) + 1 break end
+			-- One spot: "walk" when joined, "solid" when inside a wall.
+			local function try(o, centre)
 				local bx, by = nx * S + o[1], ny * S + o[2]
 				-- From just above a step first (works under low ceilings); if
 				-- that's inside something, it may be a ledge to jump up on:
@@ -778,35 +860,75 @@ local function expandNode(i, queue, maxNodes, canAdd, drops)
 				local gz = groundAt(bx, by, z + STEP + 8, z - (drops or 64))
 				if not gz and groundResult.StartSolid then
 					gz = groundAt(bx, by, z + top, z - (drops or 64))
-					if not gz and groundResult.StartSolid then solid = solid + 1 end
+					if not gz and groundResult.StartSolid then return "solid" end
 				end
-				if gz then
-					local j = nodeAt(nx, ny, gz, 32)
-					if j then
-						if not tried[j] then
-							tried[j] = true
-							local jz = Nav.NZ[j]
-							local kind, h = connect(ax, ay, z, nx * S + Nav.OX[j], ny * S + Nav.OY[j], jz, drops, maxUp, d <= 4)
-							if kind == "walk" then
-								joinNodes(i, j, d, kind, h)
-								done = true
-								break
-							elseif kind and not best and d <= 4 then
-								best = { kind = kind, j = j, z = jz, h = h }
-							end
-						end
-					elseif Nav.Count < maxNodes and (not canAdd or canAdd(nx, ny, gz)) then
-						local kind, h = connect(ax, ay, z, bx, by, gz, drops, maxUp, d <= 4 and c == 1)
-						if kind == "walk" then
-							j = addNode(nx, ny, gz, o[1], o[2])
-							queue[#queue + 1] = j
-							joinNodes(i, j, d, kind, h)
-							done = true
-							break
-						elseif kind and not best and d <= 4 then
-							best = { kind = kind, z = gz, o = o, h = h }
-						end
+				if not gz then return nil end
+				local j = nodeAt(nx, ny, gz, 32)
+				if j then
+					if tried[j] then return nil end
+					tried[j] = true
+					local jz = Nav.NZ[j]
+					local kind, h = connect(ax, ay, z, nx * S + Nav.OX[j], ny * S + Nav.OY[j], jz, drops, maxUp, d <= 4)
+					if kind == "walk" then
+						joinNodes(i, j, d, kind, h)
+						return "walk"
+					elseif kind and not best and d <= 4 then
+						best = { kind = kind, j = j, z = jz, h = h }
 					end
+				elseif Nav.Count < maxNodes and (not canAdd or canAdd(nx, ny, gz))
+					and (centre or not crowded(nx, ny, bx, by, gz)) then
+					local kind, h = connect(ax, ay, z, bx, by, gz, drops, maxUp, d <= 4 and centre)
+					if kind == "walk" then
+						j = addNode(nx, ny, gz, o[1], o[2])
+						queue[#queue + 1] = j
+						joinNodes(i, j, d, kind, h)
+						return "walk"
+					elseif kind and not best and d <= 4 then
+						best = { kind = kind, z = gz, o = o, h = h }
+					end
+				end
+				return nil
+			end
+			-- The grid spot first. Then, in a hall or doorway where it doesn't
+			-- fit, the spot that keeps this point's line: going along x, the
+			-- same y offset (and the other way round), then the same offset
+			-- as this point. That way the points of a hall stay in a straight
+			-- row and join into one strip of squares, not a zig-zag.
+			local ox, oy = Nav.OX[i], Nav.OY[i]
+			local results = {}
+			local function key(o) return o[1] .. ":" .. o[2] end
+			local r = try({ 0, 0 }, true)
+			results["0:0"] = r or false
+			done = r == "walk"
+			if not done and (ox ~= 0 or oy ~= 0) then
+				local pref = {}
+				if DIRS[d][2] == 0 then pref[1] = { 0, oy }
+				elseif DIRS[d][1] == 0 then pref[1] = { ox, 0 } end
+				pref[#pref + 1] = { ox, oy }
+				for _, o in ipairs(pref) do
+					local k = key(o)
+					if results[k] == nil then
+						r = try(o, false)
+						results[k] = r or false
+						if r == "walk" then done = true break end
+					end
+				end
+			end
+			-- The rest, nearest the grid spot first. The middle of the square
+			-- and the four spots round it all inside a wall: the square is
+			-- wall, don't try the rest.
+			if not done then
+				local solid = 0
+				for c, o in ipairs(cellOffsets(S)) do
+					if c == 6 and solid == 5 then why.wall = (why.wall or 0) + 1 break end
+					local k = key(o)
+					r = results[k]
+					if r == nil then
+						r = try(o, false)
+						results[k] = r or false
+						if r == "walk" then done = true break end
+					end
+					if r == "solid" and c <= 5 then solid = solid + 1 end
 				end
 			end
 			if not done and best then

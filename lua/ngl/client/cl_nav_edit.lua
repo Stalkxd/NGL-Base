@@ -1,8 +1,8 @@
 -- Draws the NGL nav grid inside a sphere round the player while the NGL Nav
 -- Editor tool is out (the server sends it, see sv_nav_edit.lua), and the
 -- tool's circle. The sphere's size is ngl_nav_view_radius: turn it up to see
--- the whole map. Open area (NPCs walk straight across it) is filled, with a
--- faint outline; elsewhere the walk connections are drawn as blue lines.
+-- the whole map. Every area is drawn as a square, filled, with a faint
+-- outline, like GMod's own navmesh.
 NGL.NavView = NGL.NavView or { nodes = {}, links = {}, meshes = {} }
 local V = NGL.NavView
 
@@ -71,6 +71,9 @@ function V.Parse(text)
 		links[i] = { a = Vector(get(), get(), get() + UP), b = Vector(get(), get(), get() + UP), kind = get() }
 	end
 	V.linkA = get() == 1 and Vector(get(), get(), get()) or nil
+	local points = {}
+	for i = 1, get() do points[i] = Vector(get(), get(), get() + UP) end
+	V.points = points
 	V.nodes, V.links = nodes, links
 	V.tris, V.outline, V.lines = tris, outline, lines
 	freeMeshes()
@@ -128,7 +131,7 @@ hook.Add("PostDrawTranslucentRenderables", "NGL.NavView", function(depth, sky)
 			if now >= (V.snapT or 0) then
 				V.snapT = now + 0.1
 				local best, bd = nil, 160 * 160
-				for _, p in ipairs(V.nodes) do
+				for _, p in ipairs(V.points or {}) do
 					local d = p:DistToSqr(tr.HitPos)
 					if d < bd then best, bd = p, d end
 				end
