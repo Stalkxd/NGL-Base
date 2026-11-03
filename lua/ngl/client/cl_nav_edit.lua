@@ -1,8 +1,8 @@
 -- Draws the NGL nav grid inside a sphere round the player while the NGL Nav
 -- Editor tool is out (the server sends it, see sv_nav_edit.lua), and the
 -- tool's circle. The sphere's size is ngl_nav_view_radius: turn it up to see
--- the whole map. Every area is drawn as a square, filled, with a faint
--- outline, like GMod's own navmesh.
+-- the whole map. Every area is drawn as squares, filled, with a faint
+-- outline, like GMod's own navmesh, lying on hills and ramps.
 NGL.NavView = NGL.NavView or { nodes = {}, links = {}, meshes = {} }
 local V = NGL.NavView
 

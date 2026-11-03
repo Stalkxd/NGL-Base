@@ -250,27 +250,49 @@ local function alertAllies(npc, pos, now)
 	end
 end
 
--- Crowding: another NPC right in the way of where we walk. Walk round it,
--- keeping right (two meeting head on both keep right and slide past), and
--- if it's just standing there it steps aside the other way. Uses the grid
--- and positions from each NPC's last think: no extra traces, nothing for
--- NPCs that aren't moving. BehaveUpdate bends the steering (NGLSep) and
--- walks the one standing aside (NGLPush) for a moment.
-local CROWD_R = 90
+-- Pushing: NGL NPCs don't collide with each other (COLLISION_GROUP_NPC_SCRIPTED,
+-- see ENT:Initialize), so nobody blocks anybody's path and nobody has to
+-- find a new one. Instead an NPC walking into another one pushes it aside:
+-- the one in front gets a shove (NGLShove, moved a few units every tick by
+-- BehaveUpdate, see Core.ShoveStep) away from the walker's line and a little
+-- forward. The walker keeps its path and speed. Only when it's catching up
+-- (faster than the other one moves away). Uses the spatial grid and
+-- positions from each NPC's last think: no extra traces.
+local PUSH_LOOK = 24          -- how far past touching we look ahead
+local SHOVE_TIME = 0.3        -- a shove lasts this long, renewed while touching
 local function radiusOf(e) local h = e.Hull return h and h[2].x or 18 end
 
-local function crowdCheck(npc, now, pos)
+local function idOf(e) return e.EntIndex and e:EntIndex() or tonumber(tostring(e):match("0x(%x+)") or "0", 16) or 0 end
+
+local function speedOf(e)
+	local l = e.loco
+	local v = l and l.GetVelocity and l:GetVelocity()
+	if not v then return 0, 0 end
+	return v.x or 0, v.y or 0
+end
+
+local function shove(e, x, y, speed, now)
+	if e.IsVehicleNPC or e.NGLTraverse or e.NGLDying then return end
+	local sh = e.NGLShove
+	if sh and now < sh.untilT and sh.speed > speed then return end -- a harder shove wins
+	e.NGLShove = { x = x, y = y, speed = speed, untilT = now + SHOVE_TIME }
+end
+Core.Shove = shove
+
+local function pushCheck(npc, now, pos)
 	local g = npc.NGLSteer
 	if not (g and npc.NGLMoving) or npc.IsVehicleNPC then return end
 	local dx, dy = g.x - pos.x, g.y - pos.y
 	local l = math.sqrt(dx * dx + dy * dy)
 	if l < 8 then return end
 	dx, dy = dx / l, dy / l
-	local look = math.min(CROWD_R, l + 16)
+	local vx, vy = speedOf(npc)
+	local mySpeed = vx * dx + vy * dy
+	if mySpeed < 30 then mySpeed = npc.NGLMoveMode == "walk" and 90 or 180 end -- just starting
 	local myR = radiusOf(npc)
-	local best, bestA, bestS, bestW
-	local x0, x1 = floor((pos.x - CROWD_R) / CELL) + OFFSET, floor((pos.x + CROWD_R) / CELL) + OFFSET
-	local y0, y1 = floor((pos.y - CROWD_R) / CELL) + OFFSET, floor((pos.y + CROWD_R) / CELL) + OFFSET
+	local reach = myR + 40 + PUSH_LOOK
+	local x0, x1 = floor((pos.x - reach) / CELL) + OFFSET, floor((pos.x + reach) / CELL) + OFFSET
+	local y0, y1 = floor((pos.y - reach) / CELL) + OFFSET, floor((pos.y + reach) / CELL) + OFFSET
 	for x = x0, x1 do
 		local base = x * 4096
 		for y = y0, y1 do
@@ -278,38 +300,39 @@ local function crowdCheck(npc, now, pos)
 			if c then
 				for e in pairs(c) do
 					local p = e.NGLGridPos
-					if p and e ~= npc and not e.NGLDying then
+					if p and e ~= npc and not e.NGLDying and not e.IsVehicleNPC and abs(p.z - pos.z) < 64 then
 						local ox, oy = p.x - pos.x, p.y - pos.y
 						local along = ox * dx + oy * dy
-						local w = myR + radiusOf(e) + 8
-						if along > 0 and along < look + w and (not bestA or along < bestA) then
+						local w = myR + radiusOf(e)
+						if along > -w * 0.5 and along < w + PUSH_LOOK then
 							local side = oy * dx - ox * dy -- > 0: left of our line
-							if side < w and side > -w then best, bestA, bestS, bestW = e, along, side, w end
+							if side < w and side > -w then
+								-- Catching up with it?
+								local ex, ey = speedOf(e)
+								local closing = mySpeed - (ex * dx + ey * dy)
+								if closing > 20 then
+									-- Off our line, to whichever side it's on (right on
+									-- it: our right, so two meeting head on pass).
+									local s
+									if side > 2 then s = 1 else s = -1 end
+									local px, py = -dy * s * 0.85 + dx * 0.5, dx * s * 0.85 + dy * 0.5
+									local pl = math.sqrt(px * px + py * py)
+									shove(e, px / pl, py / pl, math.min(closing, 220), now)
+								end
+							end
 						end
 					end
 				end
 			end
 		end
 	end
-	if not best then return end
-	local s = bestS >= 0 and -1 or 1 -- which way we go: -1 right, 1 left
-	npc.NGLSep = { x = -dy * s, y = dx * s, w = bestW, untilT = now + 0.7 }
-	if not best.NGLMoving and not best.IsVehicleNPC and best.NGLEnemy == nil and not best.NGLAnimUntil
-		and now >= (best.NGLPushUntil or 0) then
-		best.NGLPush = { x = dy * s, y = -dx * s, untilT = now + 0.8 }
-		best.NGLPushUntil = now + 1.5
-	end
 end
-Core.CrowdCheck = crowdCheck
+Core.PushCheck = pushCheck
 
--- Pressed into each other (sidestepping in a fight, walking the same shared
--- path, spawned on the same spot): both are steered apart (NGLUnstick, see
--- BehaveUpdate) and, while they still overlap, slid apart a few units every
--- think (SetPos, after a hull trace says there's room). NextBots don't push
--- each other, so this is what keeps them from walking around as one.
--- Positions from the spatial grid; a trace only while overlapping.
-local UNSTICK_TIME = 0.5
-local SLIDE_STEP = 8        -- units slid apart per think while overlapping
+-- Standing inside each other (sidestepping in a fight, two walking to the
+-- same spot): both are shoved apart, slowly, until they're clear. Nobody's
+-- path or goal changes. Positions from the spatial grid.
+local OVERLAP_SPEED = 70
 local nudgeTrace = { mask = MASK_NPCSOLID_BRUSHONLY, output = {} }
 
 local function boundsOf(npc)
@@ -331,7 +354,19 @@ local function slideTo(npc, pos, to)
 	return true
 end
 
-local function idOf(e) return e.EntIndex and e:EntIndex() or tonumber(tostring(e):match("0x(%x+)") or "0", 16) or 0 end
+-- One tick of a shove (BehaveUpdate): moved `interval` seconds' worth, if
+-- there's room. Returns the new position, or nil when it's over or blocked.
+function Core.ShoveStep(npc, pos, interval, now)
+	local sh = npc.NGLShove
+	if not sh then return nil end
+	if now >= sh.untilT or npc.IsVehicleNPC then npc.NGLShove = nil return nil end
+	local step = sh.speed * math.min(interval or 0.015, 0.1)
+	if step < 0.5 then return nil end
+	local to = Vector(pos.x + sh.x * step, pos.y + sh.y * step, pos.z)
+	if slideTo(npc, pos, to) then return to end
+	npc.NGLShove = nil -- against a wall: stays where it is
+	return nil
+end
 
 -- The way a is pushed away from b: straight apart, or, right on top of each
 -- other, a way both of them agree on (from their entity numbers).
@@ -350,7 +385,6 @@ local function overlapCheck(npc, now, pos)
 	if npc.IsVehicleNPC then return end
 	local myR = radiusOf(npc)
 	local reach = myR + 40
-	local best, bestD
 	local x0, x1 = floor((pos.x - reach) / CELL) + OFFSET, floor((pos.x + reach) / CELL) + OFFSET
 	local y0, y1 = floor((pos.y - reach) / CELL) + OFFSET, floor((pos.y + reach) / CELL) + OFFSET
 	for x = x0, x1 do
@@ -363,24 +397,15 @@ local function overlapCheck(npc, now, pos)
 					if p and e ~= npc and not e.NGLDying and not e.IsVehicleNPC and abs(p.z - pos.z) < 64 then
 						local ox, oy = pos.x - p.x, pos.y - p.y
 						local gap = math.sqrt(ox * ox + oy * oy) - myR - radiusOf(e)
-						if gap < 2 and (not bestD or gap < bestD) then best, bestD = e, gap end
+						if gap < -2 then
+							local bx, by = apartDir(npc, pos, e, p)
+							local sp = math.min(OVERLAP_SPEED, 20 - gap * 3)
+							shove(npc, bx, by, sp, now)
+							shove(e, -bx, -by, sp, now)
+						end
 					end
 				end
 			end
-		end
-	end
-	if not best then return end
-	local bp = best.NGLGridPos
-	local bx, by = apartDir(npc, pos, best, bp)
-	npc.NGLUnstick = { x = bx, y = by, untilT = now + UNSTICK_TIME }
-	if not best.NGLTraverse then best.NGLUnstick = { x = -bx, y = -by, untilT = now + UNSTICK_TIME } end
-	-- Really inside each other: slide apart now, each its half.
-	if bestD < -4 and not npc.NGLTraverse then
-		local step = math.min(-bestD * 0.5 + 1, SLIDE_STEP)
-		slideTo(npc, pos, Vector(pos.x + bx * step, pos.y + by * step, pos.z))
-		if not best.NGLTraverse and best.SetPos then
-			local cur = best:GetPos() -- its grid position may be a second old
-			slideTo(best, cur, Vector(cur.x - bx * step, cur.y - by * step, cur.z))
 		end
 	end
 end
@@ -1310,7 +1335,7 @@ local function think(npc, now, dt, nearestPlayerSqr)
 		npc.NGLGridPos = pos
 	end
 	if not npc.NGLTraverse then
-		crowdCheck(npc, now, pos)
+		pushCheck(npc, now, pos)
 		overlapCheck(npc, now, pos)
 		-- A closed door in the way: open it or kick it in (sv_doors.lua).
 		local D = NGL.Doors

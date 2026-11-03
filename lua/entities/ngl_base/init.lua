@@ -251,6 +251,13 @@ function ENT:Initialize()
 	self.loco:SetDeceleration(900)
 	self.loco:SetStepHeight(18)
 
+	-- NGL NPCs walk through each other (no blocked paths, no new paths to
+	-- find in a crowd) and push each other aside instead (Core.PushCheck).
+	-- Bullets, players, props and other NPCs still hit them.
+	if not self.IsVehicleNPC and COLLISION_GROUP_NPC_SCRIPTED then
+		self:SetCollisionGroup(COLLISION_GROUP_NPC_SCRIPTED)
+	end
+
 	-- Spawned by the benchmark harness: put each team in its own faction and
 	-- leave players alone.
 	if self.NGLTeam then
@@ -377,6 +384,15 @@ function ENT:BehaveUpdate(interval)
 		return
 	end
 
+	-- Pushed by another NGL NPC walking into us (Core.PushCheck), or two
+	-- standing inside each other (Core.OverlapCheck): moved aside a little
+	-- this tick. Nobody's path changes; NGL NPCs don't collide with each
+	-- other at all.
+	if self.NGLShove then
+		local to = NGL.Core.ShoveStep(self, pos, interval, CurTime())
+		if to then pos = to end
+	end
+
 	if not goal then
 		goal = self.NGLGoal
 		local reach = self.WaypointRadius
@@ -413,32 +429,9 @@ function ENT:BehaveUpdate(interval)
 		return
 	end
 
-	-- Someone in the way (Core.CrowdCheck): bend round them for a moment;
-	-- standing in someone's way: step aside.
 	local now = CurTime()
-	local sep = self.NGLSep
-	if sep then
-		if now >= sep.untilT then
-			self.NGLSep = nil
-		elseif goal then
-			local dx, dy = goal.x - pos.x, goal.y - pos.y
-			local l = math.sqrt(dx * dx + dy * dy)
-			if l > 1 then
-				local w = math.max(sep.w, 40)
-				goal = Vector(pos.x + dx / l * 40 + sep.x * w, pos.y + dy / l * 40 + sep.y * w, goal.z)
-			end
-		end
-	end
-	local push = self.NGLPush
-	if push then
-		if now >= push.untilT then
-			self.NGLPush = nil
-		elseif not goal then
-			goal = Vector(pos.x + push.x * 48, pos.y + push.y * 48, pos.z)
-		end
-	end
-	-- Pressed into another NPC (Core.CrowdCheck): move apart, whatever else
-	-- we're doing, until we're clear.
+	-- Walking into a wall or door frame (Core.SlideAlongWall): slide along it
+	-- for a moment.
 	local un = self.NGLUnstick
 	if un then
 		if now >= un.untilT then
