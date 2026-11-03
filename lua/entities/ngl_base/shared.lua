@@ -49,12 +49,15 @@ ENT.JumpGap = true              -- jumps across gaps (jump links placed with the
 ENT.Climb = 0                   -- climbs up and down climb links up to this high (placed with the tool;
 								-- for fast zombies, antlions and the like); 0 = never
 ENT.ClimbRate = 250             -- units per second up or down a climb
+--                                 (ngl_nav_generate puts climb links at walls too high to jump,
+--                                 up to ngl_nav_max_climb: only there, not on open ledges)
 ENT.OpenDoors = true            -- opens closed doors in its way
 ENT.DoorBreach = false          -- kicks doors in instead, locked ones too (Combine, rebels); see ngl_door_breach
 ENT.Squad = nil                 -- set to lead a squad on its own, see sv_squad.lua:
 --                                 { Max = 10, Recruit = { "ngl_combine_soldier" }, RecruitRadius = 1500,
 --                                   Scouts = 3, ScoutRadius = 400, ScoutTime = 20, LostDelay = 2 }
 ENT.NavWidth = nil              -- half width for path-finding when wider than a person (vehicles: ~80)
+ENT.Hull = nil                  -- { mins, maxs } collision box when not a person's (headcrabs: small)
 ENT.DriveLikeVehicle = false    -- turns to face where it goes before moving, never strafes
 ENT.Commandable = false         -- squad leaders of its faction nearby may order it (vehicles)
 ENT.OrderKinds = nil            -- { mykind = true }: extra order kinds this NPC runs itself (in OnAIThink)
@@ -92,6 +95,33 @@ ENT.Weapon = {
 -- 	HitSound = nil, MissSound = nil, -- sound or list of sounds
 -- }
 ENT.Melee = nil
+
+-- Leap attack (headcrabs, fast zombies; sv_leap.lua); nil for none. An NPC
+-- with no Weapon leaps at an enemy it can see between MinDist and MaxDist
+-- when the way is clear, and hurts it if it touches it on the way.
+-- ENT.LeapAttack = {
+-- 	Damage = 10,
+-- 	MinDist = 0, MaxDist = 250,   -- leaps at enemies this far away
+-- 	MaxRise = 96,                 -- not at enemies more than this above it
+-- 	Delay = 3,                    -- seconds between leaps
+-- 	Chance = 1,                   -- chance to leap each time it could (0.5 checks a second later otherwise)
+-- 	Reach = 32,                   -- touching distance in flight
+-- 	DamageType = DMG_SLASH, Force = 200,
+-- 	Poison = false,               -- true: HL2 poison bite, takes a player down to 1 health (NPCs take NPCDamage)
+-- 	NPCDamage = nil,              -- damage to NPCs when Poison
+-- 	Anim = nil, LandAnim = nil,   -- activity, sequence name or a list tried in order
+-- 	Sound = nil,                  -- Sounds kind ("Leap") or a sound path, at take-off
+-- 	HitSound = nil,               -- sound or list, when it hits
+-- 	Recover = 0.4,                -- seconds after landing before it does anything else
+-- }
+ENT.LeapAttack = nil
+
+-- Zombies: the headcrab that comes off when it dies (sv_zombies.lua), an
+-- NGL headcrab class, or nil. Not when the head was hit or it was blown up
+-- (HL2 rules). ngl_zombie_headcrabs 0 turns it off, ngl_headcrab_max caps
+-- the crabs alive at once.
+ENT.Headcrab = nil
+ENT.HeadcrabBodygroup = nil     -- bodygroup that shows the crab on the model (1 on HL2 zombies)
 
 -- Voice. Each kind is a sound or a list (one picked at random). Kinds:
 -- Alert (new enemy), Idle (now and then when idle), Pain, Death, Reload,
@@ -166,9 +196,12 @@ ENT.Anims = {
 --                                   (investigate alerts, wander)
 -- ENT:OnCombat(enemy, dist, visible) has an enemy; return true to skip the
 --                                   default (chase, strafe, attack)
--- ENT:OnAttack(enemy, kind)         about to attack, kind = "ranged" or
+-- ENT:OnAttack(enemy, kind)         about to attack, kind = "ranged", "leap" or
 --                                   "melee"; return true to skip it (do your own)
 -- ENT:OnMeleeHit(target, hit)       a melee blow landed (hit = true) or missed
+-- ENT:OnLeapHit(target, hit)        a leap hit (hit = true) or landed without
+--                                   touching anyone; OnAttack(enemy, "leap")
+--                                   runs before each leap
 -- ENT:OnAlerted(ally, pos)          an ally spotted an enemy at pos; return
 --                                   true to stay put
 -- ENT:OnReload()                    started reloading
@@ -188,6 +221,7 @@ ENT.Anims = {
 --              NGL.FindInRadius(pos, radius, filter)
 --   Combat:    self:FireWeapon(ent, shots)  self:MeleeAttack(ent)
 --              self:FireProjectile(entOrPos, def)  self:DealDamage(ent, amount, type, force)
+--              self:Leap(entOrPos, def)  self:CanLeap(ent)  self:IsLeaping()
 --   Animation: self:PlayAnim(actOrSequence, lock, rate)  self:PlayGesture(actOrSequence)
 --   Sound:     self:Speak(kindOrPath)
 --   State:     self:IsNearPlayer()  self:IsDetailed()  self:IsBusy()

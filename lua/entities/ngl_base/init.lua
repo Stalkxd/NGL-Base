@@ -33,6 +33,7 @@ function ENT:OnIdle() end
 function ENT:OnCombat(enemy, dist, visible) end
 function ENT:OnAttack(enemy, kind) end
 function ENT:OnMeleeHit(target, hit) end
+function ENT:OnLeapHit(target, hit) end
 function ENT:OnOrder(order) end
 function ENT:OnOrderDone(order, reason) end
 
@@ -257,6 +258,11 @@ function ENT:Initialize()
 	if not self.IsVehicleNPC and COLLISION_GROUP_NPC_SCRIPTED then
 		self:SetCollisionGroup(COLLISION_GROUP_NPC_SCRIPTED)
 	end
+	-- Smaller (headcrabs) or bigger than a person.
+	local hull = self.Hull
+	if hull then self:SetCollisionBounds(hull[1], hull[2]) end
+	-- Zombies: show the headcrab riding on it (sv_zombies.lua).
+	if self.Headcrab and NGL.Zombie then NGL.Zombie.ShowCrab(self, true) end
 
 	-- Spawned by the benchmark harness: put each team in its own faction and
 	-- leave players alone.
@@ -379,6 +385,13 @@ function ENT:BehaveUpdate(interval)
 	-- In the air or climbing: nothing else until we're there.
 	if self.NGLTraverse then
 		self:NGLTraverseUpdate(CurTime())
+		local B = NGL.Bench
+		if B then B.LuaTime = B.LuaTime + (SysTime() - t0) end
+		return
+	end
+	-- Leaping at someone (sv_leap.lua): one touch check a tick until it lands.
+	if self.NGLLeapState then
+		NGL.Leap.Update(self, CurTime())
 		local B = NGL.Bench
 		if B then B.LuaTime = B.LuaTime + (SysTime() - t0) end
 		return
@@ -552,6 +565,7 @@ end
 -- where the grid says.
 local UP_TIME = 0.45     -- s for a hop up, plus a little per unit of height
 local UP_CLEAR = 16      -- how far above the ledge the hop goes
+local climbTrace = { mask = MASK_NPCSOLID_BRUSHONLY }
 
 -- `h`: the link's height (start above landing); for a jump over something
 -- (a vault), minus how high it has to go.
@@ -576,9 +590,37 @@ function ENT:NGLStartTraverse(move, to, h)
 		local anim = A.JumpUp or A.Jump
 		if anim then self:PlayAnim(anim, false) end
 	elseif move == "climb" then
-		T.over = 0.3 -- across the top
-		T.dur = T.over + math.max(math.abs(rise) / (self.ClimbRate or 250), 0.3)
-		local anim = rise >= 0 and A.ClimbUp or A.ClimbDown or A.ClimbUp or A.Glide
+		-- To the foot of the wall, up it, over the top (or the other way
+		-- round going down). The wall is found with one trace from the
+		-- bottom end towards the top end, so the NPC climbs the wall itself,
+		-- not the air in front of it.
+		local up = rise >= 0
+		local low, high = up and from or to, up and to or from
+		local d = high - low
+		d.z = 0
+		local len = d:Length()
+		local foot = 0
+		if len > 1 then
+			d:Mul(1 / len)
+			climbTrace.start = Vector(low.x, low.y, low.z + 26)
+			climbTrace.endpos = Vector(low.x + d.x * len, low.y + d.y * len, low.z + 26)
+			climbTrace.filter = self
+			local tr = util.TraceLine(climbTrace)
+			if tr.Hit and not tr.StartSolid then foot = math.max(tr.Fraction * len - 16, 0) end
+		end
+		local wall = Vector(low.x + d.x * foot, low.y + d.y * foot, low.z)
+		local wallTop = Vector(wall.x, wall.y, high.z)
+		local pts = up and { from, wall, wallTop, to } or { from, wallTop, wall, to }
+		local rate = self.ClimbRate or 250
+		local times = { 0 }
+		for k = 2, 4 do
+			local seg = pts[k] - pts[k - 1]
+			local vertical = k == 3
+			times[k] = times[k - 1] + (vertical and math.max(math.abs(seg.z) / rate, 0.3) or math.max(seg:Length() / 200, 0.12))
+		end
+		T.pts, T.times = pts, times
+		T.dur = times[4]
+		local anim = up and A.ClimbUp or A.ClimbDown or A.ClimbUp or A.Glide
 		T.anim = anim
 		if anim then self:PlayAnim(anim, false) end
 	else
@@ -603,16 +645,17 @@ local function scriptedPos(T, t)
 		local g = f * f
 		return Vector(from.x + (to.x - from.x) * g, from.y + (to.y - from.y) * g, z)
 	end
-	-- climb: up the wall then over the top, or over the edge then down.
-	local over = T.over / T.dur
-	local up = to.z >= from.z
-	local vf, hf
-	if up then
-		vf, hf = math.min(f / (1 - over), 1), math.max((f - (1 - over)) / over, 0)
-	else
-		hf, vf = math.min(f / over, 1), math.max((f - over) / (1 - over), 0)
+	-- climb: along the corners worked out in NGLStartTraverse.
+	local pts, times = T.pts, T.times
+	for k = 2, 4 do
+		if t <= times[k] or k == 4 then
+			local a, b = pts[k - 1], pts[k]
+			local span = times[k] - times[k - 1]
+			local g = span > 0 and math.Clamp((t - times[k - 1]) / span, 0, 1) or 1
+			return a + (b - a) * g
+		end
 	end
-	return Vector(from.x + (to.x - from.x) * hf, from.y + (to.y - from.y) * hf, from.z + (to.z - from.z) * vf)
+	return to
 end
 
 function ENT:NGLTraverseUpdate(now)
@@ -664,6 +707,10 @@ function ENT:OnKilled(dmginfo)
 	self:NGLSound("Death")
 	self:OnDeath(dmginfo)
 	NGL.Core.Remove(self)
+	self.NGLLeapState = nil
+	-- Zombies: the headcrab jumps off (sv_zombies.lua), before the body
+	-- becomes a ragdoll so the ragdoll is without it.
+	if self.Headcrab and NGL.Zombie then NGL.Zombie.OnKilled(self, dmginfo) end
 
 	local mode = cvRagdolls:GetInt()
 	if mode == 2 then
@@ -783,6 +830,20 @@ end
 function ENT:DealDamage(target, amount, dmgType, force)
 	core().Damage(self, target, amount, dmgType, nil, force)
 end
+
+-- Leap at an entity or a position (sv_leap.lua), with `def` or the NPC's
+-- LeapAttack. Ignores the range and the cooldown; CanLeap checks those.
+function ENT:Leap(target, def)
+	def = def or self.LeapAttack
+	if not def then return false end
+	return NGL.Leap.Start(self, target, def, CurTime())
+end
+-- Could it leap at `ent` right now (range, height, cooldown, clear way)?
+function ENT:CanLeap(ent, def)
+	if not IsValid(ent) then return false end
+	return NGL.Leap.Can(self, ent, self:GetPos():Distance(ent:GetPos()), CurTime(), def or self.LeapAttack)
+end
+function ENT:IsLeaping() return self.NGLLeapState ~= nil end
 
 -- Animation --------------------------------------------------------------
 

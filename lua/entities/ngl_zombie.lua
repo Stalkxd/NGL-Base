@@ -1,4 +1,5 @@
 -- Example NGL NPC: a melee-only zombie. No gun, no code: just fields.
+-- Its headcrab jumps off when it dies (ENT.Headcrab).
 AddCSLuaFile()
 
 ENT.Base = "ngl_base"
@@ -18,6 +19,8 @@ ENT.JumpDown = 250              -- drops off ledges, but doesn't jump gaps or op
 ENT.JumpGap = false
 ENT.JumpUp = 0                  -- too clumsy to jump up
 ENT.OpenDoors = false
+ENT.Headcrab = "ngl_headcrab"   -- the crab comes off when it dies (not after a head shot)
+ENT.HeadcrabBodygroup = 1
 
 ENT.WeaponModel = false
 ENT.Weapon = false

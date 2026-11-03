@@ -14,6 +14,10 @@
 --             moves to a new hidden spot after a few seconds.
 --   defender  holds the spot where the fight started: crouches, shoots from
 --             there, ducks out of sight when hurt, doesn't chase far.
+--   ambusher  for NPCs without a gun (fast zombies): never comes at you
+--             where you're looking. While you watch it, it runs to a spot
+--             at your side or back you can't see, waits there until you
+--             look away or come close, then rushes and leaps at you.
 --
 -- Your own mode (any addon, server side):
 --   NGL.RegisterAIMode("sniper", {
@@ -25,7 +29,8 @@
 --   })
 --   ENT.AIMode = "sniper"
 -- Fight is called with visible = false while the enemy is out of sight,
--- and with visible = true after the melee check. Build it from the same
+-- and with visible = true after the melee check (for NPCs without a gun,
+-- before closing in and leaping). Build it from the same
 -- blocks the built-in modes use: NGL.Core.Chase, .Shoot, .Strafe,
 -- .StopMoving, .FindHiddenSpot, .HiddenFrom, .EyeOf, .FacingYaw, .GridSpot,
 -- or the ENT building blocks (self:MoveTo, self:FireWeapon...).
@@ -281,6 +286,119 @@ NGL.RegisterAIMode("defender", {
 			Core.Strafe(npc, now, pos, tPos, mode.StandChance, mode.CrouchChance, 40, 100, home, leash)
 		end
 		if dist < npc.AttackRange * 1.5 then Core.Shoot(npc, now, dt, enemy) else npc.NGLFireAccum = 0 end
+		return true
+	end,
+})
+
+----------------------------------------------------------------------------
+-- ambusher: melee NPCs that come at you from out of sight.
+----------------------------------------------------------------------------
+
+-- Spots at the enemy's sides and back.
+local AMBUSH_YAWS = { 90, -90, 125, -125, 160, -160, 180 }
+local ambushYaws = {}
+local sqrt, cos, sin, rad = math.sqrt, math.cos, math.sin, math.rad
+
+-- Is `enemy` looking our way (within about 55 degrees)? Math only.
+local function watching(enemy, pos)
+	local Core = core()
+	local eye = Core.EyeOf(enemy)
+	local dx, dy = pos.x - eye.x, pos.y - eye.y
+	local l = sqrt(dx * dx + dy * dy)
+	if l < 1 then return true end
+	local r = rad(Core.FacingYaw(enemy))
+	return (dx * cos(r) + dy * sin(r)) / l > 0.57
+end
+
+NGL.RegisterAIMode("ambusher", {
+	Strike = 420,          -- this close: rush in whatever it's looking at
+	HideMin = 300,         -- hiding spots this far from the enemy
+	HideMax = 650,
+	WaitTime = { 1.5, 4 }, -- seconds waiting in hiding at most
+	MoveTime = 8,          -- seconds to reach a hiding spot before giving up on it
+	RushTime = 5,          -- seconds of rushing before it may hide again
+	HideDelay = 6,         -- seconds between looking for hiding spots
+
+	Fight = function(npc, enemy, dist, visible, now, dt)
+		if npc.Weapon then return end -- gunmen: see flanker
+		local Core = core()
+		local mode = npc.NGLMode
+		local pos, tPos = npc:GetPos(), enemy:GetPos()
+		local A = npc.NGLAmbush
+		if A and A.enemy ~= enemy then A = nil end
+
+		-- Close: go for it (the default leaps and claws).
+		if dist < (mode.Strike or 420) then
+			if not A or A.phase ~= "rush" then
+				npc.NGLAmbush = { enemy = enemy, phase = "rush", untilT = now + (mode.RushTime or 5) }
+			end
+			return
+		end
+
+		if A and A.phase == "rush" then
+			if now < A.untilT then
+				if visible then return end
+				-- Lost sight while rushing: it still knows where you went.
+				npc:NGLSetMoveMode("run")
+				Core.Chase(npc, now, pos, tPos, false)
+				npc.NGLFace = nil
+				return true
+			end
+			A = nil
+		end
+
+		if not A then
+			npc.NGLAmbush = nil
+			if not visible then return end -- hunt where it was last seen
+			if now < (npc.NGLNextAmbush or 0) or not watching(enemy, pos) then
+				-- Not looking our way (or we only just hid): rush now.
+				npc.NGLAmbush = { enemy = enemy, phase = "rush", untilT = now + (mode.RushTime or 5) }
+				return
+			end
+			npc.NGLNextAmbush = now + (mode.HideDelay or 6)
+			local face = Core.FacingYaw(enemy)
+			for i, a in ipairs(AMBUSH_YAWS) do ambushYaws[i] = face + a end
+			local spot = Core.FindHiddenSpot(npc, Core.EyeOf(enemy), tPos, mode.HideMin or 300, mode.HideMax or 650, ambushYaws)
+			if not spot then
+				npc.NGLAmbush = { enemy = enemy, phase = "rush", untilT = now + (mode.RushTime or 5) }
+				return
+			end
+			A = { enemy = enemy, phase = "move", spot = spot, from = tPos, untilT = now + (mode.MoveTime or 8) }
+			npc.NGLAmbush = A
+			Core.StopMoving(npc)
+		end
+
+		-- The enemy moved far from where we planned round: plan again.
+		if A.from:DistToSqr(tPos) > 500 * 500 then
+			npc.NGLAmbush, npc.NGLNextAmbush = nil, 0
+			return
+		end
+		npc.NGLLastSeenT = now -- it keeps track of you while it hides
+
+		if A.phase == "move" then
+			if pos:DistToSqr(A.spot) < 80 * 80 or now > A.untilT then
+				local w = mode.WaitTime or { 1.5, 4 }
+				A.phase, A.untilT = "wait", now + Rand(w[1], w[2])
+				Core.StopMoving(npc)
+				return true
+			end
+			npc.NGLCrouch = false
+			npc:NGLSetMoveMode("run")
+			Core.Chase(npc, now, pos, A.spot, false)
+			npc.NGLFace = nil
+			return true
+		end
+
+		-- Waiting out of sight: go when it looks away or time's up.
+		if now >= A.untilT or not watching(enemy, pos) then
+			npc.NGLAmbush = { enemy = enemy, phase = "rush", untilT = now + (mode.RushTime or 5) }
+			npc:NGLSound("Alert", true)
+			npc:NGLSetMoveMode("run")
+			Core.Chase(npc, now, pos, tPos, visible)
+			return true
+		end
+		if npc.NGLGoal or npc.NGLPath or npc.NGLPathPending then Core.StopMoving(npc) end
+		npc.NGLFace = tPos
 		return true
 	end,
 })

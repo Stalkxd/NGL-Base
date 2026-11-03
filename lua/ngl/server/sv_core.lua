@@ -1543,6 +1543,14 @@ local function think(npc, now, dt, nearestPlayerSqr)
 
 	local w = npc.Weapon
 	if not w then
+		-- No gun: the AI mode first (the ambusher hides and waits), then a
+		-- leap when it has one (ENT.LeapAttack, sv_leap.lua).
+		if fight and fight(npc, enemy, dist, true, now, dt) == true then return end
+		local lp = npc.LeapAttack
+		if lp and NGL.Leap and NGL.Leap.Can(npc, enemy, dist, now, lp) then
+			if npc:OnAttack(enemy, "leap") ~= true then NGL.Leap.Start(npc, enemy, lp, now) end
+			return
+		end
 		-- Melee only: close in (straight, since we can see it) and wait for the next swing.
 		npc:NGLSetMoveMode("run")
 		npc.NGLFace = tPos

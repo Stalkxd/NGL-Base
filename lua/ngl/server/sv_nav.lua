@@ -1347,6 +1347,8 @@ local function generate(report)
 	end
 
 	flood(queue, maxNodes, nil, cvDrops:GetBool() and cvMaxDrop:GetFloat() or nil, cvGenBudget:GetFloat() / 1000, report)
+	-- Climb links at high walls, for climbing NPCs (sv_nav_climb.lua).
+	if Nav.ClimbPass then Nav.ClimbPass(cvGenBudget:GetFloat() / 1000, report) end
 
 	buildNeighbours()
 	buildLinks()
