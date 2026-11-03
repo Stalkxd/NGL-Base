@@ -7,7 +7,11 @@ local cvRagdolls = CreateConVar("ngl_ragdolls", "1", FCVAR_ARCHIVE,
 
 local NEAR_GOAL_SQR = 32 * 32
 local WAYPOINT_SQR = 40 * 40
-local EDGE_MOVE = 24      -- walked this far: look for the grid's edge again
+local TIGHT_SQR = 16 * 16 -- waypoints in narrow places (doorways): get this close before turning
+local EDGE_MOVE = 24      -- walked this far: look for a drop ahead again
+local EDGE_LOOK = 40      -- how far ahead
+local EDGE_DROP = 36      -- deeper than this (and no path jumping it) is a drop
+local edgeTrace = { mask = MASK_NPCSOLID_BRUSHONLY, output = {} }
 
 local BASE_ANIMS = ENT.Anims
 local ANIM_FALLBACK = { IdleAim = "Idle", Walk = "Run", WalkAim = "Walk", RunAim = "Run", CrouchAim = "CrouchIdle", CrouchIdle = "CrouchAim" }
@@ -346,7 +350,9 @@ function ENT:BehaveUpdate(interval)
 		if wp then
 			local dx, dy = wp.x - pos.x, wp.y - pos.y
 			local reach = self.WaypointRadius
-			if dx * dx + dy * dy < (reach and reach * reach or WAYPOINT_SQR) and not self.NGLTraverse then
+			local r2 = reach and reach * reach or WAYPOINT_SQR
+			if path.tight and path.tight[idx] then r2 = math.min(r2, TIGHT_SQR) end
+			if dx * dx + dy * dy < r2 and not self.NGLTraverse then
 				-- At a ledge or gap on the path: jump (or climb) to the next point.
 				local L = path.links and path.links[idx]
 				idx = idx + 1
@@ -448,26 +454,30 @@ function ENT:BehaveUpdate(interval)
 		end
 	end
 	-- Not on a path (walking straight at someone, strafing, stepping aside):
-	-- don't walk off the grid's edge, a drop or ledge it has no jump for.
-	-- Asked of the grid (no traces) about a grid square ahead, again every
-	-- 0.3 s, every EDGE_MOVE units walked, or when we turn.
+	-- don't walk off a drop. One short trace down just ahead (not the grid,
+	-- which may be patchy at door frames and wall corners), again every
+	-- 0.25 s, every EDGE_MOVE units walked, or when we turn.
 	if goal and not onPath and not self.IsVehicleNPC then
-		local nav = NGL.Nav
 		local dx, dy = goal.x - pos.x, goal.y - pos.y
 		local l = math.sqrt(dx * dx + dy * dy)
-		if l > 1 and nav and nav.Loaded then
+		if l > 1 then
 			dx, dy = dx / l, dy / l
 			local E = self.NGLEdge
 			if not E or now >= E.t or dx * E.x + dy * E.y < 0.7
 				or (pos.x - E.px) ^ 2 + (pos.y - E.py) ^ 2 > EDGE_MOVE * EDGE_MOVE then
-				local look = math.min(l, nav.S)
-				local ahead = Vector(pos.x + dx * look, pos.y + dy * look, pos.z)
-				E = { t = now + 0.3, x = dx, y = dy, px = pos.x, py = pos.y, blocked = nav.WalkLine(pos, ahead) == false }
+				local look = math.min(l, EDGE_LOOK)
+				edgeTrace.start = Vector(pos.x + dx * look, pos.y + dy * look, pos.z + 24)
+				edgeTrace.endpos = Vector(pos.x + dx * look, pos.y + dy * look, pos.z - EDGE_DROP)
+				edgeTrace.filter = self
+				local tr = util.TraceLine(edgeTrace)
+				-- Inside something (a wall ahead) isn't a drop: walking into a
+				-- wall is for the stuck check.
+				E = { t = now + 0.25, x = dx, y = dy, px = pos.x, py = pos.y, blocked = not tr.Hit and not tr.StartSolid }
 				self.NGLEdge = E
 			end
 			if E.blocked then
 				goal = nil
-				-- Going straight at someone: take the grid's way round instead.
+				-- Going straight at someone: take a path round instead.
 				if self.NGLDirect then self.NGLForcePathUntil = now + 5 end
 			end
 		end

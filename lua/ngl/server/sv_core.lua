@@ -302,18 +302,55 @@ local function crowdCheck(npc, now, pos)
 end
 Core.CrowdCheck = crowdCheck
 
--- Pressed into each other (side-stepping in a fight, two strafing the same
--- way): both get moved apart (NGLUnstick, see BehaveUpdate) until they're
--- clear. Stuck like that for a second: a small nudge apart, if there's room.
--- Positions from the spatial grid, so no traces unless really stuck.
+-- Pressed into each other (sidestepping in a fight, walking the same shared
+-- path, spawned on the same spot): both are steered apart (NGLUnstick, see
+-- BehaveUpdate) and, while they still overlap, slid apart a few units every
+-- think (SetPos, after a hull trace says there's room). NextBots don't push
+-- each other, so this is what keeps them from walking around as one.
+-- Positions from the spatial grid; a trace only while overlapping.
 local UNSTICK_TIME = 0.5
-local NUDGE_AFTER = 1
+local SLIDE_STEP = 8        -- units slid apart per think while overlapping
 local nudgeTrace = { mask = MASK_NPCSOLID_BRUSHONLY, output = {} }
+
+local function boundsOf(npc)
+	local mins, maxs
+	if npc.GetCollisionBounds then mins, maxs = npc:GetCollisionBounds() end
+	return mins or Vector(-16, -16, 0), maxs or Vector(16, 16, 72)
+end
+
+-- Moves npc from pos to `to` if its hull fits all the way (world only).
+local function slideTo(npc, pos, to)
+	local t = nudgeTrace
+	t.start, t.endpos = pos + Vector(0, 0, 4), to + Vector(0, 0, 4)
+	t.mins, t.maxs = boundsOf(npc)
+	t.filter = npc
+	local tr = util.TraceHull(t)
+	if tr.Hit or tr.StartSolid then return false end
+	npc:SetPos(to)
+	npc.NGLGridPos = to
+	return true
+end
+
+local function idOf(e) return e.EntIndex and e:EntIndex() or tonumber(tostring(e):match("0x(%x+)") or "0", 16) or 0 end
+
+-- The way a is pushed away from b: straight apart, or, right on top of each
+-- other, a way both of them agree on (from their entity numbers).
+local function apartDir(a, apos, b, bpos)
+	local x, y = apos.x - bpos.x, apos.y - bpos.y
+	local d = math.sqrt(x * x + y * y)
+	if d >= 1 then return x / d, y / d end
+	local ia, ib = idOf(a), idOf(b)
+	local ang = math.min(ia, ib) * 2.39996 -- golden angle: neighbours spread out
+	local sx = ia < ib and 1 or -1
+	return math.cos(ang) * sx, math.sin(ang) * sx
+end
+Core.ApartDir = apartDir
+
 local function overlapCheck(npc, now, pos)
 	if npc.IsVehicleNPC then return end
 	local myR = radiusOf(npc)
 	local reach = myR + 40
-	local best, bestD, bx, by
+	local best, bestD
 	local x0, x1 = floor((pos.x - reach) / CELL) + OFFSET, floor((pos.x + reach) / CELL) + OFFSET
 	local y0, y1 = floor((pos.y - reach) / CELL) + OFFSET, floor((pos.y + reach) / CELL) + OFFSET
 	for x = x0, x1 do
@@ -325,45 +362,92 @@ local function overlapCheck(npc, now, pos)
 					local p = e.NGLGridPos
 					if p and e ~= npc and not e.NGLDying and not e.IsVehicleNPC and abs(p.z - pos.z) < 64 then
 						local ox, oy = pos.x - p.x, pos.y - p.y
-						local d = math.sqrt(ox * ox + oy * oy)
-						local gap = d - myR - radiusOf(e)
-						if gap < 2 and (not bestD or gap < bestD) then best, bestD, bx, by = e, gap, ox, oy end
+						local gap = math.sqrt(ox * ox + oy * oy) - myR - radiusOf(e)
+						if gap < 2 and (not bestD or gap < bestD) then best, bestD = e, gap end
 					end
 				end
 			end
 		end
 	end
-	if not best then
-		npc.NGLOverlapSince = nil
-		return
-	end
-	local d = math.sqrt(bx * bx + by * by)
-	if d < 1 then
-		-- Right on top of each other: any way will do.
-		local a = random() * 2 * math.pi
-		bx, by, d = math.cos(a), math.sin(a), 1
-	end
-	bx, by = bx / d, by / d
+	if not best then return end
+	local bp = best.NGLGridPos
+	local bx, by = apartDir(npc, pos, best, bp)
 	npc.NGLUnstick = { x = bx, y = by, untilT = now + UNSTICK_TIME }
 	if not best.NGLTraverse then best.NGLUnstick = { x = -bx, y = -by, untilT = now + UNSTICK_TIME } end
-	local since = npc.NGLOverlapSince
-	if not since then
-		npc.NGLOverlapSince = now
-	elseif now - since > NUDGE_AFTER and not npc.NGLTraverse then
-		-- Still pressed together: step half the overlap (and a bit) apart.
-		local step = math.min(-bestD * 0.5 + 4, 24)
-		local to = Vector(pos.x + bx * step, pos.y + by * step, pos.z)
-		local t = nudgeTrace
-		t.start, t.endpos = pos + Vector(0, 0, 4), to + Vector(0, 0, 4)
-		if npc.GetCollisionBounds then t.mins, t.maxs = npc:GetCollisionBounds() end
-		t.mins, t.maxs = t.mins or Vector(-16, -16, 0), t.maxs or Vector(16, 16, 72)
-		t.filter = npc
-		local tr = util.TraceHull(t)
-		if not tr.Hit and not tr.StartSolid then npc:SetPos(to) end
-		npc.NGLOverlapSince = now
+	-- Really inside each other: slide apart now, each its half.
+	if bestD < -4 and not npc.NGLTraverse then
+		local step = math.min(-bestD * 0.5 + 1, SLIDE_STEP)
+		slideTo(npc, pos, Vector(pos.x + bx * step, pos.y + by * step, pos.z))
+		if not best.NGLTraverse and best.SetPos then
+			local cur = best:GetPos() -- its grid position may be a second old
+			slideTo(best, cur, Vector(cur.x - bx * step, cur.y - by * step, cur.z))
+		end
+	end
+end
+
+-- Just spawned on top of another NGL NPC (the spawn menu, a squad or a
+-- dropship all on one spot): moved to the nearest free spot round it, with
+-- room for its hull and ground under it. Once, on its first think.
+local PLACE_RINGS = { 40, 72, 108 }
+local placeDown = { mask = MASK_NPCSOLID_BRUSHONLY, output = {} }
+local function freeSpot(npc, p, myR)
+	for _, e in ipairs(Core.FindInRadius(p, myR + 18 + 2)) do
+		if e ~= npc and not e.IsVehicleNPC then return false end
+	end
+	return true
+end
+function Core.PlaceFree(npc, pos)
+	if npc.IsVehicleNPC then return end
+	local myR = radiusOf(npc)
+	if freeSpot(npc, pos, myR) then return end
+	local a0 = (idOf(npc) % 8) * math.pi / 4
+	for _, r in ipairs(PLACE_RINGS) do
+		for k = 0, 7 do
+			local a = a0 + k * math.pi / 4
+			local to = Vector(pos.x + math.cos(a) * r, pos.y + math.sin(a) * r, pos.z)
+			if freeSpot(npc, to, myR) then
+				local d = placeDown
+				d.start, d.endpos = to + Vector(0, 0, 24), to - Vector(0, 0, 48)
+				d.filter = npc
+				local g = util.TraceLine(d)
+				if g.Hit and not g.StartSolid and slideTo(npc, pos, Vector(to.x, to.y, g.HitPos.z)) then return end
+			end
+		end
 	end
 end
 Core.OverlapCheck = overlapCheck
+
+-- Stuck walking into something: one hull trace the way we walk; if it hits a
+-- wall, steer along it (to the side nearer where we're going) and a little
+-- away from it for a moment (NGLUnstick), which gets round a door frame.
+local SLIDE_AFTER = 1
+local wallTrace = { mask = MASK_NPCSOLID_BRUSHONLY, output = {} }
+function Core.SlideAlongWall(npc, now, pos)
+	local g = npc.NGLSteer or npc.NGLGoal
+	if not g then return false end
+	local dx, dy = g.x - pos.x, g.y - pos.y
+	local l = math.sqrt(dx * dx + dy * dy)
+	if l < 1 then return false end
+	dx, dy = dx / l, dy / l
+	local t = wallTrace
+	t.start, t.endpos = pos + Vector(0, 0, 20), pos + Vector(dx * 32, dy * 32, 20)
+	local mins, maxs = boundsOf(npc)
+	t.mins, t.maxs = mins, Vector(maxs.x, maxs.y, math.max(maxs.z - 20, 8))
+	t.filter = npc
+	local tr = util.TraceHull(t)
+	if not tr.Hit or tr.StartSolid or not tr.HitNormal then return false end
+	local nx, ny = tr.HitNormal.x, tr.HitNormal.y
+	local nl = math.sqrt(nx * nx + ny * ny)
+	if nl < 0.3 then return false end -- the floor or a slope, not a wall
+	local n = { x = nx / nl, y = ny / nl }
+	local tx, ty = -n.y, n.x
+	if tx * dx + ty * dy < 0 then tx, ty = -tx, -ty end
+	local sx, sy = tx * 0.8 + n.x * 0.6, ty * 0.8 + n.y * 0.6
+	local sl = math.sqrt(sx * sx + sy * sy)
+	if sl < 0.01 then return false end
+	npc.NGLUnstick = { x = sx / sl, y = sy / sl, untilT = now + 0.7 }
+	return true
+end
 
 -- NGL NPCs within `radius` of `pos` for which `filter(npc)` is true (all
 -- if no filter). Uses the spatial grid, so it only looks at nearby cells.
@@ -836,10 +920,10 @@ end
 -- home/leash: never step further than leash from home.
 local STRAFE_TRIES = { 1, -1, 0.5, -0.5 }
 local STRAFE_ROOM = 48
+local strafeHull = { mask = MASK_NPCSOLID_BRUSHONLY, output = {} }
+local strafeDown = { mask = MASK_NPCSOLID_BRUSHONLY, output = {} }
 local function strafeOk(npc, pos, goal, home, leash)
 	if home and leash and goal:DistToSqr(home) > leash * leash then return false end
-	local nav = NGL.Nav
-	if nav and nav.Loaded and nav.WalkLine(pos, goal) == false then return false end
 	-- Someone standing there, or halfway (the spatial grid, no traces).
 	local mid = (pos + goal) * 0.5
 	for _, p in ipairs({ goal, mid }) do
@@ -847,7 +931,21 @@ local function strafeOk(npc, pos, goal, home, leash)
 			if e ~= npc and not e.IsVehicleNPC then return false end
 		end
 	end
-	return true
+	-- Room to walk there (a hull trace above step height) and ground at the
+	-- end (no drop): two traces, every few seconds per fighting NPC.
+	local t = strafeHull
+	t.start, t.endpos = Vector(pos.x, pos.y, pos.z + 18), Vector(goal.x, goal.y, pos.z + 18)
+	if npc.GetCollisionBounds then t.mins, t.maxs = npc:GetCollisionBounds() end
+	t.mins, t.maxs = t.mins or Vector(-16, -16, 0), t.maxs or Vector(16, 16, 72)
+	t.maxs = Vector(t.maxs.x, t.maxs.y, math.max(t.maxs.z - 18, 8))
+	t.filter = npc
+	local tr = util.TraceHull(t)
+	if tr.Hit or tr.StartSolid then return false end
+	local d = strafeDown
+	d.start, d.endpos = Vector(goal.x, goal.y, pos.z + 24), Vector(goal.x, goal.y, pos.z - 48)
+	d.filter = npc
+	tr = util.TraceLine(d)
+	return tr.Hit and not tr.StartSolid
 end
 Core.StrafeOk = strafeOk
 
@@ -1204,6 +1302,13 @@ local function think(npc, now, dt, nearestPlayerSqr)
 	local pos = npc:GetPos()
 	gridUpdate(npc, pos)
 	npc.NGLGridPos = pos
+	if not npc.NGLPlaced then
+		npc.NGLPlaced = true
+		Core.PlaceFree(npc, pos)
+		pos = npc:GetPos()
+		gridUpdate(npc, pos)
+		npc.NGLGridPos = pos
+	end
 	if not npc.NGLTraverse then
 		crowdCheck(npc, now, pos)
 		overlapCheck(npc, now, pos)
@@ -1220,8 +1325,12 @@ local function think(npc, now, dt, nearestPlayerSqr)
 	if npc.NGLGoal or npc.NGLPath then
 		local sp = npc.NGLStuckPos
 		if not sp or pos:DistToSqr(sp) >= STUCK_SQR then
-			npc.NGLStuckPos, npc.NGLStuckT = pos, now
-		elseif now - npc.NGLStuckT > 2 then
+			npc.NGLStuckPos, npc.NGLStuckT, npc.NGLSlid = pos, now, nil
+		elseif now - npc.NGLStuckT > SLIDE_AFTER and not npc.NGLSlid then
+			-- Caught on a door frame or a wall's corner: slide along it.
+			npc.NGLSlid = true
+			Core.SlideAlongWall(npc, now, pos)
+		elseif now - npc.NGLStuckT > 2.5 then
 			-- Walking straight into something: use the grid for a while.
 			if npc.NGLDirect then npc.NGLForcePathUntil = now + FORCE_PATH end
 			stopMoving(npc)
