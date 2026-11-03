@@ -9,7 +9,7 @@ local V = NGL.NavView
 local radiusCvar = CreateClientConVar("ngl_nav_view_radius", "1500", true, true,
 	"How far round you the NGL Nav Editor shows the grid", 200, 20000)
 
-local UP = 3
+local UP = 5 -- drawn this far above the ground
 local TRIS_PER_MESH = 10000
 local LINES_PER_MESH = 15000
 
