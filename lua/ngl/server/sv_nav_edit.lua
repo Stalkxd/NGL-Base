@@ -220,8 +220,19 @@ function Nav.AddEdit(e)
 	Nav.Edits = Nav.Edits or Nav.LoadEdits()
 	if #Nav.Edits >= MAX_EDITS then return "too many edits (ngl_nav_edit_clear to start over)" end
 	if e.r then e.r = math.Clamp(e.r, 16, MAX_RADIUS) end
+	local wasLoaded = Nav.Loaded and Nav.Areas ~= nil
 	local res = apply(e)
-	compact()
+	-- Only what the edit touched is built again (Nav.RebuildAround); the
+	-- whole grid only for the first area on a map with none.
+	if e.op == "add" or e.op == "remove" then
+		if not (wasLoaded and Nav.RebuildAround(vec(e.p), e.r + Nav.S)) then compact() end
+	else
+		I.buildLinks()
+	end
+	Nav.Cache, Nav.Wide = {}, {}
+	Nav.Fields = {}
+	Nav.Loaded = Nav.Count > 0
+	Nav.Version = (Nav.Version or 0) + 1
 	Nav.Edits[#Nav.Edits + 1] = e
 	Nav.SaveEdits()
 	return res
