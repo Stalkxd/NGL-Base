@@ -2,7 +2,7 @@
 -- Everything server-side lives under lua/ngl/server, client files under lua/ngl/client.
 
 NGL = NGL or {}
-NGL.Version = "0.18.0"
+NGL.Version = "0.18.1"
 
 if SERVER then
 	AddCSLuaFile()

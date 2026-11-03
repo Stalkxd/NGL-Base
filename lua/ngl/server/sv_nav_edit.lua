@@ -307,16 +307,22 @@ local VIEW_MAX_LINKS = 2000
 local VIEW_PIECE = 60000
 
 -- The numbers the client draws from, in this order:
---   node count, then x y z for each node (whole units)
---   triangle count, then three node numbers for each (the areas, filled)
---   outline count, then two node numbers for each (the areas' sides)
---   line count, then two node numbers for each (walkable, not inside an area)
+--   corner count, then x y z for each corner (whole units)
+--   triangle count, then three corner numbers for each (the areas, filled)
+--   outline count, then two corner numbers for each (the areas' sides)
+--   line count (0: every area is drawn as a square now)
 --   link count, then ax ay az bx by bz kind for each (Nav.KindCode)
 --   1 and x y z of the link start being placed, or 0
+--   point count, then x y z of each grid point in the sphere
+-- Every area with a point in the sphere is drawn whole, as a square (see
+-- Nav.BuildAreas for how far each reaches round its points).
+local VIEW_MAX_AREAS = 20000
 function Nav.ViewData(center, radius, linkA)
 	local out, n = {}, 0
 	local function put(v) n = n + 1; out[n] = v end
-	local list, idx = {}, {}
+	local list = {}
+	local Areas, AreaOf = Nav.Areas or {}, Nav.AreaOf or {}
+	local areas, seenArea = {}, {}
 	if Nav.Loaded then
 		local NX, NY, NZ, OX, OY, dead = Nav.NX, Nav.NY, Nav.NZ, Nav.OX, Nav.OY, Nav.Dead
 		local S = Nav.S
@@ -335,62 +341,33 @@ function Nav.ViewData(center, radius, linkA)
 			table.sort(list, function(a, b) return dist[a] < dist[b] end)
 			for k = #list, VIEW_MAX_NODES + 1, -1 do list[k] = nil end
 		end
-		for k, i in ipairs(list) do idx[i] = k end
-	end
-	-- Areas reaching out of the sphere are drawn whole: their far corners too.
-	do
-		local Areas, AreaOf = Nav.Areas or {}, Nav.AreaOf or {}
-		local seen = {}
-		for k = 1, #list do
-			local a = AreaOf[list[k]]
-			local A = a and Areas[a]
-			if A and A.big and not seen[a] then
-				seen[a] = true
-				for _, c in ipairs({ A.c00, A.c10, A.c11, A.c01 }) do
-					if not idx[c] then list[#list + 1] = c; idx[c] = #list end
-				end
-			end
+		for _, i in ipairs(list) do
+			local a = AreaOf[i]
+			if a and not seenArea[a] and #areas < VIEW_MAX_AREAS then seenArea[a] = true; areas[#areas + 1] = a end
 		end
 	end
-	put(#list)
-	for _, i in ipairs(list) do
-		local p = Nav.NodePos(i)
-		put(floor(p.x + 0.5)); put(floor(p.y + 0.5)); put(floor(p.z + 0.5))
-	end
-	-- Areas (see Nav.BuildAreas): each rectangle with all four corners in the
-	-- sphere, as two triangles and its four sides.
-	local tris, outline = {}, {}
-	local Areas, AreaOf = Nav.Areas or {}, Nav.AreaOf or {}
-	local seen = {}
-	for k, i in ipairs(list) do
-		local a = AreaOf[i]
-		local A = a and Areas[a]
-		if A and A.big and not seen[a] then
-			seen[a] = true
-			local c00, c10, c11, c01 = idx[A.c00], idx[A.c10], idx[A.c11], idx[A.c01]
-			if c00 and c10 and c11 and c01 then
-				for _, v in ipairs({ c00, c10, c11, c00, c11, c01 }) do tris[#tris + 1] = v end
-				for _, v in ipairs({ c00, c10, c10, c11, c11, c01, c01, c00 }) do outline[#outline + 1] = v end
-			end
+	put(#areas * 4)
+	for _, a in ipairs(areas) do
+		local A = Areas[a]
+		local z00, z10, z11, z01 = Nav.NZ[A.c00], Nav.NZ[A.c10], Nav.NZ[A.c11], Nav.NZ[A.c01]
+		for _, c in ipairs({ { A.ex0, A.ey0, z00 }, { A.ex1, A.ey0, z10 }, { A.ex1, A.ey1, z11 }, { A.ex0, A.ey1, z01 } }) do
+			put(floor(c[1] + 0.5)); put(floor(c[2] + 0.5)); put(floor(c[3] + 0.5))
 		end
 	end
-	put(#tris / 3)
-	for _, v in ipairs(tris) do put(v) end
-	put(#outline / 2)
-	for _, v in ipairs(outline) do put(v) end
-	-- Walkable connections that aren't inside one rectangle.
-	local lines = {}
-	for k, i in ipairs(list) do
-		local nb = Nav.NB[i]
-		local a = AreaOf[i]
-		local inBig = a and Areas[a] and Areas[a].big
-		for m = 1, #nb, 2 do
-			local j = idx[nb[m]]
-			if j and j > k and not (inBig and AreaOf[nb[m]] == a) then lines[#lines + 1] = k; lines[#lines + 1] = j end
-		end
+	put(#areas * 2)
+	for k = 1, #areas do
+		local b = (k - 1) * 4
+		put(b + 1); put(b + 2); put(b + 3)
+		put(b + 1); put(b + 3); put(b + 4)
 	end
-	put(#lines / 2)
-	for _, v in ipairs(lines) do put(v) end
+	put(#areas * 4)
+	for k = 1, #areas do
+		local b = (k - 1) * 4
+		put(b + 1); put(b + 2); put(b + 2); put(b + 3); put(b + 3); put(b + 4); put(b + 4); put(b + 1)
+	end
+	put(0)
+	local idx = {}
+	for _, i in ipairs(list) do idx[i] = true end
 	local links = {}
 	if #list > 0 then
 		for _, L in ipairs(Nav.Links) do
@@ -400,15 +377,21 @@ function Nav.ViewData(center, radius, linkA)
 	end
 	put(#links)
 	for _, L in ipairs(links) do
-		local a, b = Nav.NodePos(L.a), Nav.NodePos(L.b)
-		put(floor(a.x + 0.5)); put(floor(a.y + 0.5)); put(floor(a.z + 0.5))
-		put(floor(b.x + 0.5)); put(floor(b.y + 0.5)); put(floor(b.z + 0.5))
+		local pa, pb = Nav.NodePos(L.a), Nav.NodePos(L.b)
+		put(floor(pa.x + 0.5)); put(floor(pa.y + 0.5)); put(floor(pa.z + 0.5))
+		put(floor(pb.x + 0.5)); put(floor(pb.y + 0.5)); put(floor(pb.z + 0.5))
 		put(Nav.KindCode[L.kind] or 1)
 	end
 	if linkA then
 		put(1); put(floor(linkA[1] + 0.5)); put(floor(linkA[2] + 0.5)); put(floor(linkA[3] + 0.5))
 	else
 		put(0)
+	end
+	-- The grid points themselves, for the tool to show which one a click uses.
+	put(#list)
+	for _, i in ipairs(list) do
+		local p = Nav.NodePos(i)
+		put(floor(p.x + 0.5)); put(floor(p.y + 0.5)); put(floor(p.z + 0.5))
 	end
 	return out
 end
