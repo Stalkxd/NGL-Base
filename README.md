@@ -16,6 +16,7 @@ An NPC base for Garry's Mod built for large battles (100+ NPCs) with minimal ser
 3g. **Square areas** (done, v0.18.0, v0.18.1). The grid merged into rectangles like GMod's navmesh, paths searched over them and drawn straight through them, NPCs pushed apart when they overlap, and no more stalling at door frames. In v0.18.1 the whole grid is squares, halls and doorways too: a hall's points stay in one straight row and join into a thin strip of squares.
 3h. **Pushing, squares on hills** (done, v0.18.2, v0.18.3). NGL NPCs walk through each other and push each other aside instead of blocking or finding new paths; the editor's squares follow hills and ramps. In v0.18.3 the grid joins up over hilltops and ridges (walk checks follow the ground), and NPCs take shortcuts past waypoints when the way is clear, so paths on hills are straighter.
 3i. **Faster nav** (v0.19.0 to v0.19.3). Unreachable goals fail at once, flow fields for many NPCs going to one place, squad members sharing their leader's path; long paths searched over regions first, faster generation on open ground, edits rebuilding only round where they're made, and a binary grid file that loads without building areas again.
+3j. **Zombies and headcrabs** (v0.20.0). Fast zombies that come at you from out of sight, leap and climb high walls; HL2-style poison zombies that throw the crabs on their back; normal, fast and poison headcrabs, and zombies dropping their crab when they die. Climb links put at high walls when the grid is made, leap attacks for any NPC, and `ngl_spawn_all` to fill the whole map with NPCs for testing.
 4. **Battle test.** Two teams of 100+ soldiers on several maps, singleplayer and dedicated server, tuned against the target.
 
 **Target:** 300 NGL NPCs with real combat AI holding 67 tick (under 1% late ticks, `ngl_bench_limit`) on a local dedicated server on a normal PC. That's 3x the 100 goal, so weaker servers still manage 100+.
@@ -56,7 +57,10 @@ Every field, hook and building block is documented in `lua/entities/ngl_base/sha
 
 - `ngl_combine_soldier`: SMG plus a rifle-butt melee, voice lines.
 - `ngl_rebel`: random faces, male and female voices via `SoundsByModel`, friendly to players.
-- `ngl_zombie`: melee only, no code at all.
+- `ngl_zombie`: melee only, no code at all. Its headcrab comes off when it dies (`ENT.Headcrab`).
+- `ngl_zombie_fast`: the fast zombie, fields only. Fights in the `ambusher` AI mode: while you're looking at it, it runs to a spot at your side or back you can't see, waits there until you look away (or come within 420 units), then rushes, leaps at you from up to 650 units (`ENT.LeapAttack`) and claws. Climbs walls too high to jump, up to 400 units (`ENT.Climb`), on the climb links the grid puts at high walls, and drops off roofs to get at you.
+- `ngl_zombie_poison`: the poison zombie, as in HL2. Slow (it never hurries) and tough (175), carries three poison headcrabs on its back, shown on the model, and throws one at an enemy 260 to 800 units away every 5 to 9 seconds: it lands just short and goes for them. Claws what gets close. When it dies, its own crab and the ones left on its back come off.
+- `ngl_headcrab`, `ngl_headcrab_fast`, `ngl_headcrab_poison`: HL2's three headcrabs. Small (`ENT.Hull`), they leap at your face from up to 260 units (the fast one from 360, quicker and more often, for less damage). The poison one is slow, rears up and rattles before it leaps, and its bite takes a player down to 1 health, which comes back over the next seconds (40 damage to NPCs).
 - `ngl_apc`: a vehicle NPC that drives like a car: it sits on the ground (the body pitches and rolls with the ground under its four wheels, `TrackWidth`, `MaxTilt`), slows down uphill and a little faster downhill (`SlopeSlow`), speeds up and brakes, steers with its front wheels (a bicycle model with `WheelBase` and `MaxSteer`), can't turn on the spot, and backs up to get round tight corners, away from enemies that get too close, or out of a wall it is stuck on. Wheels spin and steer on clients from how it moves (nothing extra networked), with HL2's APC engine loops. The turret machine gun fires from the barrel (`muzzle` attachment) with HL2's helicopter tracers and muzzle flash; rockets go up out of the launcher (`cannon_muzzle`) at HL2's launch angles, light after 0.3 s and curve onto the target, with a smoke trail. Takes the elite's orders when one is near, its own decisions otherwise: with nobody commanding it, it patrols round where it spawned (`ENT.Patrol = { Radius, MinDist, Pause }`, false to park), and in a fight the turret does the aiming while the body only shifts forward or back along the way it points (`RepositionDelay`, 12 to 20 s, sooner when it's getting hit), and an enemy too close in front makes it reverse, one behind makes it drive on, without swinging round. The wheels sit on the ground with working suspension (each wheel follows the ground under it on clients, with HL2's `vehicle_wheel_*_height` poses), the front wheels steer the right way, and clients turn the turret themselves every frame towards what the server says it aims at, so it tracks smoothly. Bullets throw sparks off it, not blood. Feelers (three short traces a few times a second) steer it round walls ahead; if it still hits something it backs up with the wheels turned so the nose swings to the open side and drives on that way, and after three of those in 20 seconds it gives up on where it was going and picks another way. Any vehicle NPC can drive itself with `ENT:NGLDrive(goal, dt)`; `ENT:NGLMuzzle()` sets where any NPC's shots start; projectiles can be guided (`Homing`, `Trail`).
 - `ngl_combine_elite`: the first hard NPC. Super soldier model, AR2, tougher and more accurate, and leads up to 9 Combine soldiers with hand signals (`ENT.Squad`, see Squads and orders). Still no code beyond fields.
 
@@ -65,6 +69,8 @@ Every field, hook and building block is documented in `lua/entities/ngl_base/sha
 - **Gun:** `ENT.Weapon` (damage, fire rate, spread, clip, reload). Near players it fires real bullets with tracers and sound; far away it's one silent trace with the expected damage.
 - **Projectiles:** add `Projectile = { Damage, Radius, Speed, Gravity, Model, ... }` to the weapon for rockets, grenades or spit (fields in `lua/ngl/server/sv_projectile.lua`). Projectiles are not entities: each is a table moved with one trace per tick, clients get one message when it's fired and one when it lands and draw it themselves, and far from players it lands at once without flying.
 - **Melee:** `ENT.Melee = { Damage, Range, Delay, HitDelay, DamageType, Force, Anim, HitSound, MissSound }`. With no weapon the NPC closes in and swings; with a weapon it swings when the enemy gets into reach. The blow lands `HitDelay` after the swing starts, only if the target is still in reach and in front.
+- **Leap:** `ENT.LeapAttack = { Damage, MinDist, MaxDist, MaxRise, Delay, Chance, Reach, DamageType, Force, Poison, NPCDamage, Anim, LandAnim, Sound, HitSound, Recover }` (fields in `ngl_base/shared.lua`, code in `sv_leap.lua`). An NPC without a gun leaps at an enemy it can see between `MinDist` and `MaxDist` when one hull trace says the way is clear, and hurts it if it touches it in the air. It's the engine's jump; while in the air the NPC only does one distance check a tick. `self:Leap(target)` from your own hooks.
+- **Headcrabs on zombies:** `ENT.Headcrab = "<class>"` (and `HeadcrabBodygroup`) makes a live crab come off when the zombie dies, not when the killing shot hit the head or it was blown up, as in HL2. `ngl_zombie_headcrabs 0` turns it off; `ngl_headcrab_max` (60) caps the crabs from zombies alive at once, so a big zombie battle doesn't double its NPC count.
 - **Custom:** `OnAttack(enemy, kind)` runs before each attack; return true and do your own with the building blocks below.
 
 ### Sounds
@@ -80,8 +86,9 @@ Every field, hook and building block is documented in `lua/entities/ngl_base/sha
 | `OnAIThink(dt)` | every AI think | skip all default behaviour |
 | `OnIdle()` | thinking with no enemy | skip investigate and wander |
 | `OnCombat(enemy, dist, visible)` | thinking with an enemy | skip chase, strafe and attack |
-| `OnAttack(enemy, kind)` | before a `"ranged"` or `"melee"` attack | skip that attack |
+| `OnAttack(enemy, kind)` | before a `"ranged"`, `"melee"` or `"leap"` attack (`"throw"`: the poison zombie's) | skip that attack |
 | `OnMeleeHit(target, hit)` | a blow landed or missed | |
+| `OnLeapHit(target, hit)` | a leap hit someone or landed without | |
 | `OnAlerted(ally, pos)` | an ally spotted an enemy | stay put |
 | `OnDamaged(dmginfo)` | taking damage | ignore the damage |
 | `OnReload()`, `OnDeath(dmginfo)` | reload started, dying | |
@@ -96,7 +103,7 @@ The default behaviour is built from these, so custom behaviour built from them g
 | --- | --- |
 | Movement | `self:MoveTo(pos, run)`, `self:StopMoving()`, `self:IsMoving()`, `self:SetRunning(bool)`, `self:LookAt(posOrEnt)`, `self:SetCrouching(bool)`, `self:IsCrouching()` |
 | Targets | `self:GetEnemy()`, `self:SetEnemy(ent)`, `self:FindEnemy()`, `self:CanSee(ent)`, `self:IsEnemyVisible()`, `self:GetLastSeenPos()`, `self:IsHostileTo(ent)`, `self:GetAllies(radius)`, `NGL.FindInRadius(pos, radius, filter)` |
-| Combat | `self:FireWeapon(ent, shots)`, `self:MeleeAttack(ent)`, `self:FireProjectile(entOrPos, def)`, `self:DealDamage(ent, amount, type, force)` |
+| Combat | `self:FireWeapon(ent, shots)`, `self:MeleeAttack(ent)`, `self:FireProjectile(entOrPos, def)`, `self:DealDamage(ent, amount, type, force)`, `self:Leap(entOrPos, def)`, `self:CanLeap(ent)`, `self:IsLeaping()` |
 | Animation | `self:PlayAnim(actOrSequence, lock, rate)` (whole body, returns duration), `self:PlayGesture(actOrSequence)` |
 | Sound | `self:Speak(kindOrPath)` |
 | State | `self:IsNearPlayer()`, `self:IsDetailed()`, `self:IsBusy()` |
@@ -131,6 +138,7 @@ Each NPC fights in one of these styles, picked when it spawns from `ENT.AIMode` 
 | `assault` | Pushes forward no matter what: runs at the enemy shooting, never crouches or hides, and keeps pressing to where you went when it loses sight of you. |
 | `flanker` | Attacks from out of your sight: circles round to a spot at your side or back that you can't see, opens fire from there, and moves to a new hidden spot after a few seconds. |
 | `defender` | Holds the ground where the fight started (`DefendRadius`, 500): crouches and shoots from there, ducks out of sight when below half health, doesn't chase. |
+| `ambusher` | For NPCs without a gun (the fast zombie). Never comes at you where you're looking: while you watch it, it runs to a spot at your side or back that you can't see, waits there until you look away or for a few seconds, then rushes in and leaps. Within 420 units (`Strike`) it just goes for you. |
 
 Your own mode, from any addon:
 
@@ -201,7 +209,7 @@ Testing in game (superadmin): `ngl_squad_make [size]` makes the NGL NPC you look
 - **Drops:** walking anywhere not along a path (straight at an enemy, sidestepping, stepping aside), an NPC looks 40 units ahead with one trace down (again every 24 units walked or 0.25 s) and stops instead of walking off a drop deeper than 36; going straight at an enemy it then takes a path for the next 5 s. It's a trace, not the grid, so a patchy grid at a door frame doesn't stop anyone.
 - **Door frames and corners:** in narrow places (grid points that aren't part of an open area) an NPC gets within 16 units of each waypoint before turning, instead of 40, so it doesn't cut the corner into the frame. Caught on something for a second anyway, one hull trace finds the wall and it slides along it, the way it was heading.
 - **Ledges:** only short jumps, so nobody leaps off a roof to get at you. Paths jump down ledges up to `ENT.JumpDown` (200; zombies 250), up onto ledges up to `ENT.JumpUp` (72; zombies 0), over low walls, through windows and over small holes (vaults, as high as `JumpUp`) and across gaps (`ENT.JumpGap`). Down and across use the engine's jump with the `Jump`, `Glide` and `Land` animations; up is a short hop that rises first and then goes over the edge (`JumpUp`, then `Land`). Each NPC class can have its own jump animations in its `ENT.Anims` (HL2's `jump_holding_*` by default), so factions can jump differently. `ENT.JumpDown = 0`, `JumpUp = 0` and `JumpGap = false` keep an NPC off them (the APC).
-- **Climbing:** `ENT.Climb` (0 = never) lets an NPC climb up and down climb links up to that high, placed with the NGL Nav Editor: straight up the wall and over the top, or over the edge and down, at `ENT.ClimbRate` units a second with the `ClimbUp` and `ClimbDown` animations. Meant for fast zombies, antlions and the like (none ship yet). Climbers can also climb ledges too high for them to jump.
+- **Climbing:** `ENT.Climb` (0 = never) lets an NPC climb up and down climb links up to that high, made with the grid or placed with the NGL Nav Editor: to the foot of the wall, straight up it and over the top, or over the edge, down and away from it, at `ENT.ClimbRate` units a second with the `ClimbUp` and `ClimbDown` animations. The grid only gets climb links at real walls: see Climb links under Navigation. The fast zombie climbs (`Climb = 400`). Climbers can also climb ledges too high for them to jump.
 - **Doors:** a closed door in the way is opened (`ENT.OpenDoors`, on for people, off for zombies and the APC). NPCs with `ENT.DoorBreach` (Combine and rebels) open it normally too, unless they're in a fight (an enemy, or one seen in the last 8 s) or it's locked: then they kick it in. Kicking, the NPC faces it and hits it with its melee animation (`Anims.Kick`; HL2's Combine use the rifle butt; models without one, like citizens, give it a shove), and the door flies off its hinges as a physics prop. The map's doors are put in a small grid once, so the check is a table lookup unless a door is right ahead. `ngl_door_breach` 2 = off the hinges (default), 1 = burst open, 0 = just open it; `ngl_door_respawn` (120 s, 0 = never) puts kicked-off doors back so map logic keeps working.
 - **Alerted:** when an NPC spots an enemy, allies within `AlertRadius` (1500) that have nothing to do run over to look.
 - **Fighting:** depends on the AI mode (above). The default runs at the enemy with the weapon raised until in `AttackRange`, then shoots while sidestepping at walking pace, standing still (`StandChance`, 0.3) or crouching to hold the spot (`CrouchChance`, 0.35; crouched it sees and shoots from `CrouchEyeHeight`). Reloads after `Weapon.Clip` shots (`Weapon.ReloadTime` seconds without firing).
@@ -209,7 +217,7 @@ Testing in game (superadmin): `ngl_squad_make [size]` makes the NGL NPC you look
 - **Animations:** idle, alert idle, walk, run, aimed walk and aimed run, crouched idle, aim and walk picked per state; firing, reload and flinch gestures; upper body aims at the enemy. Strafing keeps the body on the target while the legs swing smoothly (every tick, eased) to the direction of travel, anywhere a player can see the NPC (`ngl_ai_visual_range`); standing or crouched, the upper body aims and the feet stay planted until the target is more than 45° off; running always faces where the NPC goes, with the gun raised only when the target is ahead. Walk/run cycles play at the speed the NPC actually moves. Models without crouch animations simply don't crouch. See the level of detail below.
 - **Animation level of detail:** within `ngl_anim_detail_range` (1500) of a player, NPCs get everything above. Further out they play only the plain idle, walk and run cycles: no aim pose, no gestures, no aimed variants with their extra aim layers, and their poses are reset once when they leave the range. This saves server time and, more importantly, drawing time on every client. Clients also skip drawing NPC weapons beyond `ngl_cl_weapon_range` (4000, client setting; 0 = always).
 
-Examples shipped: `ngl_combine_soldier`, `ngl_combine_elite`, `ngl_apc`, `ngl_rebel` and `ngl_zombie` (NPC tab, category "NGL Base").
+Examples shipped: `ngl_combine_soldier`, `ngl_combine_elite`, `ngl_apc`, `ngl_rebel`, `ngl_zombie`, `ngl_zombie_fast`, `ngl_zombie_poison` and the three headcrabs (NPC tab, category "NGL Base").
 
 ### How the core keeps it cheap
 
@@ -264,6 +272,8 @@ How NPCs use it:
 | `ngl_nav_drops` (1) | Link ledges up and down when generating |
 | `ngl_nav_max_drop` (250) | Highest ledge linked for jumping down |
 | `ngl_nav_max_up` (72) | Highest ledge linked for jumping up |
+| `ngl_nav_max_climb` (384) | Highest wall that gets climb links when generating (0 = none) |
+| `ngl_nav_climbs` | Add climb links to this map's saved grid without making it again (for grids made before v0.20.0) |
 | `ngl_nav_edit_clear` | Remove all NGL Nav Editor edits for this map |
 | `ngl_nav_info` | Points, jump links, edits, spacing, queued searches, cached paths, and counts of found, failed, cached, dropped and rejected paths |
 | `ngl_nav_draw [radius]` | Draw the grid around you for 15 s (listen server with `developer 1`) |
@@ -275,6 +285,17 @@ How NPCs use it:
 | `ngl_nav_budget` (2) | ms per tick for path-finding |
 | `ngl_nav_max_expand` (16000) | A search gives up after this many points |
 | `ngl_nav_max_queue` (64) | Requests beyond this many queued searches fail at once (the NPC walks straight) |
+
+**Climb links.** When the grid is made, every point at the foot of a wall looks at the wall straight ahead along the grid lines. A climb link (both ways) goes there only when it's a real wall: solid and steep right in front, still there above jump height (lower ledges are jumped), no taller than `ngl_nav_max_climb`, with no ceiling or overhang in the way up, and room to stand on top. Railings, balconies and open ledges get none, so climbers climb walls, not the air. Tops nobody can walk onto (roofs, crates, thick walls) get a grid of their own, flood-filled from the top of the climb, and climbs from there are looked for too; climbers come back down by jumping or the same climb. It costs a few traces per point at a wall, only while generating. Only NPCs with `ENT.Climb` use them.
+
+## Spawning across the map
+
+For testing big battles (superadmins or the server console):
+
+| Command | What it does |
+| --- | --- |
+| `ngl_spawn_all <class[,class2,...]> [count] [spacing]` | `count` NPCs (100, at most 2000) on random nav grid points all over the map, at least `spacing` units apart (200) and never within 400 units of a player. With several classes each NPC is one of them at random: `ngl_spawn_all ngl_zombie,ngl_zombie_fast,ngl_zombie_poison 300`. Any NPC class or NPC tab entry works; they come in a few a tick so the server doesn't freeze. |
+| `ngl_spawn_clear [class\|all]` | Remove what `ngl_spawn_all` made (only that class when given), or every NGL NPC with `all` |
 
 ## NPC tools
 
