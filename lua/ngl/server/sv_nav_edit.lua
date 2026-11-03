@@ -332,10 +332,12 @@ local VIEW_MAX_AREAS = 20000
 local DIRS = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }, { 1, 1 }, { -1, -1 }, { 1, -1 }, { -1, 1 } } -- as in sv_nav.lua
 
 -- The points of each area (rebuilt when the areas are).
-local nodesCache, nodesFor
+-- Keyed on the table and the version: a partial rebuild (removing or adding
+-- an area) changes AreaOf in place, so the same table can hold new areas.
+local nodesCache, nodesFor, nodesVer
 local function areaNodes()
 	local AreaOf = Nav.AreaOf
-	if nodesFor == AreaOf and nodesCache then return nodesCache end
+	if nodesFor == AreaOf and nodesVer == Nav.Version and nodesCache then return nodesCache end
 	local t, dead = {}, Nav.Dead
 	for i = 1, Nav.Count do
 		local a = AreaOf[i]
@@ -345,7 +347,7 @@ local function areaNodes()
 			l[#l + 1] = i
 		end
 	end
-	nodesCache, nodesFor = t, AreaOf
+	nodesCache, nodesFor, nodesVer = t, AreaOf, Nav.Version
 	return t
 end
 function Nav.ViewData(center, radius, linkA)
@@ -384,7 +386,7 @@ function Nav.ViewData(center, radius, linkA)
 	local verts, nv, vkey = {}, 0, {}
 	local tris, outline = {}, {}
 	if Nav.Loaded and #areas > 0 then
-		local NX, NY, NZ, OX, OY, NM = Nav.NX, Nav.NY, Nav.NZ, Nav.OX, Nav.OY, Nav.NM
+		local NX, NY, NZ, OX, OY, NM, dead = Nav.NX, Nav.NY, Nav.NZ, Nav.OX, Nav.OY, Nav.NM, Nav.Dead
 		local S = Nav.S
 		local half = S * 0.5
 		local tol = I.linkTol and I.linkTol() or S * 1.05 + 16
@@ -405,7 +407,8 @@ function Nav.ViewData(center, radius, linkA)
 		end
 		for _, a in ipairs(areas) do
 			local A = Areas[a]
-			for _, i in ipairs(nodesOf[a] or {}) do
+			for _, i in ipairs(A and nodesOf[a] or {}) do
+				if AreaOf[i] ~= a or dead[i] then goto skip end
 				local px, py, pz = NX[i] * S + OX[i], NY[i] * S + OY[i], NZ[i]
 				local x0, x1 = math.max(px - half, A.ex0), math.min(px + half, A.ex1)
 				local y0, y1 = math.max(py - half, A.ey0), math.min(py + half, A.ey1)
@@ -445,6 +448,7 @@ function Nav.ViewData(center, radius, linkA)
 					if not (n and AreaOf[n] == a) then outline[#outline + 1] = p; outline[#outline + 1] = q end
 				end
 				edge(ss, v00, v10); edge(e, v10, v11); edge(nn, v11, v01); edge(w, v01, v00)
+				::skip::
 			end
 		end
 	end
