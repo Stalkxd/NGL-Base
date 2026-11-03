@@ -2387,6 +2387,7 @@ end
 
 function Nav.Generate(ply)
 	if genRoutine then tell(ply, "Generation is already running.") return false end
+	Nav.Cleared = nil
 	tell(ply, string.format("Generating nav grid for %s at %d-unit spacing...", game.GetMap(), cvSpacing:GetInt()))
 	genRoutine = coroutine.create(function() generate(function(m) tell(ply, m) end) end)
 	return true
@@ -2436,6 +2437,30 @@ concommand.Add("ngl_nav_draw", function(ply, _, args)
 	tell(ply, "Drawing nav for 15 s (needs a listen server and developer 1).")
 end)
 
+-- Throws the whole grid away: the saved file and, unless "keepedits" is
+-- given, the editor edits too. NPCs walk straight at things until a grid is
+-- made again; ngl_nav_auto doesn't make one on its own until the next map
+-- load, so a respawn doesn't bring it straight back.
+function Nav.Clear(keepEdits)
+	if genRoutine then return false, "Generation is running: wait for it to finish." end
+	file.Delete(navPath())
+	if not keepEdits then
+		Nav.Edits = {}
+		if Nav.SaveEdits then Nav.SaveEdits() end
+	end
+	reset()
+	Nav.Areas, Nav.AreaOf, Nav.AreaEdges = {}, {}, nil
+	Nav.Cleared = true
+	Nav.Version = (Nav.Version or 0) + 1
+	return true, keepEdits and "Nav grid cleared (edits kept)." or "Nav grid and all edits cleared."
+end
+
+concommand.Add("ngl_nav_clear", function(ply, _, args)
+	if not allowed(ply) then return end
+	local ok, msg = Nav.Clear(args[1] == "keepedits")
+	tell(ply, ok and (msg .. " Run ngl_nav_generate to make a new one.") or msg)
+end)
+
 concommand.Add("ngl_nav_reload", function(ply)
 	if not allowed(ply) then return end
 	tell(ply, Nav.Load() and ("Loaded " .. Nav.Count .. " points.") or "No nav file for this map.")
@@ -2445,7 +2470,7 @@ end)
 -- right after the map loads if it has spawn points, otherwise when the first
 -- player spawns (generation starts from where players can stand).
 local function autoGenerate()
-	if Nav.Loaded or genRoutine or not cvAuto:GetBool() then return end
+	if Nav.Loaded or genRoutine or Nav.Cleared or not cvAuto:GetBool() then return end
 	if #seedPositions() == 0 then return end
 	print("[NGL] No nav grid for this map: generating one (ngl_nav_auto 0 turns this off).")
 	Nav.Generate(nil)

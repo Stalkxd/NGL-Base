@@ -15,7 +15,7 @@ An NPC base for Garry's Mod built for large battles (100+ NPCs) with minimal ser
 3f. **Moving well** (done, v0.17.0). Hops over low walls and through windows, stairs walked, paths that stay on one floor, NPCs that don't walk off the grid's edge or get stuck in each other, doors opened normally outside a fight, a nav editor that joins points by hand and shows as much of the grid as you want, the APC gun aimed in its own frame, dropships coming in from near the elite.
 3g. **Square areas** (done, v0.18.0, v0.18.1). The grid merged into rectangles like GMod's navmesh, paths searched over them and drawn straight through them, NPCs pushed apart when they overlap, and no more stalling at door frames. In v0.18.1 the whole grid is squares, halls and doorways too: a hall's points stay in one straight row and join into a thin strip of squares.
 3h. **Pushing, squares on hills** (done, v0.18.2, v0.18.3). NGL NPCs walk through each other and push each other aside instead of blocking or finding new paths; the editor's squares follow hills and ramps. In v0.18.3 the grid joins up over hilltops and ridges (walk checks follow the ground), and NPCs take shortcuts past waypoints when the way is clear, so paths on hills are straighter.
-3i. **Faster nav** (v0.19.0 to v0.19.2). Unreachable goals fail at once, flow fields for many NPCs going to one place, squad members sharing their leader's path; long paths searched over regions first, faster generation on open ground, edits rebuilding only round where they're made, and a binary grid file that loads without building areas again.
+3i. **Faster nav** (v0.19.0 to v0.19.3). Unreachable goals fail at once, flow fields for many NPCs going to one place, squad members sharing their leader's path; long paths searched over regions first, faster generation on open ground, edits rebuilding only round where they're made, and a binary grid file that loads without building areas again.
 3j. **Zombies and headcrabs** (v0.20.0). Fast zombies that come at you from out of sight, leap and climb high walls; HL2-style poison zombies that throw the crabs on their back; normal, fast and poison headcrabs, and zombies dropping their crab when they die. Climb links put at high walls when the grid is made, leap attacks for any NPC, and `ngl_spawn_all` to fill the whole map with NPCs for testing.
 4. **Battle test.** Two teams of 100+ soldiers on several maps, singleplayer and dedicated server, tuned against the target.
 
@@ -277,6 +277,7 @@ How NPCs use it:
 | `ngl_nav_edit_clear` | Remove all NGL Nav Editor edits for this map |
 | `ngl_nav_info` | Points, jump links, edits, spacing, queued searches, cached paths, and counts of found, failed, cached, dropped and rejected paths |
 | `ngl_nav_draw [radius]` | Draw the grid around you for 15 s (listen server with `developer 1`) |
+| `ngl_nav_clear [keepedits]` | Delete this map's whole nav grid and its editor edits (`keepedits` keeps the edits). It isn't made again on its own until the next map load; `ngl_nav_generate` makes a new one |
 | `ngl_nav_reload` | Reload the saved grid |
 | `ngl_nav_spacing` (64) | Grid spacing for generation. Smaller = more precise, more points |
 | `ngl_nav_fast_open` (1) | Fewer traces on flat open ground while generating (same grid) |
