@@ -308,9 +308,9 @@ local VIEW_PIECE = 60000
 
 -- The numbers the client draws from, in this order:
 --   node count, then x y z for each node (whole units)
---   triangle count, then three node numbers for each (filled open area)
---   outline count, then two node numbers for each (sides of the areas)
---   line count, then two node numbers for each (walkable, but not open area)
+--   triangle count, then three node numbers for each (the areas, filled)
+--   outline count, then two node numbers for each (the areas' sides)
+--   line count, then two node numbers for each (walkable, not inside an area)
 --   link count, then ax ay az bx by bz kind for each (Nav.KindCode)
 --   1 and x y z of the link start being placed, or 0
 function Nav.ViewData(center, radius, linkA)
@@ -337,62 +337,56 @@ function Nav.ViewData(center, radius, linkA)
 		end
 		for k, i in ipairs(list) do idx[i] = k end
 	end
+	-- Areas reaching out of the sphere are drawn whole: their far corners too.
+	do
+		local Areas, AreaOf = Nav.Areas or {}, Nav.AreaOf or {}
+		local seen = {}
+		for k = 1, #list do
+			local a = AreaOf[list[k]]
+			local A = a and Areas[a]
+			if A and A.big and not seen[a] then
+				seen[a] = true
+				for _, c in ipairs({ A.c00, A.c10, A.c11, A.c01 }) do
+					if not idx[c] then list[#list + 1] = c; idx[c] = #list end
+				end
+			end
+		end
+	end
 	put(#list)
 	for _, i in ipairs(list) do
 		local p = Nav.NodePos(i)
 		put(floor(p.x + 0.5)); put(floor(p.y + 0.5)); put(floor(p.z + 0.5))
 	end
-	-- Triangles with all three corners in the sphere, found through the grid
-	-- squares the corners are in.
-	local tris = {}
-	local edgeUse = {}   -- side (both node numbers) -> how many triangles have it
-	local KEY = 1048576
-	local function ekey(a, b) if a < b then return a * KEY + b end return b * KEY + a end
-	if Nav.TCells and #list > 0 then
-		local TA, TB, TC, TCells, S = Nav.TA, Nav.TB, Nav.TC, Nav.TCells, Nav.S
-		local seenCell, seenTri = {}, {}
-		for _, i in ipairs(list) do
-			local p = Nav.NodePos(i)
-			local k = I.cellKey(floor(p.x / S), floor(p.y / S))
-			if not seenCell[k] then
-				seenCell[k] = true
-				local c = TCells[k]
-				if c then
-					for m = 1, #c do
-						local t = c[m]
-						if not seenTri[t] then
-							seenTri[t] = true
-							local a, b, cc = idx[TA[t]], idx[TB[t]], idx[TC[t]]
-							if a and b and cc then
-								tris[#tris + 1] = a; tris[#tris + 1] = b; tris[#tris + 1] = cc
-								for _, e in ipairs({ ekey(a, b), ekey(b, cc), ekey(cc, a) }) do edgeUse[e] = (edgeUse[e] or 0) + 1 end
-							end
-						end
-					end
-				end
+	-- Areas (see Nav.BuildAreas): each rectangle with all four corners in the
+	-- sphere, as two triangles and its four sides.
+	local tris, outline = {}, {}
+	local Areas, AreaOf = Nav.Areas or {}, Nav.AreaOf or {}
+	local seen = {}
+	for k, i in ipairs(list) do
+		local a = AreaOf[i]
+		local A = a and Areas[a]
+		if A and A.big and not seen[a] then
+			seen[a] = true
+			local c00, c10, c11, c01 = idx[A.c00], idx[A.c10], idx[A.c11], idx[A.c01]
+			if c00 and c10 and c11 and c01 then
+				for _, v in ipairs({ c00, c10, c11, c00, c11, c01 }) do tris[#tris + 1] = v end
+				for _, v in ipairs({ c00, c10, c10, c11, c11, c01, c01, c00 }) do outline[#outline + 1] = v end
 			end
 		end
 	end
 	put(#tris / 3)
 	for _, v in ipairs(tris) do put(v) end
-	-- Outline: the grid-square sides of the areas, and any side only one
-	-- triangle has (the edge of the area). Shared diagonals are left out.
-	local outline = {}
-	for e, uses in pairs(edgeUse) do
-		local a, b = floor(e / KEY), e % KEY
-		local pa, pb = list[a], list[b]
-		local straight = Nav.NX[pa] == Nav.NX[pb] or Nav.NY[pa] == Nav.NY[pb]
-		if uses == 1 or straight then outline[#outline + 1] = a; outline[#outline + 1] = b end
-	end
 	put(#outline / 2)
 	for _, v in ipairs(outline) do put(v) end
-	-- Walkable connections that aren't part of any triangle.
+	-- Walkable connections that aren't inside one rectangle.
 	local lines = {}
 	for k, i in ipairs(list) do
 		local nb = Nav.NB[i]
+		local a = AreaOf[i]
+		local inBig = a and Areas[a] and Areas[a].big
 		for m = 1, #nb, 2 do
 			local j = idx[nb[m]]
-			if j and j > k and not edgeUse[ekey(k, j)] then lines[#lines + 1] = k; lines[#lines + 1] = j end
+			if j and j > k and not (inBig and AreaOf[nb[m]] == a) then lines[#lines + 1] = k; lines[#lines + 1] = j end
 		end
 	end
 	put(#lines / 2)
