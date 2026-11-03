@@ -162,11 +162,12 @@ local function buildNeighbours()
 	-- (two sides of a grid square and a diagonal). Two triangles make a
 	-- square. Each is listed in every grid square its corners reach into.
 	local TA, TB, TC, TCells = {}, {}, {}, {}
-	local SQ = {}
+	local SQ, InTri = {}, {}
 	local nt = 0
 	local function addTri(a, b, c)
 		nt = nt + 1
 		TA[nt], TB[nt], TC[nt] = a, b, c
+		InTri[a], InTri[b], InTri[c] = true, true, true
 		local xa, xb, xc = NX[a] * S + OX[a], NX[b] * S + OX[b], NX[c] * S + OX[c]
 		local ya, yb, yc = NY[a] * S + OY[a], NY[b] * S + OY[b], NY[c] * S + OY[c]
 		for cx = floor(math.min(xa, xb, xc) / S), floor(math.max(xa, xb, xc) / S) do
@@ -193,7 +194,7 @@ local function buildNeighbours()
 		if (t1 and t2) or (t3 and t4) then SQ[i] = true end -- a whole square
 	end
 	Nav.TA, Nav.TB, Nav.TC, Nav.TCells, Nav.TriCount = TA, TB, TC, TCells, nt
-	Nav.SQ = SQ
+	Nav.SQ, Nav.InTri = SQ, InTri
 	Nav.Version = (Nav.Version or 0) + 1 -- what the editor view was sent from has changed
 end
 
@@ -916,8 +917,17 @@ local function toWaypoints(chain, linkIn, caps)
 		end
 	end
 	local pts = {}
+	local inTri = Nav.InTri or {}
 	for k = 1, n do
-		if keep[k] then pts[#pts + 1] = nodePos(chain[k]) end
+		if keep[k] then
+			pts[#pts + 1] = nodePos(chain[k])
+			-- In a narrow place (doorway, hall): reach this point properly
+			-- before turning, so the turn doesn't clip the door frame.
+			if not inTri[chain[k]] then
+				pts.tight = pts.tight or {}
+				pts.tight[#pts] = true
+			end
+		end
 		local L = linkIn and linkIn[k + 1]
 		local move = L and linkMove(L, caps)
 		if move and move ~= "walk" then -- a link joined by hand is just walked
