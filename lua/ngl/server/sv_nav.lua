@@ -39,6 +39,7 @@ local cvGenBudget = CreateConVar("ngl_nav_gen_budget", "20", FCVAR_ARCHIVE, "Mil
 local cvBudget = CreateConVar("ngl_nav_budget", "2", FCVAR_ARCHIVE, "Milliseconds per tick for NPC path-finding.", 0.1, 50)
 local cvMaxExpand = CreateConVar("ngl_nav_max_expand", "16000", FCVAR_ARCHIVE, "Give up a path search after expanding this many grid points.", 100, 1000000)
 local cvMaxQueue = CreateConVar("ngl_nav_max_queue", "64", FCVAR_ARCHIVE, "Path requests beyond this many queued searches fail at once (the NPC walks straight).", 1, 10000)
+local cvFastOpen = CreateConVar("ngl_nav_fast_open", "1", FCVAR_ARCHIVE, "ngl_nav_generate: skip most traces on flat open ground (one box check per point instead of a hull and ground checks per link).", 0, 1)
 local cvAuto = CreateConVar("ngl_nav_auto", "1", FCVAR_ARCHIVE, "Generate the NGL nav grid on its own when a map has none (0 = only with ngl_nav_generate).", 0, 1)
 local cvDrops = CreateConVar("ngl_nav_drops", "1", FCVAR_ARCHIVE, "ngl_nav_generate links ledges up and down, so NPCs can jump onto and off them.", 0, 1)
 local cvMaxDrop = CreateConVar("ngl_nav_max_drop", "250", FCVAR_ARCHIVE, "Highest ledge (units) ngl_nav_generate links to the ground below.", 32, 4000)
@@ -139,7 +140,7 @@ Nav.NodePos = nodePos
 -- ramps rise up to about a square's width).
 local function linkTol() return Nav.S * 1.05 + 16 end
 
-local function buildNeighbours()
+local function buildNeighbours(saved)
 	local S = Nav.S
 	local tol = linkTol()
 	local NX, NY, NZ, NM, OX, OY = Nav.NX, Nav.NY, Nav.NZ, Nav.NM, Nav.OX, Nav.OY
@@ -163,12 +164,13 @@ local function buildNeighbours()
 	-- Open areas: every triangle of three points all linked to each other
 	-- (two sides of a grid square and a diagonal). Two triangles make a
 	-- square. Each is listed in every grid square its corners reach into.
-	local TA, TB, TC, TCells = {}, {}, {}, {}
+	local TA, TB, TC, TCells, TOwner = {}, {}, {}, {}, {}
 	local SQ, InTri = {}, {}
 	local nt = 0
+	local owner
 	local function addTri(a, b, c)
 		nt = nt + 1
-		TA[nt], TB[nt], TC[nt] = a, b, c
+		TA[nt], TB[nt], TC[nt], TOwner[nt] = a, b, c, owner
 		InTri[a], InTri[b], InTri[c] = true, true, true
 		local xa, xb, xc = NX[a] * S + OX[a], NX[b] * S + OX[b], NX[c] * S + OX[c]
 		local ya, yb, yc = NY[a] * S + OY[a], NY[b] * S + OY[b], NY[c] * S + OY[c]
@@ -182,6 +184,7 @@ local function buildNeighbours()
 		end
 	end
 	for i = 1, Nav.Count do
+		owner = i
 		local bd = byDir[i]
 		local e, n, ne = bd[1], bd[3], bd[5]
 		local t1 = e and ne and byDir[e][3] == ne            -- i, e, ne
@@ -195,9 +198,14 @@ local function buildNeighbours()
 		if t4 then addTri(e, ne2, n) end
 		if (t1 and t2) or (t3 and t4) then SQ[i] = true end -- a whole square
 	end
-	Nav.TA, Nav.TB, Nav.TC, Nav.TCells, Nav.TriCount = TA, TB, TC, TCells, nt
+	Nav.TA, Nav.TB, Nav.TC, Nav.TCells, Nav.TriCount, Nav.TOwner = TA, TB, TC, TCells, nt, TOwner
 	Nav.SQ, Nav.InTri = SQ, InTri
-	Nav.BuildAreas(byDir)
+	-- Areas as saved (Nav.Load), or built again.
+	if saved then
+		Nav.Areas, Nav.AreaOf, Nav.AreaEdges = saved.Areas, saved.AreaOf, nil
+	else
+		Nav.BuildAreas(byDir)
+	end
 	Nav.IslandWalk, Nav.IslandAny = nil, nil
 	Nav.Version = (Nav.Version or 0) + 1 -- what the editor view was sent from has changed
 end
@@ -224,16 +232,30 @@ local function squareWhole(byDir, a, b, c, d)
 		and byDir[c] and byDir[c][1] == d and Nav.SQ[a] or false
 end
 
-function Nav.BuildAreas(byDir)
-	local NX, NY, NZ, OX, OY, dead = Nav.NX, Nav.NY, Nav.NZ, Nav.OX, Nav.OY, Nav.Dead
-	local AreaOf, Areas = {}, {}
-	local order = {}
-	for i = 1, Nav.Count do if not dead[i] then order[#order + 1] = i end end
+local function sortNodes(order)
+	local NX, NY, NZ = Nav.NX, Nav.NY, Nav.NZ
 	table.sort(order, function(a, b)
 		if NY[a] ~= NY[b] then return NY[a] < NY[b] end
 		if NX[a] ~= NX[b] then return NX[a] < NX[b] end
 		return NZ[a] < NZ[b]
 	end)
+end
+
+-- Merges the points in `order` (sorted, see sortNodes) that have no area yet
+-- in AreaOf into new areas, numbered by alloc(); returns their numbers.
+local buildAreasOver
+function Nav.BuildAreas(byDir)
+	local order, dead = {}, Nav.Dead
+	for i = 1, Nav.Count do if not dead[i] then order[#order + 1] = i end end
+	sortNodes(order)
+	local Areas, AreaOf = {}, {}
+	buildAreasOver(order, byDir, Areas, AreaOf, function() return #Areas + 1 end)
+	Nav.Areas, Nav.AreaOf, Nav.AreaEdges = Areas, AreaOf, nil
+end
+
+buildAreasOver = function(order, byDir, Areas, AreaOf, alloc)
+	local NX, NY, NZ, OX, OY = Nav.NX, Nav.NY, Nav.NZ, Nav.OX, Nav.OY
+	local made = {}
 	local function free(i) return i and not AreaOf[i] and OX[i] == 0 and OY[i] == 0 end
 	for _, i in ipairs(order) do
 		if not AreaOf[i] then
@@ -273,7 +295,8 @@ function Nav.BuildAreas(byDir)
 				end
 			end
 			if rows and w >= 2 and #rows >= 2 then
-				local a = #Areas + 1
+				local a = alloc()
+				made[#made + 1] = a
 				for _, r in ipairs(rows) do for _, n in ipairs(r) do AreaOf[n] = a end end
 				local top = rows[#rows]
 				Areas[a] = { x0 = NX[i], y0 = NY[i], x1 = NX[i] + w - 1, y1 = NY[i] + #rows - 1, big = true,
@@ -299,7 +322,8 @@ function Nav.BuildAreas(byDir)
 	end
 	for _, i in ipairs(order) do
 		if not AreaOf[i] then
-			local a = #Areas + 1
+			local a = alloc()
+			made[#made + 1] = a
 			local h, v = run(i, 1), run(i, 3)
 			local strip = #h >= #v and h or v
 			if #strip >= 2 then
@@ -347,12 +371,13 @@ function Nav.BuildAreas(byDir)
 		end
 		return S * 0.5
 	end
-	for _, A in ipairs(Areas) do
+	for _, a in ipairs(made) do
+		local A = Areas[a]
 		local p00, p11 = nodePos(A.c00), nodePos(A.c11)
 		A.ex0, A.ex1 = p00.x - side(A, 2), p11.x + side(A, 1)
 		A.ey0, A.ey1 = p00.y - side(A, 4), p11.y + side(A, 3)
 	end
-	Nav.Areas, Nav.AreaOf, Nav.AreaEdges = Areas, AreaOf, nil
+	return made
 end
 
 -- Links leaving each node, for the search.
@@ -368,6 +393,165 @@ local function buildLinks()
 	Nav.IslandWalk, Nav.IslandAny = nil, nil
 end
 Nav.BuildLinks = buildLinks
+
+-- Rebuilds the grid round one spot after an edit there (points added or
+-- removed within r of p), instead of the whole map: the neighbour lists,
+-- open triangles and areas of the points within r (plus two squares) of p.
+-- Removed points stay in the arrays, marked dead, until the grid is next
+-- loaded or made. Area numbers elsewhere don't change, except the last few,
+-- moved into freed numbers. Area edges, regions and islands are made again
+-- on the next search (one pass each, no sorting).
+function Nav.RebuildAround(p, r)
+	if not (Nav.Areas and Nav.AreaOf and Nav.TCells) then return false end
+	local S = Nav.S
+	local tol = linkTol()
+	local NX, NY, NZ, NM, NB, dead = Nav.NX, Nav.NY, Nav.NZ, Nav.NM, Nav.NB, Nav.Dead
+	local Cells = Nav.Cells
+	local cr = math.ceil(r / S) + 2
+	local cx, cy = floor(p.x / S + 0.5), floor(p.y / S + 0.5)
+	local T, list = {}, {}
+	for x = cx - cr, cx + cr do
+		for y = cy - cr, cy + cr do
+			local c = Cells[cellKey(x, y)]
+			if c then for k = 1, #c do local i = c[k]; T[i] = true; list[#list + 1] = i end end
+		end
+	end
+	-- Each point's neighbour in each direction, worked out when first asked.
+	local byDir = setmetatable({}, { __index = function(t, i)
+		local bd = {}
+		if not dead[i] then
+			local m, ix, iy, z = NM[i], NX[i], NY[i], NZ[i]
+			for d = 1, 8 do
+				if bit.band(m, bit.lshift(1, d - 1)) ~= 0 then
+					local j = nodeAt(ix + DIRS[d][1], iy + DIRS[d][2], z, tol)
+					if j then bd[d] = j end
+				end
+			end
+		end
+		t[i] = bd
+		return bd
+	end })
+	-- Neighbour lists.
+	for _, i in ipairs(list) do
+		local nb = {}
+		if not dead[i] then
+			local bd = byDir[i]
+			for d = 1, 8 do
+				local j = bd[d]
+				if j then nb[#nb + 1] = j; nb[#nb + 1] = DIR_COST[d] end
+			end
+		end
+		NB[i] = nb
+	end
+	-- Open triangles: the ones of these points out, new ones in.
+	local TA, TB, TC, TCells, TOwner, SQ, InTri = Nav.TA, Nav.TB, Nav.TC, Nav.TCells, Nav.TOwner, Nav.SQ, Nav.InTri
+	for x = cx - cr - 1, cx + cr + 1 do
+		for y = cy - cr - 1, cy + cr + 1 do
+			local key = cellKey(x, y)
+			local l = TCells[key]
+			if l then
+				local keep = {}
+				for m = 1, #l do if not T[TOwner[l[m]]] then keep[#keep + 1] = l[m] end end
+				TCells[key] = #keep > 0 and keep or nil
+			end
+		end
+	end
+	local nt = Nav.TriCount
+	local owner
+	local function addTri(a, b, c)
+		nt = nt + 1
+		TA[nt], TB[nt], TC[nt], TOwner[nt] = a, b, c, owner
+		local xa, xb, xc = NX[a] * S + Nav.OX[a], NX[b] * S + Nav.OX[b], NX[c] * S + Nav.OX[c]
+		local ya, yb, yc = NY[a] * S + Nav.OY[a], NY[b] * S + Nav.OY[b], NY[c] * S + Nav.OY[c]
+		for tx = floor(math.min(xa, xb, xc) / S), floor(math.max(xa, xb, xc) / S) do
+			for ty = floor(math.min(ya, yb, yc) / S), floor(math.max(ya, yb, yc) / S) do
+				local k = cellKey(tx, ty)
+				local l = TCells[k]
+				if not l then l = {}; TCells[k] = l end
+				l[#l + 1] = nt
+			end
+		end
+	end
+	for _, i in ipairs(list) do
+		SQ[i], InTri[i] = nil, nil
+		if not dead[i] then
+			owner = i
+			local bd = byDir[i]
+			local e, n, ne = bd[1], bd[3], bd[5]
+			local t1 = e and ne and byDir[e][3] == ne
+			local t2 = n and ne and byDir[n][1] == ne
+			local t3 = e and n and byDir[e][8] == n
+			local ne2 = e and byDir[e][3]
+			local t4 = t3 and ne2 and byDir[n][1] == ne2
+			if t1 then addTri(i, e, ne) end
+			if t2 then addTri(i, ne, n) end
+			if t3 then addTri(i, e, n) end
+			if t4 then addTri(e, ne2, n) end
+			if (t1 and t2) or (t3 and t4) then SQ[i] = true end
+		end
+	end
+	Nav.TriCount = nt
+	for x = cx - cr - 1, cx + cr + 1 do
+		for y = cy - cr - 1, cy + cr + 1 do
+			local l = TCells[cellKey(x, y)]
+			if l then for m = 1, #l do local k = l[m]; InTri[TA[k]], InTri[TB[k]], InTri[TC[k]] = true, true, true end end
+		end
+	end
+	-- Areas: every area with a point here is taken apart and its points,
+	-- with the new ones, merged again.
+	local Areas, AreaOf = Nav.Areas, Nav.AreaOf
+	local rip, holes = {}, {}
+	for _, i in ipairs(list) do
+		local a = AreaOf[i]
+		if a and not rip[a] then rip[a] = true; holes[#holes + 1] = a end
+	end
+	local redo, seen = {}, {}
+	local function membersOf(a, fn)
+		local A = Areas[a]
+		for x = A.x0, A.x1 do
+			for y = A.y0, A.y1 do
+				local c = Cells[cellKey(x, y)]
+				if c then for k = 1, #c do if AreaOf[c[k]] == a then fn(c[k]) end end end
+			end
+		end
+	end
+	for _, a in ipairs(holes) do
+		membersOf(a, function(i) if not seen[i] then seen[i] = true; redo[#redo + 1] = i end end)
+	end
+	for _, i in ipairs(list) do if not seen[i] then seen[i] = true; redo[#redo + 1] = i end end
+	for _, i in ipairs(redo) do AreaOf[i] = nil end
+	for _, a in ipairs(holes) do Areas[a] = false end
+	local order = {}
+	for _, i in ipairs(redo) do if not dead[i] then order[#order + 1] = i end end
+	sortNodes(order)
+	table.sort(holes, function(a, b) return a > b end) -- lowest last: used first
+	buildAreasOver(order, byDir, Areas, AreaOf, function()
+		local h = table.remove(holes)
+		return h or #Areas + 1
+	end)
+	-- Numbers left over: move the last areas into them.
+	table.sort(holes, function(a, b) return a > b end)
+	for _, h in ipairs(holes) do
+		local last = #Areas
+		if h < last then
+			Areas[h] = Areas[last]
+			Areas[last] = nil
+			local A = Areas[h]
+			for x = A.x0, A.x1 do
+				for y = A.y0, A.y1 do
+					local c = Cells[cellKey(x, y)]
+					if c then for k = 1, #c do if AreaOf[c[k]] == last then AreaOf[c[k]] = h end end end
+				end
+			end
+		elseif h == last then
+			Areas[last] = nil
+		end
+	end
+	Nav.AreaEdges = nil
+	Nav.IslandWalk, Nav.IslandAny = nil, nil
+	Nav.Version = (Nav.Version or 0) + 1
+	return true
+end
 
 local function addLink(a, b, kind, h)
 	for _, L in ipairs(Nav.Links) do
@@ -569,24 +753,108 @@ local function navPath()
 end
 
 -- The generated grid (edits are kept apart, see sv_nav_edit.lua).
--- Format: header, one line per point (grid x, y, height, links, offset x, y),
--- then "LINKS" and one line per link.
 local KIND_CODE, CODE_KIND = { drop = 1, jump = 2, up = 3, climb = 4, walk = 5, vault = 6 },
 	{ "drop", "jump", "up", "climb", "walk", "vault" }
 Nav.KindCode, Nav.CodeKind = KIND_CODE, CODE_KIND
-local FORMAT = 4 -- older grids are made again (coarser, no vaults, stairs often missing)
+local FORMAT = 5 -- 5: binary with areas; 4: text (still loads); older grids are made again
+
+-- Binary format (FORMAT 5): a text header line "NGLNAVB<format> <spacing>
+-- <points> <links> <areas>", then fixed-size records, all compressed:
+--   point: grid x, y (2 bytes each), height x8 (4), links bitmask (1),
+--          offset x, y (1 each)                                  11 bytes
+--   link:  a, b (4 each), kind (1), height x8 (4)                 13 bytes
+--   area:  x0, y0, x1, y1 (2 each), flags (1: big, 2: strip),
+--          c00, c10, c01, c11 (4 each), ex0, ex1, ey0, ey1 x8 (4 each) 41 bytes
+--   then the area of every point (4 each, 0: none)
+-- Loading reads the numbers straight back (no text to parse) and keeps the
+-- saved areas instead of building them again. Older text grids (FORMAT 4)
+-- still load.
+local char, byte = string.char, string.byte
+local function u16(v) v = floor(v) % 65536; return char(floor(v / 256), v % 256) end
+local function u32(v)
+	v = floor(v) % 4294967296
+	return char(floor(v / 16777216) % 256, floor(v / 65536) % 256, floor(v / 256) % 256, v % 256)
+end
+local function i16(v) return u16(v + 32768) end
+local function i32(v) return u32(floor(v + 0.5) + 2147483648) end
+local function i8(v) return char((floor(v) + 128) % 256) end
+local function r16(s, p) local a, b = byte(s, p, p + 1); return a * 256 + b end
+local function r32(s, p) local a, b, c, d = byte(s, p, p + 3); return ((a * 256 + b) * 256 + c) * 256 + d end
 
 function Nav.Save()
-	local parts = { string.format("NGLNAV%d %d %d", FORMAT, Nav.S, Nav.Count) }
-	for i = 1, Nav.Count do
-		parts[#parts + 1] = string.format("%d %d %.1f %d %d %d", Nav.NX[i], Nav.NY[i], Nav.NZ[i], Nav.NM[i], Nav.OX[i], Nav.OY[i])
+	local n, Links, Areas, AreaOf = Nav.Count, Nav.Links, Nav.Areas or {}, Nav.AreaOf or {}
+	local parts = { string.format("NGLNAVB%d %d %d %d %d\n", FORMAT, Nav.S, n, #Links, #Areas) }
+	local NX, NY, NZ, NM, OX, OY = Nav.NX, Nav.NY, Nav.NZ, Nav.NM, Nav.OX, Nav.OY
+	for i = 1, n do
+		parts[#parts + 1] = i16(NX[i]) .. i16(NY[i]) .. i32(NZ[i] * 8) .. char(NM[i] % 256) .. i8(OX[i]) .. i8(OY[i])
 	end
-	parts[#parts + 1] = "LINKS"
-	for _, L in ipairs(Nav.Links) do
-		parts[#parts + 1] = string.format("%d %d %d %.1f", L.a, L.b, KIND_CODE[L.kind] or 1, L.h or 0)
+	for _, L in ipairs(Links) do
+		parts[#parts + 1] = u32(L.a) .. u32(L.b) .. char(KIND_CODE[L.kind] or 1) .. i32((L.h or 0) * 8)
+	end
+	for _, A in ipairs(Areas) do
+		parts[#parts + 1] = i16(A.x0) .. i16(A.y0) .. i16(A.x1) .. i16(A.y1)
+			.. char((A.big and 1 or 0) + (A.strip and 2 or 0))
+			.. u32(A.c00) .. u32(A.c10) .. u32(A.c01) .. u32(A.c11)
+			.. i32(A.ex0 * 8) .. i32(A.ex1 * 8) .. i32(A.ey0 * 8) .. i32(A.ey1 * 8)
+	end
+	if #Areas > 0 then
+		for i = 1, n do parts[#parts + 1] = u32(AreaOf[i] or 0) end
 	end
 	file.CreateDir("ngl_nav")
-	file.Write(navPath(), util.Compress(table.concat(parts, "\n")))
+	file.Write(navPath(), util.Compress(table.concat(parts)))
+end
+
+-- The binary grid in `data` (after its header line). Returns the saved
+-- areas (or nil when there are none or they don't fit the points).
+local function loadBinary(data, n, nl, na)
+	local NX, NY, NZ, NM, OX, OY, Cells = Nav.NX, Nav.NY, Nav.NZ, Nav.NM, Nav.OX, Nav.OY, Nav.Cells
+	if #data < n * 11 + nl * 13 + na * 41 + (na > 0 and n * 4 or 0) then return nil, false end
+	local p = 1
+	for i = 1, n do
+		local x1, x2, y1, y2, z1, z2, z3, z4, m, ox, oy = byte(data, p, p + 10)
+		local ix, iy = x1 * 256 + x2 - 32768, y1 * 256 + y2 - 32768
+		NX[i], NY[i] = ix, iy
+		NZ[i] = (((z1 * 256 + z2) * 256 + z3) * 256 + z4 - 2147483648) / 8
+		NM[i], OX[i], OY[i] = m, ox - 128, oy - 128
+		local k = cellKey(ix, iy)
+		local c = Cells[k]
+		if not c then c = {}; Cells[k] = c end
+		c[#c + 1] = i
+		p = p + 11
+	end
+	Nav.Count = n
+	local Links = Nav.Links
+	for _ = 1, nl do
+		local a, b = r32(data, p), r32(data, p + 4)
+		local k = byte(data, p + 8)
+		local h = (r32(data, p + 9) - 2147483648) / 8
+		if a >= 1 and a <= n and b >= 1 and b <= n then
+			Links[#Links + 1] = { a = a, b = b, kind = CODE_KIND[k] or "drop", h = h }
+		end
+		p = p + 13
+	end
+	if na == 0 then return nil, true end
+	local Areas = {}
+	local function s16(q) return r16(data, q) - 32768 end
+	local function s32(q) return (r32(data, q) - 2147483648) / 8 end
+	for a = 1, na do
+		local f = byte(data, p + 8)
+		local A = { x0 = s16(p), y0 = s16(p + 2), x1 = s16(p + 4), y1 = s16(p + 6),
+			big = f % 2 == 1, strip = f >= 2 or nil,
+			c00 = r32(data, p + 9), c10 = r32(data, p + 13), c01 = r32(data, p + 17), c11 = r32(data, p + 21),
+			ex0 = s32(p + 25), ex1 = s32(p + 29), ey0 = s32(p + 33), ey1 = s32(p + 37) }
+		if A.c00 < 1 or A.c00 > n or A.c11 < 1 or A.c11 > n or A.c10 > n or A.c01 > n then return nil, true end
+		Areas[a] = A
+		p = p + 41
+	end
+	local AreaOf = {}
+	for i = 1, n do
+		local a = r32(data, p)
+		if a > na then return nil, true end
+		if a > 0 then AreaOf[i] = a end
+		p = p + 4
+	end
+	return { Areas = Areas, AreaOf = AreaOf }, true
 end
 
 -- Loads the generated grid, then puts the edits back on (Nav.ApplyEdits).
@@ -596,12 +864,30 @@ function Nav.Load()
 	local text = util.Decompress(raw)
 	if not text then return false end
 
-	local header, rest = text:match("^([^\n]*)\n?(.*)$")
+	local nl = text:find("\n", 1, true)
+	local header = nl and text:sub(1, nl - 1) or text
+	local bver, bS, bn, blinks, bareas = header:match("^NGLNAVB(%d+) (%d+) (%d+) (%d+) (%d+)$")
+	if bver then
+		reset()
+		Nav.S = tonumber(bS)
+		local saved, ok = loadBinary(text:sub(nl + 1), tonumber(bn), tonumber(blinks), tonumber(bareas))
+		if not ok then
+			reset()
+			return false
+		end
+		buildNeighbours(saved)
+		buildLinks()
+		Nav.Loaded = Nav.Count > 0
+		if Nav.ApplyEdits then Nav.ApplyEdits() end
+		return Nav.Loaded
+	end
+
+	local header2, rest = text:match("^([^\n]*)\n?(.*)$")
 	local ver, S = nil, nil
-	if header then ver, S = header:match("^NGLNAV(%d+) (%d+)") end
+	if header2 then ver, S = header2:match("^NGLNAV(%d+) (%d+)") end
 	ver, S = tonumber(ver), tonumber(S)
 	if not S then return false end
-	if ver < FORMAT then
+	if ver < 4 then
 		print("[NGL] This map's nav grid is from an older version: making a new one (your edits are kept).")
 		return false
 	end
@@ -619,7 +905,7 @@ function Nav.Load()
 		local n = Nav.Count
 		for a, b, k, h in links:gmatch("(%d+) (%d+) (%d+) (-?[%d%.]+)") do
 			a, b = tonumber(a), tonumber(b)
-			if a <= n and b <= n then addLink(a, b, CODE_KIND[tonumber(k)] or "drop", tonumber(h)) end
+			if a <= n and b <= n then Nav.Links[#Nav.Links + 1] = { a = a, b = b, kind = CODE_KIND[tonumber(k)] or "drop", h = tonumber(h) } end
 		end
 	end
 	buildNeighbours()
@@ -863,6 +1149,23 @@ end
 -- doorways, along walls). `canAdd(ix, iy, z)`, if given, says where new
 -- points may go (the editor's add tool keeps to its circle). `drops`: the
 -- highest drop to link (nil: none, nor jumps up).
+-- Flat open ground, fast: nothing at all (wall, prop, low ceiling) in a box
+-- a person tall reaching a square and a half round the point, from a step
+-- above its ground. Then a neighbour whose ground is level with this one,
+-- and level half way there too, is walked to without the hull and ground
+-- checks of connect(): on an open field that's most of them.
+local openTrace = { mask = MASK_NPCSOLID_BRUSHONLY, output = {} }
+local FLAT_DZ = 1
+local function openAround(x, y, z, S)
+	local t = openTrace
+	local r = S + 14
+	t.start, t.endpos = Vector(x, y, z + STEP + 1), Vector(x, y, z + STEP + 1)
+	t.mins, t.maxs = Vector(-r, -r, 0), Vector(r, r, HULL_MAXS.z)
+	t.filter = hullTrace.filter
+	local tr = util.TraceHull(t)
+	return not tr.Hit and not tr.StartSolid
+end
+
 local tried = {}
 local function expandNode(i, queue, maxNodes, canAdd, drops)
 	local S = Nav.S
@@ -870,6 +1173,7 @@ local function expandNode(i, queue, maxNodes, canAdd, drops)
 	local top = math.max(maxUp, S * 1.05) + 8
 	local ix, iy, z = Nav.NX[i], Nav.NY[i], Nav.NZ[i]
 	local ax, ay = ix * S + Nav.OX[i], iy * S + Nav.OY[i]
+	local open = cvFastOpen:GetBool() and Nav.OX[i] == 0 and Nav.OY[i] == 0 and openAround(ax, ay, z, S)
 	for d = 1, 8 do
 		if bit.band(Nav.NM[i], bit.lshift(1, d - 1)) == 0 then
 			local nx, ny = ix + DIRS[d][1], iy + DIRS[d][2]
@@ -891,6 +1195,25 @@ local function expandNode(i, queue, maxNodes, canAdd, drops)
 					if not gz and groundResult.StartSolid then return "solid" end
 				end
 				if not gz then return nil end
+				-- Flat open ground both ends and half way: walk, no more checks.
+				if open and centre and abs(gz - z) <= FLAT_DZ and groundResult.HitNormal.z >= 0.999 then
+					local mz = groundAt((ax + bx) * 0.5, (ay + by) * 0.5, z + STEP, z - STEP)
+					if mz and abs(mz - z) <= FLAT_DZ and groundResult.HitNormal.z >= 0.999 then
+						local j = nodeAt(nx, ny, gz, 32)
+						if j then
+							if Nav.OX[j] == 0 and Nav.OY[j] == 0 then
+								joinNodes(i, j, d, "walk", z - gz)
+								return "walk"
+							end
+						elseif Nav.Count < maxNodes and (not canAdd or canAdd(nx, ny, gz)) then
+							j = addNode(nx, ny, gz, 0, 0)
+							queue[#queue + 1] = j
+							joinNodes(i, j, d, "walk", z - gz)
+							Nav.FastLinks = (Nav.FastLinks or 0) + 1
+							return "walk"
+						end
+					end
+				end
 				local j = nodeAt(nx, ny, gz, 32)
 				if j then
 					if tried[j] then return nil end
@@ -1357,8 +1680,147 @@ end
 
 -- A* over areas, then the path straightened through them. Same result as
 -- the point search (waypoints, .links for jumps, .tight for narrow places).
+----------------------------------------------------------------------------
+-- Regions: areas grouped into chunks of about REGION_AREAS (a room, a piece
+-- of field), joined where any of their areas are. A long path is first
+-- searched over regions (a few dozen instead of thousands of areas), then
+-- over the areas of the regions on that route only; if that finds nothing,
+-- over all areas as before.
+----------------------------------------------------------------------------
+local REGION_AREAS = 40
+local HIER_MIN = 1500   -- straight distance from which a path is searched in two steps
+local function buildRegions(edges)
+	if Nav.RegionsFor == edges then return Nav.RegionOf, Nav.RegionEdges, Nav.RegionCenters end
+	local Areas, centers = Nav.Areas, Nav.AreaCenters
+	local R, nr = {}, 0
+	local members = {}
+	for a = 1, #Areas do
+		if not R[a] then
+			nr = nr + 1
+			R[a] = nr
+			local queue, head, n = { a }, 1, 1
+			members[nr] = queue
+			while head <= #queue and n < REGION_AREAS do
+				local list = edges[queue[head]]
+				head = head + 1
+				if list then
+					for k = 1, #list do
+						local e = list[k]
+						local b = e.to
+						if not R[b] and (e.kind ~= "link" or e.L.kind == "walk") and n < REGION_AREAS then
+							R[b] = nr
+							n = n + 1
+							queue[#queue + 1] = b
+						end
+					end
+				end
+			end
+		end
+	end
+	local rc = {}
+	for r = 1, nr do
+		local x, y, z, m = 0, 0, 0, members[r]
+		for k = 1, #m do local c = centers[m[k]]; x, y, z = x + c.x, y + c.y, z + c.z end
+		rc[r] = Vector(x / #m, y / #m, z / #m)
+	end
+	-- Region edges: { to, cost, walk = any walking crossing, links = { L, ... } }
+	local re = {}
+	for a, list in pairs(edges) do
+		local ra = R[a]
+		for k = 1, #list do
+			local e = list[k]
+			local rb = R[e.to]
+			if rb and rb ~= ra then
+				local t = re[ra]
+				if not t then t = {}; re[ra] = t end
+				local x = t[rb]
+				if not x then
+					x = { to = rb, cost = rc[ra]:Distance(rc[rb]), walk = false }
+					t[rb] = x
+				end
+				if e.kind ~= "link" or e.L.kind == "walk" then x.walk = true
+				else x.links = x.links or {}; x.links[#x.links + 1] = e.L end
+			end
+		end
+	end
+	local S = Nav.S
+	for _, t in pairs(re) do for _, x in pairs(t) do if not x.walk then x.cost = x.cost + 3 * S end end end
+	Nav.RegionOf, Nav.RegionEdges, Nav.RegionCenters, Nav.RegionCount, Nav.RegionsFor = R, re, rc, nr, edges
+	return R, re, rc
+end
+Nav.BuildRegions = buildRegions
+
+-- The regions a path from region rs to rg may go through (those on the
+-- shortest route over regions), or nil if there's none.
+local function regionCorridor(rs, rg, caps)
+	local R, re, rc = Nav.RegionOf, Nav.RegionEdges, Nav.RegionCenters
+	local goalPos = rc[rg]
+	local hn, hf, size = {}, {}, 0
+	local g, came, closed = { [rs] = 0 }, {}, {}
+	size = heapPush(hn, hf, size, rs, rc[rs]:Distance(goalPos))
+	local found = false
+	while size > 0 do
+		local cur
+		cur, size = heapPop(hn, hf, size)
+		if cur == rg then found = true break end
+		if not closed[cur] then
+			closed[cur] = true
+			local t = re[cur]
+			if t then
+				for b, x in pairs(t) do
+					local ok = x.walk
+					if not ok and x.links then
+						for k = 1, #x.links do if linkMove(x.links[k], caps) then ok = true break end end
+					end
+					if ok and not closed[b] then
+						local ng = g[cur] + x.cost
+						if not g[b] or ng < g[b] then
+							g[b], came[b] = ng, cur
+							size = heapPush(hn, hf, size, b, ng + rc[b]:Distance(goalPos))
+						end
+					end
+				end
+			end
+		end
+	end
+	if not found then return nil end
+	local allowed = {}
+	local cur = rg
+	while cur do
+		allowed[cur] = true
+		cur = came[cur]
+	end
+	return allowed
+end
+Nav.RegionCorridor = regionCorridor
+
 local areaPath
+local areaSearchIn
 local function areaSearch(start, goal, caps)
+	local edges = Nav.AreaEdges or buildAreaEdges()
+	local AreaOf = Nav.AreaOf
+	local sa, ga = AreaOf[start], AreaOf[goal]
+	if not sa or not ga then return nil end
+	-- Far: over regions first, then only the areas along that route.
+	if nodePos(start):DistToSqr(nodePos(goal)) > HIER_MIN * HIER_MIN then
+		local R = buildRegions(edges)
+		if R[sa] ~= R[ga] then
+			local allowed = regionCorridor(R[sa], R[ga], caps)
+			if allowed then
+				local path = areaSearchIn(start, goal, caps, allowed, R)
+				if path then
+					Nav.Stats.hier = (Nav.Stats.hier or 0) + 1
+					return path
+				end
+			end
+		end
+	end
+	return areaSearchIn(start, goal, caps)
+end
+Nav.AreaSearch = areaSearch
+Nav.AreaSearchAll = function(start, goal, caps) return areaSearchIn(start, goal, caps) end
+
+areaSearchIn = function(start, goal, caps, allowed, R)
 	local edges = Nav.AreaEdges or buildAreaEdges()
 	local AreaOf, Areas, centers = Nav.AreaOf, Nav.Areas, Nav.AreaCenters
 	local sa, ga = AreaOf[start], AreaOf[goal]
@@ -1384,7 +1846,7 @@ local function areaSearch(start, goal, caps)
 				for k = 1, #list do
 					local e = list[k]
 					local b = e.to
-					if not closed[b] and (e.kind ~= "link" or linkMove(e.L, caps)) then
+					if not closed[b] and (e.kind ~= "link" or linkMove(e.L, caps)) and (not allowed or allowed[R[b]]) then
 						local ng = gc + e.cost
 						if not g[b] or ng < g[b] then
 							g[b], came[b], cameBy[b] = ng, cur, e
@@ -1396,6 +1858,7 @@ local function areaSearch(start, goal, caps)
 			if expanded % 64 == 0 then coroutine.yield() end
 		end
 	end
+	Nav.Stats.lastExpanded = expanded
 	if not found then return nil end
 	-- The areas and edges from start to goal.
 	local seq = {}
@@ -1406,7 +1869,6 @@ local function areaSearch(start, goal, caps)
 	end
 	return areaPath(start, goal, seq, caps)
 end
-Nav.AreaSearch = areaSearch
 
 -- Waypoints from point `start` to point `goal` through the area edges `seq`
 -- (from an area search or a flow field).
