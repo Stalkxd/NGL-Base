@@ -832,6 +832,35 @@ local function straightOk(npc, now, pos, tPos)
 	return c.ok
 end
 
+-- Squad path sharing: a squad member going where its leader's path goes
+-- (the same target, give or take) joins that path at the point nearest it
+-- instead of searching its own. Paths are never changed once made, so the
+-- same table is shared. Only with the same jumps and width as the leader,
+-- on the same floor, within SHARE_JOIN of the path, and with the grid saying
+-- it can walk straight to where it joins.
+local SHARE_JOIN = 160
+local function sharedPath(npc, pos, tPos)
+	local sq = npc.NGLSquad
+	local L = sq and sq.leader
+	if not L or L == npc or not IsValid(L) or L.NGLDying then return nil end
+	local path, tgt = L.NGLPath, L.NGLPathTarget
+	if not path or not tgt or tgt:DistToSqr(tPos) > REPATH_SQR then return nil end
+	if (npc.NavWidth or 0) ~= (L.NavWidth or 0) or npc.NGLNavCaps ~= L.NGLNavCaps then return nil end
+	local best, bd
+	for k = math.max(1, (L.NGLPathIdx or 1) - 2), #path do
+		local p = path[k]
+		if abs(p.z - pos.z) < 64 then
+			local d = (p.x - pos.x) ^ 2 + (p.y - pos.y) ^ 2
+			if d < SHARE_JOIN * SHARE_JOIN and (not bd or d < bd) then best, bd = k, d end
+		end
+	end
+	if not best then return nil end
+	local nav = NGL.Nav
+	if nav.WalkLine and nav.WalkLine(pos, path[best]) == false then return nil end
+	return path, best, tgt
+end
+Core.SharedPath = sharedPath
+
 -- Move towards the enemy. Straight line when it's in view on the same level
 -- and the grid says nothing's in the way (no path-finding at all), otherwise
 -- along a path from our nav grid, requested in the background. The NPC never
@@ -868,10 +897,19 @@ local function chase(npc, now, pos, tPos, visible)
 
 	local req = (npc.NGLPathReq or 0) + 1
 	npc.NGLPathReq = req
-	npc.NGLPathPending = true
-	npc.NGLPathPendingSince = now
 	npc.NGLRepathAt = now + 3
 	local target = Vector(tPos.x, tPos.y, tPos.z)
+	-- In a squad whose leader already has a path there: take it.
+	local sp, sk, st = sharedPath(npc, pos, target)
+	if sp then
+		npc.NGLPath, npc.NGLPathIdx, npc.NGLPathTarget = sp, sk, st
+		npc.NGLPathPending = false
+		npc.NGLGoal = target
+		nav.Stats.shared = (nav.Stats.shared or 0) + 1
+		return
+	end
+	npc.NGLPathPending = true
+	npc.NGLPathPendingSince = now
 	nav.RequestPath(pos, target, function(path)
 		if not IsValid(npc) or npc.NGLPathReq ~= req then return end
 		npc.NGLPathPending = false

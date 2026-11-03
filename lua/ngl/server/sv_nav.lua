@@ -92,6 +92,8 @@ local function reset()
 	Nav.Cache = {}
 	Nav.Pending = {}
 	Nav.Wide = {} -- [half width] = { [node] = true/false }, filled lazily by wide searches
+	Nav.IslandWalk, Nav.IslandAny = nil, nil
+	Nav.Fields = {}
 	-- Searches over the old grid are meaningless now. Their callers time out
 	-- on their own (see chase in sv_core.lua).
 	for k in pairs(searches) do searches[k] = nil end
@@ -196,6 +198,7 @@ local function buildNeighbours()
 	Nav.TA, Nav.TB, Nav.TC, Nav.TCells, Nav.TriCount = TA, TB, TC, TCells, nt
 	Nav.SQ, Nav.InTri = SQ, InTri
 	Nav.BuildAreas(byDir)
+	Nav.IslandWalk, Nav.IslandAny = nil, nil
 	Nav.Version = (Nav.Version or 0) + 1 -- what the editor view was sent from has changed
 end
 
@@ -362,6 +365,7 @@ local function buildLinks()
 	end
 	Nav.LB = LB
 	Nav.AreaEdges = nil -- rebuilt on the next search
+	Nav.IslandWalk, Nav.IslandAny = nil, nil
 end
 Nav.BuildLinks = buildLinks
 
@@ -1353,6 +1357,7 @@ end
 
 -- A* over areas, then the path straightened through them. Same result as
 -- the point search (waypoints, .links for jumps, .tight for narrow places).
+local areaPath
 local function areaSearch(start, goal, caps)
 	local edges = Nav.AreaEdges or buildAreaEdges()
 	local AreaOf, Areas, centers = Nav.AreaOf, Nav.Areas, Nav.AreaCenters
@@ -1399,7 +1404,16 @@ local function areaSearch(start, goal, caps)
 		table.insert(seq, 1, cameBy[cur])
 		cur = came[cur]
 	end
-	-- Portals; jumps split it into stretches, each straightened on its own.
+	return areaPath(start, goal, seq, caps)
+end
+Nav.AreaSearch = areaSearch
+
+-- Waypoints from point `start` to point `goal` through the area edges `seq`
+-- (from an area search or a flow field).
+-- Portals; jumps split it into stretches, each straightened on its own.
+areaPath = function(start, goal, seq, caps)
+	local Areas, AreaOf = Nav.Areas, Nav.AreaOf
+	local goalPos = nodePos(goal)
 	local pts, tight = {}, {}
 	local links, tightIdx = nil, nil
 	local stretch = { }
@@ -1446,7 +1460,94 @@ local function areaSearch(start, goal, caps)
 	pts.links, pts.tight = links, tightIdx
 	return pts
 end
-Nav.AreaSearch = areaSearch
+
+----------------------------------------------------------------------------
+-- Flow fields: when many NPCs head for the same spot (a squad, a horde
+-- chasing one player), one search outward from that spot over the areas
+-- (Dijkstra, every area's way to it) serves them all: each NPC's path is
+-- read off the field by following it from its own area, no search at all.
+-- Made when FIELD_MIN requests from different places want the same goal
+-- region within FIELD_WINDOW seconds; kept FIELD_TIME seconds.
+----------------------------------------------------------------------------
+local FIELD_MIN = 4
+local FIELD_WINDOW = 3
+local FIELD_TIME = 4
+local FIELD_MAX = 8000    -- areas a field reaches at most (further: normal searches)
+Nav.Fields = Nav.Fields or {}   -- [key] = field
+local demand = {}               -- [key] = { t = first request, n = count, from = { [start key] = true } }
+
+-- Edges into each area (the field is searched backwards from the goal).
+local function reverseEdges(edges)
+	if Nav.AreaRevFor == edges then return Nav.AreaRev end
+	local rev = {}
+	for a, list in pairs(edges) do
+		for k = 1, #list do
+			local e = list[k]
+			local r = rev[e.to]
+			if not r then r = {}; rev[e.to] = r end
+			r[#r + 1] = a
+			r[#r + 1] = e
+		end
+	end
+	Nav.AreaRev, Nav.AreaRevFor = rev, edges
+	return rev
+end
+
+local function buildField(goal, caps)
+	local edges = Nav.AreaEdges or buildAreaEdges()
+	local rev = reverseEdges(edges)
+	local ga = Nav.AreaOf[goal]
+	if not ga then return nil end
+	local dist, nextE = { [ga] = 0 }, {}
+	local closed = {}
+	local hn, hf, size = {}, {}, 0
+	size = heapPush(hn, hf, size, ga, 0)
+	local expanded = 0
+	while size > 0 do
+		local cur
+		cur, size = heapPop(hn, hf, size)
+		if not closed[cur] then
+			closed[cur] = true
+			expanded = expanded + 1
+			if expanded > FIELD_MAX then break end
+			local list = rev[cur]
+			if list then
+				local dc = dist[cur]
+				for k = 1, #list, 2 do
+					local a, e = list[k], list[k + 1]
+					if not closed[a] and (e.kind ~= "link" or linkMove(e.L, caps)) then
+						local nd = dc + e.cost
+						if not dist[a] or nd < dist[a] then
+							dist[a], nextE[a] = nd, e
+							size = heapPush(hn, hf, size, a, nd)
+						end
+					end
+				end
+			end
+			if expanded % 128 == 0 then coroutine.yield() end
+		end
+	end
+	return { goal = goal, ga = ga, dist = closed, nextE = nextE, edges = edges, t = CurTime(), caps = caps }
+end
+
+-- The path from point s along the field, or nil if s isn't in it.
+local function fieldPath(F, s)
+	if Nav.AreaEdges ~= F.edges then return nil end
+	local a = Nav.AreaOf[s]
+	if not a or not F.dist[a] then return nil end
+	local seq = {}
+	local guard = 0
+	while a ~= F.ga do
+		local e = F.nextE[a]
+		if not e then return nil end
+		seq[#seq + 1] = e
+		a = e.to
+		guard = guard + 1
+		if guard > FIELD_MAX then return nil end
+	end
+	return areaPath(s, F.goal, seq, F.caps)
+end
+Nav.FieldPath = fieldPath
 
 local function search(start, goal, width, caps)
 	-- People search over areas; wide NPCs over points (each point's width is
@@ -1562,6 +1663,51 @@ local function regionKey(s, t)
 		floor(NX[t] / GOAL_REGION), floor(NY[t] / GOAL_REGION), floor(NZ[t] / Z_BAND))
 end
 
+-- Islands: which points can reach which. Built once after the grid or its
+-- links change (one pass over every point), then a path to a point on
+-- another island fails at once instead of searching everything it can reach
+-- first. IslandWalk[i]: joined by walking (and links joined by hand, which
+-- go both ways); IslandAny[i]: also by any jump, drop or climb, either way.
+-- Points on different IslandAny islands are never reachable; with no jumps
+-- (caps nil), neither are points on different IslandWalk islands.
+local function islands()
+	if Nav.IslandWalk then return Nav.IslandWalk, Nav.IslandAny end
+	local n, NB, Links = Nav.Count, Nav.NB, Nav.Links
+	local parent = {}
+	for i = 1, n do parent[i] = i end
+	local function find(x)
+		local r = x
+		while parent[r] ~= r do r = parent[r] end
+		while parent[x] ~= r do local nx = parent[x]; parent[x] = r; x = nx end
+		return r
+	end
+	local function union(a, b)
+		a, b = find(a), find(b)
+		if a ~= b then parent[a] = b end
+	end
+	for i = 1, n do
+		local nb = NB[i]
+		if nb then for k = 1, #nb, 2 do union(i, nb[k]) end end
+	end
+	for _, L in ipairs(Links) do if L.kind == "walk" then union(L.a, L.b) end end
+	local walk = {}
+	for i = 1, n do walk[i] = find(i) end
+	for _, L in ipairs(Links) do if L.kind ~= "walk" then union(L.a, L.b) end end
+	local any = {}
+	for i = 1, n do any[i] = find(i) end
+	Nav.IslandWalk, Nav.IslandAny = walk, any
+	return walk, any
+end
+Nav.Islands = islands
+
+-- Can a path from point s to point t exist at all (see islands)?
+function Nav.Reachable(s, t, caps)
+	local walk, any = islands()
+	if any[s] ~= any[t] then return false end
+	if not caps and walk[s] ~= walk[t] then return false end
+	return true
+end
+
 -- Asks for a path from `from` to `to`. `callback(waypoints or nil)` is called
 -- later, or right away for a cached path, an unreachable spot or a full queue.
 -- Returns false if there is no nav grid.
@@ -1588,6 +1734,13 @@ function Nav.RequestPath(from, to, callback, wanted, width, caps)
 		return true
 	end
 
+	if not Nav.Reachable(s, t, caps) then
+		st.fail = st.fail + 1
+		st.unreachable = (st.unreachable or 0) + 1
+		callback(nil)
+		return true
+	end
+
 	local key = regionKey(s, t)
 	if width then key = "w" .. width .. "|" .. key end
 	if caps then key = caps.key .. "|" .. key end
@@ -1596,6 +1749,44 @@ function Nav.RequestPath(from, to, callback, wanted, width, caps)
 		st.cached = st.cached + 1
 		callback(hit.path)
 		return true
+	end
+
+	-- A flow field to this goal region (people only; wide NPCs search points).
+	local fkey
+	if not width and Nav.Areas then
+		local NX, NY, NZ = Nav.NX, Nav.NY, Nav.NZ
+		fkey = string.format("%s|%d:%d:%d", caps and caps.key or "", floor(NX[t] / GOAL_REGION),
+			floor(NY[t] / GOAL_REGION), floor(NZ[t] / Z_BAND))
+		local now = CurTime()
+		local F = Nav.Fields[fkey]
+		if F and now - F.t < FIELD_TIME then
+			local path = fieldPath(F, s)
+			if path then
+				st.field = (st.field or 0) + 1
+				Nav.Cache[key] = { path = path, t = now }
+				callback(path)
+				return true
+			end
+		end
+		local fk = "F|" .. fkey
+		local building = Nav.Pending[fk]
+		if building then
+			building[#building + 1] = { cb = callback, wanted = wanted, s = s, t = t, key = key, caps = caps }
+			return true
+		end
+		local D = demand[fkey]
+		if not D or now - D.t > FIELD_WINDOW then D = { t = now, n = 0, from = {} }; demand[fkey] = D end
+		local from = string.format("%d:%d:%d", floor(NX[s] / REGION), floor(NY[s] / REGION), floor(NZ[s] / Z_BAND))
+		if not D.from[from] then D.from[from] = true; D.n = D.n + 1 end
+		if D.n >= FIELD_MIN and #searches < cvMaxQueue:GetInt() then
+			demand[fkey] = nil
+			Nav.Pending[fk] = { { cb = callback, wanted = wanted, s = s, t = t, key = key, caps = caps } }
+			searches[#searches + 1] = {
+				key = fk, field = fkey,
+				co = coroutine.create(function() return buildField(t, caps) end),
+			}
+			return true
+		end
 	end
 
 	local waiter = { cb = callback, wanted = wanted }
@@ -1660,14 +1851,40 @@ hook.Add("Tick", "NGL.Nav", function()
 			local ok, res = coroutine.resume(job.co)
 			if not ok or coroutine.status(job.co) == "dead" then
 				table.remove(searches, 1)
-				local path = ok and res or nil
 				if not ok then print("[NGL] Path search error: " .. tostring(res)) end
-				if path then st.ok = st.ok + 1 else st.fail = st.fail + 1 end
-				Nav.Cache[job.key] = { path = path, t = CurTime() }
 				local ws = Nav.Pending[job.key]
 				Nav.Pending[job.key] = nil
-				if ws then
-					for i = 1, #ws do ws[i].cb(path) end
+				if job.field then
+					-- A flow field: every waiter's path read off it.
+					local F = ok and res or nil
+					if F then Nav.Fields[job.field] = F; st.fields = (st.fields or 0) + 1 end
+					if ws then
+						for i = 1, #ws do
+							local w = ws[i]
+							local path = F and fieldPath(F, w.s) or nil
+							if path then
+								st.field = (st.field or 0) + 1
+								w.cb(path)
+							elseif Nav.Pending[w.key] then
+								table.insert(Nav.Pending[w.key], w)
+							else
+								-- Beyond the field: a search of its own.
+								Nav.Pending[w.key] = { w }
+								local ws_, wt, wc = w.s, w.t, w.caps
+								searches[#searches + 1] = {
+									key = w.key,
+									co = coroutine.create(function() return search(ws_, wt, nil, wc) end),
+								}
+							end
+						end
+					end
+				else
+					local path = ok and res or nil
+					if path then st.ok = st.ok + 1 else st.fail = st.fail + 1 end
+					Nav.Cache[job.key] = { path = path, t = CurTime() }
+					if ws then
+						for i = 1, #ws do ws[i].cb(path) end
+					end
 				end
 			end
 		end
@@ -1682,6 +1899,12 @@ timer.Create("NGL.Nav.CacheGC", 10, 0, function()
 	local now = CurTime()
 	for k, v in pairs(Nav.Cache) do
 		if now - v.t > CACHE_TIME then Nav.Cache[k] = nil end
+	end
+	for k, F in pairs(Nav.Fields) do
+		if now - F.t > FIELD_TIME then Nav.Fields[k] = nil end
+	end
+	for k, D in pairs(demand) do
+		if now - D.t > FIELD_WINDOW then demand[k] = nil end
 	end
 end)
 
