@@ -410,6 +410,72 @@ local function overlapCheck(npc, now, pos)
 	end
 end
 
+-- Shortcuts: on patchy ground (hills, rubble) the grid's path zig-zags from
+-- point to point. Every SHORTCUT_EVERY seconds an NPC on a path checks if it
+-- can walk straight past its next waypoint to one further on (the furthest
+-- of SHORTCUT_AHEAD): one hull trace from here to there, and the ground under
+-- the line every SHORTCUT_SAMPLE units (no hole, no drop, nothing steeper
+-- than a slope a NextBot walks up). Never past a jump, drop or climb on the
+-- path, nor across floors.
+local SHORTCUT_EVERY = 0.4
+local SHORTCUT_AHEAD = 3
+local SHORTCUT_MAX = 600        -- no further than this in one go
+local SHORTCUT_SAMPLE = 32
+local SHORT_STEP = 18
+local cutHull = { mask = MASK_NPCSOLID_BRUSHONLY, output = {} }
+local cutDown = { mask = MASK_NPCSOLID_BRUSHONLY, output = {} }
+
+function Core.WalkClear(npc, from, to)
+	local dx, dy = to.x - from.x, to.y - from.y
+	local len = math.sqrt(dx * dx + dy * dy)
+	if len < 1 then return true end
+	if len > SHORTCUT_MAX or abs(to.z - from.z) > len + SHORT_STEP then return false end
+	local t = cutHull
+	t.start, t.endpos = Vector(from.x, from.y, from.z + SHORT_STEP), Vector(to.x, to.y, to.z + SHORT_STEP)
+	local mins, maxs = boundsOf(npc)
+	t.mins, t.maxs = mins, Vector(maxs.x, maxs.y, math.max(maxs.z - SHORT_STEP, 8))
+	t.filter = npc
+	local tr = util.TraceHull(t)
+	if tr.Hit or tr.StartSolid then return false end
+	-- The ground all the way: each sample near where the slope so far says.
+	local n = math.max(1, math.ceil(len / SHORTCUT_SAMPLE))
+	local seg = len / n
+	local pz = from.z
+	local d = cutDown
+	d.filter = npc
+	for k = 1, n - 1 do
+		local f = k / n
+		local x, y = from.x + dx * f, from.y + dy * f
+		d.start = Vector(x, y, pz + SHORT_STEP + seg + 8)
+		d.endpos = Vector(x, y, pz - SHORT_STEP - seg - 8)
+		local g = util.TraceLine(d)
+		if not g.Hit or g.StartSolid then return false end
+		if g.HitNormal and g.HitNormal.z and g.HitNormal.z < 0.7 then return false end
+		pz = g.HitPos.z
+	end
+	return abs(to.z - pz) <= SHORT_STEP + seg
+end
+
+function Core.Shortcut(npc, now, pos)
+	local path = npc.NGLPath
+	if not path or npc.NGLTraverse or npc.IsVehicleNPC or npc.NavWidth then return end
+	if now < (npc.NGLShortcutAt or 0) then return end
+	npc.NGLShortcutAt = now + SHORTCUT_EVERY
+	local idx = npc.NGLPathIdx or 1
+	local links = path.links
+	local last = idx
+	for k = idx, math.min(#path - 1, idx + SHORTCUT_AHEAD - 1) do
+		if links and links[k] then break end -- a jump or climb from waypoint k: stop there
+		last = k + 1
+	end
+	for k = last, idx + 1, -1 do
+		if Core.WalkClear(npc, pos, path[k]) then
+			npc.NGLPathIdx = k
+			return k
+		end
+	end
+end
+
 -- Just spawned on top of another NGL NPC (the spawn menu, a squad or a
 -- dropship all on one spot): moved to the nearest free spot round it, with
 -- room for its hull and ground under it. Once, on its first think.
@@ -1337,6 +1403,7 @@ local function think(npc, now, dt, nearestPlayerSqr)
 	if not npc.NGLTraverse then
 		pushCheck(npc, now, pos)
 		overlapCheck(npc, now, pos)
+		if npc.NGLPath then Core.Shortcut(npc, now, pos) end
 		-- A closed door in the way: open it or kick it in (sv_doors.lua).
 		local D = NGL.Doors
 		if D and npc.NGLMoving and (npc.OpenDoors or npc.DoorBreach) then D.Think(npc, now, pos) end

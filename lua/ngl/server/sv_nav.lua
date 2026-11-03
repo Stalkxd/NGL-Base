@@ -665,8 +665,32 @@ local function hullClear(ax, ay, az, bx, by, bz)
 	return not hullResult.Hit and not hullResult.StartSolid
 end
 
+-- A person fits all the way from a to b, a step above the ground. One hull
+-- trace in a straight line; if that hits something, it may only be the
+-- ground itself (over the top of a hill, the straight line goes into it):
+-- then again in short pieces that follow the ground, SAMPLE units each.
 local function walkable(ax, ay, az, bx, by, bz)
-	return hullClear(ax, ay, az + STEP, bx, by, bz + STEP)
+	if hullClear(ax, ay, az + STEP, bx, by, bz + STEP) then return true end
+	local dx, dy = bx - ax, by - ay
+	local len = sqrt(dx * dx + dy * dy)
+	local n = math.ceil(len / SAMPLE)
+	if n < 2 then return false end
+	local px, py, pz = ax, ay, az
+	for k = 1, n do
+		local x, y, z
+		if k == n then
+			x, y, z = bx, by, bz
+		else
+			local f = k / n
+			x, y = ax + dx * f, ay + dy * f
+			local reach = STEP * 2 + len / n * 1.05 + 4
+			z = groundAt(x, y, pz + reach, pz - reach)
+			if not z then return false end
+		end
+		if not hullClear(px, py, pz + STEP, x, y, z + STEP) then return false end
+		px, py, pz = x, y, z
+	end
+	return true
 end
 
 -- The ground all along a to b is walkable for a NextBot: no ledge higher than

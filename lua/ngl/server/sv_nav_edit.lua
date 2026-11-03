@@ -422,9 +422,14 @@ function Nav.ViewData(center, radius, linkA)
 				local v10 = vert(x1, y0, cz(e, ss, 7, x1, y0))
 				local v11 = vert(x1, y1, cz(e, nn, 5, x1, y1))
 				local v01 = vert(x0, y1, cz(w, nn, 8, x0, y1))
+				-- Four triangles round the point itself, at its own height (on
+				-- the ground), so a hilltop doesn't poke through the square.
+				local vc = vert(px, py, pz)
 				local t = #tris
-				tris[t + 1], tris[t + 2], tris[t + 3] = v00, v10, v11
-				tris[t + 4], tris[t + 5], tris[t + 6] = v00, v11, v01
+				tris[t + 1], tris[t + 2], tris[t + 3] = v00, v10, vc
+				tris[t + 4], tris[t + 5], tris[t + 6] = v10, v11, vc
+				tris[t + 7], tris[t + 8], tris[t + 9] = v11, v01, vc
+				tris[t + 10], tris[t + 11], tris[t + 12] = v01, v00, vc
 				local function edge(n, p, q)
 					if not (n and AreaOf[n] == a) then outline[#outline + 1] = p; outline[#outline + 1] = q end
 				end
