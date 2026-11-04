@@ -467,6 +467,21 @@ function ENT:BehaveUpdate(interval)
 			goal = Vector(pos.x + un.x * 48, pos.y + un.y * 48, pos.z)
 		end
 	end
+	-- Inside another NGL NPC (Core.OverlapCheck): steer away from it as well
+	-- as towards the goal, so a pack running at one target spreads out
+	-- instead of piling into one spot.
+	local sep = self.NGLSep
+	if sep then
+		if now >= sep.untilT then
+			self.NGLSep = nil
+		elseif goal then
+			local dx, dy = goal.x - pos.x, goal.y - pos.y
+			local l = math.sqrt(dx * dx + dy * dy)
+			if l > 1 then
+				goal = Vector(pos.x + dx / l * 32 + sep.x * 40, pos.y + dy / l * 32 + sep.y * 40, goal.z)
+			end
+		end
+	end
 	-- Not on a path (walking straight at someone, strafing, stepping aside):
 	-- don't walk off a drop. One short trace down just ahead (not the grid,
 	-- which may be patchy at door frames and wall corners), again every

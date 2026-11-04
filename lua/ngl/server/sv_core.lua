@@ -412,9 +412,11 @@ local function apartDir(a, apos, b, bpos)
 end
 Core.ApartDir = apartDir
 
+local SEP_TIME = 0.35
 local function overlapCheck(npc, now, pos)
 	if npc.IsVehicleNPC then return end
 	local myR = radiusOf(npc)
+	local sx, sy = 0, 0
 	local reach = myR + 40
 	local x0, x1 = floor((pos.x - reach) / CELL) + OFFSET, floor((pos.x + reach) / CELL) + OFFSET
 	local y0, y1 = floor((pos.y - reach) / CELL) + OFFSET, floor((pos.y + reach) / CELL) + OFFSET
@@ -430,14 +432,23 @@ local function overlapCheck(npc, now, pos)
 						local gap = math.sqrt(ox * ox + oy * oy) - myR - radiusOf(e)
 						if gap < -2 then
 							local bx, by = apartDir(npc, pos, e, p)
-							local sp = math.min(OVERLAP_SPEED, 20 - gap * 3)
+							-- Running into each other (a pack going for the
+							-- same target): a shove alone loses to their
+							-- running, so harder, and they steer apart too.
+							local moving = npc.NGLMoving or e.NGLMoving
+							local sp = math.min(moving and 200 or OVERLAP_SPEED, 20 - gap * (moving and 8 or 3))
 							shove(npc, bx, by, sp, now)
 							shove(e, -bx, -by, sp, now)
+							sx, sy = sx - bx * gap, sy - by * gap
 						end
 					end
 				end
 			end
 		end
+	end
+	if sx ~= 0 or sy ~= 0 then
+		local l = math.sqrt(sx * sx + sy * sy)
+		npc.NGLSep = { x = sx / l, y = sy / l, untilT = now + SEP_TIME }
 	end
 end
 
