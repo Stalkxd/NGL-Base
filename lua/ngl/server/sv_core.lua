@@ -26,6 +26,11 @@ local cvRateFar = CreateConVar("ngl_ai_rate_far", "1.0", FCVAR_ARCHIVE, "Seconds
 local cvVisual = CreateConVar("ngl_ai_visual_range", "3000", FCVAR_ARCHIVE, "NPCs this close to a player fire real bullets with tracers and sound; further away they use one silent trace.", 0, 50000)
 local cvDetail = CreateConVar("ngl_anim_detail_range", "1500", FCVAR_ARCHIVE, "NPCs this close to a player get full animation detail (aim and strafe poses, firing/reload/flinch gestures, aimed walk and run). Further away they play plain idle/walk/run cycles, which is much cheaper for the server and every client.", 0, 50000)
 local DETAIL_LEAVE = 1.15 * 1.15 -- leave full detail a bit further out than we enter it, so it doesn't flicker at the edge
+local cvPVS = CreateConVar("ngl_ai_pvs", "1", FCVAR_ARCHIVE, "1 = NPCs no player can see (outside every player's PVS, e.g. behind walls) are treated like far ones even when close: no animation detail, silent shots, the medium think rate. 0 = by distance only.", 0, 1)
+local cvRail = CreateConVar("ngl_ai_rail_range", "4000", FCVAR_ARCHIVE, "NPCs further than this from every player, that no player can see, follow their path by moving straight along it at each think instead of walking with the NextBot locomotion every tick. 0 = never.", 0, 50000)
+local cvRateSleep = CreateConVar("ngl_ai_rate_sleep", "3", FCVAR_ARCHIVE, "Seconds between AI thinks for idle NPCs (no enemy, no order, standing still) far from every player. Damage, an ally's alert or an order wakes them at once.", 0, 30)
+local cvLagRange = CreateConVar("ngl_lagcomp_range", "3000", FCVAR_ARCHIVE, "NPCs further than this from every player are not lag compensated (when the engine compensates them at all). 0 = leave lag compensation alone.", 0, 50000)
+local cvShare = CreateConVar("ngl_ai_share_sight", "1", FCVAR_ARCHIVE, "1 = squad and group members near their leader pick enemies from the leader's search instead of searching the grid themselves.", 0, 1)
 
 ----------------------------------------------------------------------------
 -- Factions
@@ -74,7 +79,14 @@ hook.Add("EntityTakeDamage", "NGL.Core.Damage", function(ent, dmginfo)
 		return true
 	end
 	if ent:OnDamaged(dmginfo) == true then return true end
+	Core.Wake(ent) -- a sleeping NPC (ngl_ai_rate_sleep) reacts at once
 end)
+
+-- Thinks on the next tick (sleeping or far NPCs that something happened to).
+function Core.Wake(npc)
+	local now = CurTime()
+	if npc.NGLNextThink and npc.NGLNextThink > now then npc.NGLNextThink = now end
+end
 
 ----------------------------------------------------------------------------
 -- Spatial grid
@@ -133,6 +145,9 @@ function Core.Add(npc)
 	npc.NGLNextRetarget = 0
 	npc.NGLNextStrafe = 0
 	npc.NGLFireAccum = 0
+	-- Lag compensated by the engine? Then only near players (scheduler).
+	npc.NGLLagDefault = npc.IsLagCompensated and npc:IsLagCompensated() or false
+	npc.NGLLagOn = npc.NGLLagDefault
 	gridUpdate(npc, npc:GetPos())
 end
 
@@ -156,6 +171,7 @@ function Core.Count() return #List end
 ----------------------------------------------------------------------------
 
 local players = {}
+local plyPos = {} -- their positions, once per tick (scheduler)
 
 -- Line of sight: walls, and doors and props too (a brush-only trace saw
 -- straight through prop doors, crates and cars, so NPCs shot at you through
@@ -186,54 +202,139 @@ end
 
 -- Nearest hostile within sight, checking line of sight on at most the 3
 -- closest candidates.
+--
+-- The grid is searched ring by ring outward from the NPC's own cell, and
+-- stops as soon as no cell further out can hold anything closer than the 3
+-- found (in a crowd that's the first ring or two instead of all 81 cells
+-- of a 4000-unit sight range). Allies are skipped before any other check,
+-- and positions come from the grid (each NPC's last think), not GetPos.
+--
+-- Shared sight (ngl_ai_share_sight): a squad or group leader searches a
+-- little further and keeps the 6 nearest hostiles it found; members within
+-- SHARE_RADIUS of it pick from that list for a second and a half instead of
+-- searching the grid themselves. When the leader found nobody, nobody is
+-- within sight of the members either, so they skip the search entirely.
+local SHARE_RADIUS = 800
+local SHARE_SQR = SHARE_RADIUS * SHARE_RADIUS
+local SHARE_FOR = 1.5
 local cand, candD = {}, {}
+local nCand, nSlots = 0, 3
+local eyeVec = Vector()
+
+local function addCand(ent, d)
+	local n = nCand
+	if n < nSlots then
+		n = n + 1
+		nCand = n
+		cand[n], candD[n] = ent, d
+	elseif d < candD[n] then
+		cand[n], candD[n] = ent, d
+	else
+		return
+	end
+	for i = n, 2, -1 do
+		if candD[i] < candD[i - 1] then
+			cand[i], cand[i - 1] = cand[i - 1], cand[i]
+			candD[i], candD[i - 1] = candD[i - 1], candD[i]
+		else
+			break
+		end
+	end
+end
+
+local function scanCell(c, npc, pos, faction, rangeSqr)
+	for ent in pairs(c) do
+		-- Same faction is never hostile (NGL.GetRelation): no further checks.
+		if ent ~= npc and ent.Faction ~= faction and Core.IsHostile(npc, ent) then
+			local d = pos:DistToSqr(ent.NGLGridPos or ent:GetPos())
+			if d <= rangeSqr then addCand(ent, d) end
+		end
+	end
+end
+
+local function scanAt(x, y, npc, pos, faction, rangeSqr)
+	local c = cells[x * 4096 + y]
+	if c then scanCell(c, npc, pos, faction, rangeSqr) end
+end
+
 local function findEnemy(npc, pos)
 	local range = npc.SightRange
 	local rangeSqr = range * range
-	local n = 0
+	local faction = npc.Faction
+	local now = CurTime()
+	nCand, nSlots = 0, 3
 
-	local function consider(ent)
-		if ent == npc or not Core.IsHostile(npc, ent) then return end
-		local d = pos:DistToSqr(ent:GetPos())
-		if d > rangeSqr then return end
-		-- insertion into a 3-slot sorted list
-		if n < 3 then
-			n = n + 1
-			cand[n], candD[n] = ent, d
-		elseif d < candD[3] then
-			cand[3], candD[3] = ent, d
-		else
-			return
+	-- A member near its leader: the leader's list.
+	local sq = npc.NGLSquad
+	local leader = sq and sq.leader
+	local shared = false
+	if leader and leader ~= npc and cvShare:GetBool() and IsValid(leader) and leader.Faction == faction then
+		local L = leader.NGLSight
+		if L and now - L.t < SHARE_FOR and pos:DistToSqr(leader.NGLGridPos or leader:GetPos()) < SHARE_SQR then
+			shared = true
+			for i = 1, L.n do
+				local ent = L[i]
+				if IsValid(ent) and not ent.NGLDying and Core.IsHostile(npc, ent) then
+					local d = pos:DistToSqr(ent:GetPos())
+					if d <= rangeSqr then addCand(ent, d) end
+				end
+			end
 		end
-		for i = n, 2, -1 do
-			if candD[i] < candD[i - 1] then
-				cand[i], cand[i - 1] = cand[i - 1], cand[i]
-				candD[i], candD[i - 1] = candD[i - 1], candD[i]
+	end
+
+	-- Leading others: search further, keep more, for the members.
+	local leads = not shared and sq and leader == npc and #sq.members > 1 and cvShare:GetBool()
+	local searchSqr = rangeSqr
+	if leads then
+		nSlots = 6
+		searchSqr = (range + SHARE_RADIUS) ^ 2
+	end
+
+	if not shared then
+		for i = 1, #players do
+			local ply = players[i]
+			if Core.IsHostile(npc, ply) then
+				local d = pos:DistToSqr(ply:GetPos())
+				if d <= searchSqr then addCand(ply, d) end
+			end
+		end
+		local R = math.ceil(math.sqrt(searchSqr) / CELL)
+		local cx, cy = floor(pos.x / CELL) + OFFSET, floor(pos.y / CELL) + OFFSET
+		for k = 0, R do
+			-- Everything in ring k is at least (k - 1) cells away.
+			if nCand == nSlots and k > 1 and candD[nSlots] <= ((k - 1) * CELL) ^ 2 then break end
+			if k == 0 then
+				scanAt(cx, cy, npc, pos, faction, searchSqr)
 			else
-				break
+				for x = cx - k, cx + k do
+					scanAt(x, cy - k, npc, pos, faction, searchSqr)
+					scanAt(x, cy + k, npc, pos, faction, searchSqr)
+				end
+				for y = cy - k + 1, cy + k - 1 do
+					scanAt(cx - k, y, npc, pos, faction, searchSqr)
+					scanAt(cx + k, y, npc, pos, faction, searchSqr)
+				end
 			end
+		end
+		if leads then
+			local L = npc.NGLSight or {}
+			npc.NGLSight = L
+			for i = 1, nCand do L[i] = cand[i] end
+			for i = nCand + 1, L.n or 0 do L[i] = nil end
+			L.n, L.t = nCand, now
 		end
 	end
 
-	local r = math.ceil(range / CELL)
-	local cx, cy = floor(pos.x / CELL) + OFFSET, floor(pos.y / CELL) + OFFSET
-	for x = cx - r, cx + r do
-		local base = x * 4096
-		for y = cy - r, cy + r do
-			local c = cells[base + y]
-			if c then
-				for ent in pairs(c) do consider(ent) end
-			end
+	eyeVec:SetUnpacked(pos.x, pos.y, pos.z + npc.EyeHeight)
+	local found, tried = nil, 0
+	for i = 1, nCand do
+		if not found and tried < 3 and candD[i] <= rangeSqr then
+			tried = tried + 1
+			if canSee(npc, eyeVec, cand[i]) then found = cand[i] end
 		end
-	end
-	for i = 1, #players do consider(players[i]) end
-
-	local eye = pos + Vector(0, 0, npc.EyeHeight)
-	local found = nil
-	for i = 1, n do
-		if not found and canSee(npc, eye, cand[i]) then found = cand[i] end
 		cand[i] = nil
 	end
+	nCand = 0
 	return found
 end
 
@@ -259,6 +360,7 @@ local function alertAllies(npc, pos, now)
 						and ally:OnAlerted(npc, pos) ~= true then
 						ally.NGLInvestigate = pos
 						ally.NGLInvestigateUntil = now + 20
+						Core.Wake(ally)
 					end
 				end
 			end
@@ -659,7 +761,13 @@ end
 -- Combat
 ----------------------------------------------------------------------------
 
-local shotTrace = { mask = MASK_SHOT }
+-- The silent shot hits bounding boxes, not hitboxes: a trace through
+-- hitboxes makes the server set up the bones of every NPC it passes, one
+-- of the dearest calls per NPC, and the silent shot's damage is an average
+-- anyway. Real bullets near players still hit hitboxes.
+local SILENT_MASK = bit.band(MASK_SHOT, bit.bnot(CONTENTS_HITBOX))
+Core.SilentMask = SILENT_MASK
+local shotTrace = { mask = SILENT_MASK }
 local SHOT_PAST = 48 -- the silent shot's trace goes this far past the aim point
 local shotResult = {}
 shotTrace.output = shotResult
@@ -800,8 +908,15 @@ local function shoot(npc, now, dt, enemy, dst)
 		shots = min(shots, npc.NGLClip)
 		npc.NGLClip = npc.NGLClip - shots
 	end
-	local visual = npc.NGLNear
-	if shots > 0 then fire(npc, enemy, min(shots, visual and 3 or 30), visual, dst) end
+	-- Real bullets only where a player may see them. Near but out of every
+	-- player's sight (behind a wall): the silent trace, with the gun's sound
+	-- so the fight is still heard. Projectiles keep flying near players
+	-- either way (they can come round a corner).
+	local visual = npc.NGLNear and (npc.NGLSeen ~= false or w.Projectile ~= nil)
+	if shots > 0 then
+		fire(npc, enemy, min(shots, visual and 3 or 30), visual, dst)
+		if not visual and npc.NGLNear and w.Sound then npc:EmitSound(w.Sound) end
+	end
 
 	if clipSize > 0 and npc.NGLClip <= 0 then
 		npc.NGLClip = clipSize
@@ -1406,6 +1521,7 @@ function Core.GiveOrder(npc, order, now)
 	npc.NGLOrder = order
 	npc.NGLFireAccum = 0
 	stopMoving(npc)
+	Core.Wake(npc)
 	return true
 end
 
@@ -1570,19 +1686,83 @@ local function playerOverlap(npc, now)
 	end
 end
 
-local function think(npc, now, dt, nearestPlayerSqr)
-	npc.NGLNear = nearestPlayerSqr < cvVisual:GetFloat() ^ 2
+-- On rails (ngl_ai_rail_range): far from every player and out of sight,
+-- an NPC on a nav path doesn't walk with the NextBot locomotion every tick
+-- (ground and hull traces each tick, every NPC). At each think it is moved
+-- straight along its path by as far as it would have walked since the last
+-- one, put on the ground with one trace, and faces the way it goes;
+-- BehaveUpdate leaves it alone in between. Jumps and climbs on the path are
+-- simply passed. As soon as a player comes near or can see it, it walks
+-- normally again from where it is on the same path.
+local railDown = { mask = MASK_NPCSOLID_BRUSHONLY, output = {} }
+local RAIL_MAX_DT = 2
+local function railOk(npc, nearestPlayerSqr, seen)
+	if seen or not npc.NGLPath then return false end
+	local r = cvRail:GetFloat()
+	if r <= 0 or nearestPlayerSqr < r * r then return false end
+	return not (npc.NGLTraverse or npc.NGLLeapState or npc.IsVehicleNPC or npc.NGLDrive
+		or npc.NGLAnimUntil or npc.NGLMeleeHitAt or npc.Flying or npc.NGLFly)
+end
+
+local function railStep(npc, pos, dt)
+	local path = npc.NGLPath
+	local idx = npc.NGLPathIdx or 1
+	local left = npc.loco:GetDesiredSpeed() * min(dt, RAIL_MAX_DT)
+	local x, y, z = pos.x, pos.y, pos.z
+	local fx, fy
+	while left > 0 do
+		local wp = path[idx]
+		if not wp then break end
+		local dx, dy, dz = wp.x - x, wp.y - y, wp.z - z
+		local d = math.sqrt(dx * dx + dy * dy)
+		if d > 1 then fx, fy = dx, dy end
+		if d <= left then
+			x, y, z = wp.x, wp.y, wp.z
+			left = left - d
+			idx = idx + 1
+		else
+			local f = left / d
+			x, y, z = x + dx * f, y + dy * f, z + dz * f
+			left = 0
+		end
+	end
+	npc.NGLPathIdx = idx
+	if not path[idx] then npc.NGLPath = nil end
+	-- A straight line between two path points can cut into a hill: the
+	-- ground under the new spot, from a little above.
+	local t = railDown
+	t.start = Vector(x, y, z + 48)
+	t.endpos = Vector(x, y, z - 96)
+	t.filter = npc
+	local tr = util.TraceLine(t)
+	if tr.Hit and not tr.StartSolid then z = tr.HitPos.z end
+	local to = Vector(x, y, z + 2)
+	npc:SetPos(to)
+	if fx then npc:SetAngles(Angle(0, math.deg(math.atan2(fy, fx)), 0)) end
+	npc.NGLMoving = true
+	npc.NGLSteer = npc.NGLPath and npc.NGLPath[idx] or nil
+	local A = npc.NGLActs
+	if A then npc:NGLSetAct(npc.NGLMoveMode == "walk" and A.Walk or A.Run) end
+	gridUpdate(npc, to)
+	npc.NGLGridPos = to
+	if not npc.NGLPath then npc.NGLRail = nil end
+	return to
+end
+
+local function think(npc, now, dt, nearestPlayerSqr, seen, pos)
+	npc.NGLNear = nearestPlayerSqr < cvVisual:GetFloat() ^ 2 -- sounds and voice lines: by distance
+	npc.NGLSeen = seen -- some player may see it (in range and in their PVS)
 	local detailSqr = cvDetail:GetFloat() ^ 2
-	npc.NGLDetail = nearestPlayerSqr < (npc.NGLDetail and detailSqr * DETAIL_LEAVE or detailSqr)
+	npc.NGLDetail = seen and nearestPlayerSqr < (npc.NGLDetail and detailSqr * DETAIL_LEAVE or detailSqr)
 	if npc.NGLMeleeHitAt and now >= npc.NGLMeleeHitAt then resolveMelee(npc) end
 	if nearestPlayerSqr < 10000 then playerOverlap(npc, now) end
 	if npc:OnAIThink(dt) == true then return end
+	pos = pos or npc:GetPos()
 	if now < (npc.NGLBusyUntil or 0) then -- mid-swing or playing a locked animation
-		gridUpdate(npc, npc:GetPos())
+		gridUpdate(npc, pos)
 		return
 	end
 
-	local pos = npc:GetPos()
 	gridUpdate(npc, pos)
 	npc.NGLGridPos = pos
 	if not npc.NGLPlaced then
@@ -1592,10 +1772,18 @@ local function think(npc, now, dt, nearestPlayerSqr)
 		gridUpdate(npc, pos)
 		npc.NGLGridPos = pos
 	end
+	if railOk(npc, nearestPlayerSqr, seen) then
+		npc.NGLRail = true
+		pos = railStep(npc, pos, dt)
+	elseif npc.NGLRail then
+		npc.NGLRail = nil
+	end
 	if not npc.NGLTraverse then
-		pushCheck(npc, now, pos)
-		overlapCheck(npc, now, pos)
-		if npc.NGLPath then Core.Shortcut(npc, now, pos) end
+		if not npc.NGLRail then
+			pushCheck(npc, now, pos)
+			overlapCheck(npc, now, pos)
+			if npc.NGLPath then Core.Shortcut(npc, now, pos) end
+		end
 		-- A closed door in the way: open it or kick it in (sv_doors.lua).
 		local D = NGL.Doors
 		if D and npc.NGLMoving and (npc.OpenDoors or npc.DoorBreach) then D.Think(npc, now, pos) end
@@ -1647,7 +1835,8 @@ local function think(npc, now, dt, nearestPlayerSqr)
 	local tPos = enemyOk and enemy:GetPos()
 	if enemyOk and now >= (npc.NGLNextVis or 0) then
 		npc.NGLNextVis = now + 0.5
-		npc.NGLEnemyVisible = canSee(npc, pos + Vector(0, 0, eyeHeight(npc)), enemy)
+		eyeVec:SetUnpacked(pos.x, pos.y, pos.z + eyeHeight(npc))
+		npc.NGLEnemyVisible = canSee(npc, eyeVec, enemy)
 		if npc.NGLEnemyVisible then npc.NGLLastSeenPos, npc.NGLLastSeenT = tPos, now end
 	end
 	local visible = enemyOk and npc.NGLEnemyVisible
@@ -1754,6 +1943,27 @@ end
 -- Scheduler
 ----------------------------------------------------------------------------
 
+-- Could any player see it? Within ngl_ai_visual_range of one, and inside
+-- that player's PVS (the engine's own "potentially visible" test: a wall
+-- between hides it, an open doorway doesn't). The PVS is generous, so an
+-- NPC a player can see always counts as seen.
+local function seenByPlayer(npc, pos, best, visualSqr, np, pvs)
+	if best >= visualSqr then return false end
+	if not pvs then return true end
+	for p = 1, np do
+		if pos:DistToSqr(plyPos[p]) < visualSqr and players[p]:TestPVS(npc) then return true end
+	end
+	return false
+end
+
+-- Nothing to do: no enemy, order, alert or move, not mid-attack, not a
+-- vehicle (vehicles patrol and report to their commander).
+local function isIdle(npc)
+	return npc.NGLEnemy == nil and not npc.NGLOrder and not npc.NGLInvestigate
+		and not npc.NGLPath and not npc.NGLGoal and not npc.NGLMeleeHitAt
+		and not npc.NGLLeapState and not npc.NGLTraverse and not npc.IsVehicleNPC
+end
+
 hook.Add("Tick", "NGL.Core.Scheduler", function()
 	local n = #List
 	if n == 0 then return end
@@ -1769,12 +1979,20 @@ hook.Add("Tick", "NGL.Core.Scheduler", function()
 		if ply:Alive() then
 			np = np + 1
 			players[np] = ply
+			plyPos[np] = ply:GetPos()
 		end
 	end
 	for i = np + 1, #players do players[i] = nil end
+	for i = np + 1, #plyPos do plyPos[i] = nil end
 
 	local nearSqr, midSqr = cvNear:GetFloat() ^ 2, cvMid:GetFloat() ^ 2
 	local rNear, rMid, rFar = cvRateNear:GetFloat(), cvRateMid:GetFloat(), cvRateFar:GetFloat()
+	local rSleep = cvRateSleep:GetFloat()
+	local visualSqr = cvVisual:GetFloat() ^ 2
+	local pvs = cvPVS:GetBool()
+	local lagR = cvLagRange:GetFloat()
+	local lagSqr = lagR > 0 and lagR * lagR or math.huge
+	local B = NGL.Bench
 
 	for i = 1, n do
 		local idx = ((cursor + i - 1) % n) + 1
@@ -1786,19 +2004,45 @@ hook.Add("Tick", "NGL.Core.Scheduler", function()
 				local pos = npc:GetPos()
 				local best = math.huge
 				for p = 1, np do
-					local d = pos:DistToSqr(players[p]:GetPos())
+					local d = pos:DistToSqr(plyPos[p])
 					if d < best then best = d end
 				end
+				local seen = seenByPlayer(npc, pos, best, visualSqr, np, pvs)
 
-				local interval = (best < nearSqr and rNear) or (best < midSqr and rMid) or rFar
+				-- Near but out of every player's sight: the medium rate.
+				-- Far, with nothing to do: asleep (Core.Wake ends it early).
+				local interval
+				if best < nearSqr then
+					interval = seen and rNear or rMid
+				elseif best < midSqr then
+					interval = rMid
+				elseif rSleep > rFar and isIdle(npc) then
+					interval = rSleep
+				else
+					interval = rFar
+				end
 				local dt = now - npc.NGLLastThink
+				if B then
+					B.ThinkLate = (B.ThinkLate or 0) + (now - npc.NGLNextThink)
+					B.ThinkN = (B.ThinkN or 0) + 1
+				end
 				npc.NGLLastThink = now
 				npc.NGLNextThink = now + interval * Rand(0.9, 1.1)
 
-				think(npc, now, dt, best)
+				think(npc, now, dt, best, seen, pos)
 				if npc.NGLDying then -- nothing
 				elseif npc.NGLDetail then npc:NGLUpdatePose()
 				elseif npc.NGLPosed then npc:NGLResetPose() end
+
+				-- Lag compensation (when the engine compensates NPCs at all)
+				-- only near players: far ones aren't recorded every tick.
+				if npc.NGLLagDefault then
+					local want = best < lagSqr
+					if want ~= npc.NGLLagOn then
+						npc.NGLLagOn = want
+						npc:SetLagCompensated(want)
+					end
+				end
 			end
 
 			if SysTime() - start > budget then
@@ -1808,7 +2052,6 @@ hook.Add("Tick", "NGL.Core.Scheduler", function()
 		end
 	end
 
-	local B = NGL.Bench
 	if B then B.LuaTime = B.LuaTime + (SysTime() - start) end
 end)
 
