@@ -17,11 +17,15 @@ ENT.StartHealth = 70
 ENT.RunSpeed = 220
 ENT.WalkSpeed = 75
 ENT.WeaponModel = "models/weapons/w_smg1.mdl"
-ENT.AIMode = { balanced = 3, defender = 2, flanker = 1, assault = 1 }
+-- Mostly the plain fight, which needs no extra traces; the defender and
+-- the flanker look for hiding places (traces), so fewer of those.
+ENT.AIMode = { balanced = 4, defender = 1, flanker = 1, assault = 1 }
 ENT.DoorBreach = true           -- kicks doors in (no kick animation on citizen models: a shove)
+-- Fewer, harder shots than before (4 damage every 0.1 s): the same damage
+-- over time, a quarter fewer bullets, tracers and sounds near players.
 ENT.Weapon = {
-	Damage = 4,
-	Delay = 0.1,
+	Damage = 5,
+	Delay = 0.13,
 	Spread = 0.05,
 	Accuracy = 0.55,
 	Sound = "Weapon_SMG1.NPC_Single",

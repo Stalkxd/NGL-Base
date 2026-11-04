@@ -27,7 +27,13 @@ ENT.ClimbSpeed = 260
 ENT.DeploySequence = "Dropship_Deploy" -- soldiers' climb-out animation (HL2 Combine models)
 ENT.DropDelay = 0.6      -- seconds between soldiers when there is no climb-out animation
 ENT.MaxLife = 150        -- removed after this long whatever happens
-ENT.StartHealth = 1500   -- only with ngl_dropship_vulnerable 1
+ENT.StartHealth = 800    -- with ngl_dropship_vulnerable 1 (default): about 6 rockets, or a lot of bullets
+-- Shot down: it smokes from half health, burns from a quarter, and at zero
+-- it goes down spinning and explodes where it hits the ground.
+ENT.BulletScale = 0.2    -- bullets do this share of their damage (rockets and explosives full)
+ENT.CrashBlast = { Radius = 350, Damage = 150 }
+ENT.CrashTime = 6        -- seconds falling at most before it blows up in the air
+ENT.WreckTime = 30       -- seconds the burning wreck stays
 
 -- Pod gun (HL2: 5 damage, bursts of 10-20 rounds, 20 a second).
 ENT.Gun = {
@@ -66,6 +72,7 @@ local PH_FLY, PH_DOWN, PH_GROUND, PH_UP = 0, 1, 2, 3
 function ENT:SetupDataTables()
 	self:NetworkVar("Int", 0, "Phase")
 	self:NetworkVar("Bool", 0, "Firing")
+	self:NetworkVar("Int", 1, "Damaged") -- 0 fine, 1 smoking, 2 burning (clients draw it)
 end
 
 if CLIENT then
@@ -108,14 +115,67 @@ if CLIENT then
 		return true
 	end
 
+	-- Smoke and fire off a damaged ship: a particle or two a few times a
+	-- second from the hull, only while it is drawn (one or two ships at most).
+	local SMOKE = "particle/particle_smokegrenade"
+	local FIRE = { "effects/fire_cloud1", "effects/fire_cloud2" }
+	function ENT:NGLDamageFX()
+		local lvl = self:GetDamaged()
+		if lvl <= 0 then return end
+		local now = CurTime()
+		if now < (self.NGLNextFX or 0) then return end
+		self.NGLNextFX = now + (lvl >= 2 and 0.03 or 0.08)
+		local em = self.NGLEmitter
+		if not em then
+			em = ParticleEmitter(self:GetPos())
+			if not em then return end
+			self.NGLEmitter = em
+		end
+		local mins, maxs = self:OBBMins(), self:OBBMaxs()
+		local pos = self:LocalToWorld(Vector(math.Rand(mins.x, maxs.x) * 0.6, math.Rand(mins.y, maxs.y) * 0.6, maxs.z * 0.5))
+		em:SetPos(pos)
+		local p = em:Add(SMOKE, pos)
+		if p then
+			p:SetVelocity(VectorRand() * 30 + Vector(0, 0, 60))
+			p:SetDieTime(math.Rand(2, 3.5))
+			p:SetStartAlpha(lvl >= 2 and 200 or 140)
+			p:SetEndAlpha(0)
+			p:SetStartSize(math.Rand(30, 50))
+			p:SetEndSize(math.Rand(120, 180))
+			p:SetRoll(math.Rand(0, 360))
+			p:SetRollDelta(math.Rand(-1, 1))
+			local g = lvl >= 2 and 30 or 70
+			p:SetColor(g, g, g)
+			p:SetAirResistance(40)
+		end
+		if lvl >= 2 then
+			local f = em:Add(FIRE[math.random(#FIRE)], pos)
+			if f then
+				f:SetVelocity(VectorRand() * 40)
+				f:SetDieTime(math.Rand(0.3, 0.6))
+				f:SetStartAlpha(255)
+				f:SetEndAlpha(0)
+				f:SetStartSize(math.Rand(30, 50))
+				f:SetEndSize(10)
+				f:SetRoll(math.Rand(0, 360))
+			end
+		end
+	end
+
+	function ENT:Draw()
+		self:DrawModel()
+		self:NGLDamageFX()
+	end
+
 	function ENT:OnRemove()
 		for _, s in pairs(self.NGLLoops or {}) do s:Stop() end
+		if self.NGLEmitter then self.NGLEmitter:Finish() end
 	end
 	return
 end
 
-local cvVulnerable = CreateConVar("ngl_dropship_vulnerable", "0", FCVAR_ARCHIVE,
-	"1 = NGL dropships can be shot down (rockets and explosives do full damage, bullets a fifth).", 0, 1)
+local cvVulnerable = CreateConVar("ngl_dropship_vulnerable", "1", FCVAR_ARCHIVE,
+	"1 = NGL dropships can be shot down (rockets and explosives do full damage, bullets a fifth); 0 = they can't be hurt.", 0, 1)
 
 local CurTime, IsValid = CurTime, IsValid
 local clamp = math.Clamp
@@ -326,9 +386,16 @@ function ENT:NGLGunTarget(now, muzzle)
 		end
 	end
 	if best then
-		gunTrace.start, gunTrace.endpos = muzzle, best:WorldSpaceCenter()
-		util.TraceLine(gunTrace)
-		if gunResult.Hit then best = nil end
+		-- Walls, doors and props block it (see Core.LineOfSight).
+		local los = NGL.Core.LineOfSight
+		if los then
+			self.NGLGunIgnore = self.NGLGunIgnore or { self, self.NGLPod }
+			if not los(muzzle, best, self.NGLGunIgnore) then best = nil end
+		else
+			gunTrace.start, gunTrace.endpos = muzzle, best:WorldSpaceCenter()
+			util.TraceLine(gunTrace)
+			if gunResult.Hit then best = nil end
+		end
 	end
 	self.NGLTarget = best
 	return best
@@ -465,6 +532,11 @@ function ENT:Think()
 	local st = self.NGLState
 	local T = self.Trip
 
+	if st == "crash" then
+		self:NGLCrashThink(now, dt)
+		self:NextThink(now)
+		return true
+	end
 	if now - self.NGLBorn > self.MaxLife then
 		self:Remove()
 		return
@@ -543,21 +615,144 @@ function ENT:Think()
 	return true
 end
 
+-- Damage and being shot down ---------------------------------------------
+
 function ENT:OnTakeDamage(dmg)
 	if not cvVulnerable:GetBool() or self.NGLDead then return 0 end
+	-- Its own side doesn't shoot it down (an APC's rockets, a grenade).
+	local att = dmg:GetAttacker()
+	local leader = self.Trip and self.Trip.leader
+	if IsValid(att) and att.IsNGLNPC and IsValid(leader)
+		and NGL.GetRelation(att.Faction, leader.Faction) == D_LI then return 0 end
+	if IsValid(att) and (att == self or att == self.NGLPod) then return 0 end
 	local amount = dmg:GetDamage()
-	if dmg:IsBulletDamage() then amount = amount * 0.2 end
+	if dmg:IsBulletDamage() then amount = amount * (self.BulletScale or 0.2) end
 	self:SetHealth(self:Health() - amount)
-	if self:Health() <= 0 then
-		self.NGLDead = true
-		local pos = self:WorldSpaceCenter()
-		local ed = EffectData()
-		ed:SetOrigin(pos)
-		util.Effect("Explosion", ed)
-		util.BlastDamage(self, IsValid(dmg:GetAttacker()) and dmg:GetAttacker() or self, pos, 400, 120)
-		self:Remove()
-	end
+	local frac = self:Health() / self.StartHealth
+	local lvl = frac <= 0.25 and 2 or frac <= 0.5 and 1 or 0
+	if lvl > self:GetDamaged() then self:SetDamaged(lvl) end
+	if self:Health() <= 0 then self:NGLShotDown(dmg) end
 	return amount
+end
+
+-- Hit hard enough: it goes down. It starts to spin and tip over and falls,
+-- with small blasts on the way; where it hits the ground it explodes and
+-- leaves a burning wreck. Whatever it carried goes down with it.
+function ENT:NGLShotDown(dmg)
+	self.NGLDead = true
+	self.NGLState = "crash"
+	self:SetDamaged(2)
+	self:SetFiring(false)
+	self:SetPhase(PH_FLY)
+	self.NGLKiller = IsValid(dmg:GetAttacker()) and dmg:GetAttacker() or self
+	local now = CurTime()
+	self.NGLCrashT0 = now
+	self.NGLNextBoom = now + 0.4
+	local v = self:GetVelocity()
+	self.NGLCrashVel = Vector(v.x, v.y, math.min(v.z, 0))
+	self.NGLSpin = (math.random(2) == 1 and 1 or -1) * math.Rand(60, 110)
+	self.NGLDeploying = {} -- soldiers still climbing out are let go where they are
+	self:SetNotSolid(true)
+	local ed = EffectData()
+	ed:SetOrigin(self:WorldSpaceCenter())
+	util.Effect("Explosion", ed)
+	self:NGLAnim("ACT_DROPSHIP_FLY_IDLE")
+end
+
+local crashTrace = { mask = MASK_SOLID_BRUSHONLY }
+local crashResult = {}
+crashTrace.output = crashResult
+local GRAVITY = 600
+
+function ENT:NGLCrashThink(now, dt)
+	local t = now - self.NGLCrashT0
+	local vel = self.NGLCrashVel
+	vel.z = vel.z - GRAVITY * dt
+	vel.x, vel.y = vel.x * (1 - 0.4 * dt), vel.y * (1 - 0.4 * dt)
+	local pos = self:GetPos()
+	local to = pos + vel * dt
+	-- The ground (or a roof) under the hull.
+	crashTrace.start = pos
+	crashTrace.endpos = to + Vector(0, 0, -60)
+	crashTrace.filter = self
+	util.TraceLine(crashTrace)
+	if (crashResult.Hit and t > 0.3) or t > (self.CrashTime or 6) or not util.IsInWorld(to) then
+		self:NGLCrashExplode(crashResult.Hit and crashResult.HitPos or pos)
+		return
+	end
+	self:SetPos(to)
+	self:SetLocalVelocity(vel)
+	-- Spins faster and tips over as it falls.
+	local a = self:GetAngles()
+	local spin = self.NGLSpin * math.min(1 + t, 3)
+	a.y = a.y + spin * dt
+	a.r = math.Clamp(a.r + spin * 0.15 * dt, -45, 45)
+	a.p = math.Clamp(a.p + 12 * dt, -30, 30)
+	self:SetAngles(a)
+	if now >= self.NGLNextBoom then
+		self.NGLNextBoom = now + math.Rand(0.4, 0.9)
+		local mins, maxs = self:OBBMins(), self:OBBMaxs()
+		local ed = EffectData()
+		ed:SetOrigin(self:LocalToWorld(Vector(math.Rand(mins.x, maxs.x), math.Rand(mins.y, maxs.y), math.Rand(mins.z, maxs.z) * 0.5)))
+		ed:SetMagnitude(1)
+		ed:SetScale(1)
+		util.Effect("Explosion", ed)
+	end
+end
+
+-- HL2's helicopter pieces, for the wreck.
+local GIBS = {
+	"models/gibs/helicopter_brokenpiece_01.mdl", "models/gibs/helicopter_brokenpiece_02.mdl",
+	"models/gibs/helicopter_brokenpiece_03.mdl", "models/gibs/helicopter_brokenpiece_04_cockpit.mdl",
+	"models/gibs/helicopter_brokenpiece_05_tailfan.mdl", "models/gibs/helicopter_brokenpiece_06_body.mdl",
+}
+
+local function wreckPiece(model, pos, ang, vel, life)
+	if not (model and util.IsValidModel(model) and util.IsValidProp(model)) then return nil end
+	local p = ents.Create("prop_physics")
+	if not IsValid(p) then return nil end
+	p:SetModel(model)
+	p:SetPos(pos)
+	p:SetAngles(ang)
+	p:Spawn()
+	p:SetCollisionGroup(COLLISION_GROUP_DEBRIS) -- NPCs and players walk through the pieces
+	local phys = p:GetPhysicsObject()
+	if IsValid(phys) then
+		phys:SetVelocity(vel)
+		phys:AddAngleVelocity(VectorRand() * 200)
+	end
+	p:Ignite(life * 0.6, 0)
+	SafeRemoveEntityDelayed(p, life)
+	return p
+end
+
+function ENT:NGLCrashExplode(at)
+	if self.NGLExploded then return end
+	self.NGLExploded = true
+	local killer = IsValid(self.NGLKiller) and self.NGLKiller or self
+	local B = self.CrashBlast or { Radius = 350, Damage = 150 }
+	for k = 0, 3 do
+		local ed = EffectData()
+		ed:SetOrigin(at + VectorRand() * 80 + Vector(0, 0, 40 + k * 20))
+		ed:SetMagnitude(2)
+		ed:SetScale(2)
+		util.Effect(k == 0 and "HelicopterMegaBomb" or "Explosion", ed)
+	end
+	util.ScreenShake(at, 12, 150, 1.5, 2000)
+	util.BlastDamage(self, killer, at + Vector(0, 0, 32), B.Radius, B.Damage)
+	-- The wreck: the hull itself if its model has physics, and pieces.
+	local life = self.WreckTime or 30
+	local ang = self:GetAngles()
+	local v = self.NGLCrashVel or vector_origin
+	wreckPiece(self.Model, at + Vector(0, 0, 60), ang, Vector(v.x, v.y, 0) * 0.3, life)
+	if IsValid(self.NGLPod) then wreckPiece(self.PodModel, at + Vector(0, 0, 30), ang, VectorRand() * 200, life) end
+	if IsValid(self.NGLCarried) then
+		wreckPiece(self.NGLCarried:GetModel(), at + Vector(0, 0, 20), self.NGLCarried:GetAngles(), VectorRand() * 150, life)
+	end
+	for _ = 1, 4 do
+		wreckPiece(GIBS[math.random(#GIBS)], at + VectorRand() * 60 + Vector(0, 0, 60), AngleRand(), VectorRand() * 400 + Vector(0, 0, 300), life)
+	end
+	self:Remove()
 end
 
 function ENT:OnRemove()

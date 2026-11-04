@@ -33,29 +33,40 @@ ENT.HeadcrabBodygroup = 1
 
 ENT.WeaponModel = false
 ENT.Weapon = false
+-- HL2's numbers (npc_fastzombie.cpp): 3 damage a claw, two claws a swing
+-- (on the model's AE_ZOMBIE_ATTACK events when it has them), 5 for the leap.
 ENT.Melee = {
-	Damage = 10,
+	Damage = 3,
 	Range = 55,
-	Delay = 0.9,
-	HitDelay = 0.25,
+	Delay = 0.4,                 -- swings follow each other as fast as the animation goes
+	HitDelay = { 0.2, 0.4 },     -- when the model has no hit events
 	DamageType = DMG_SLASH,
 	Force = 80,
 	HitSound = { "npc/fast_zombie/claw_strike1.wav", "npc/fast_zombie/claw_strike2.wav", "npc/fast_zombie/claw_strike3.wav" },
 	MissSound = { "npc/fast_zombie/claw_miss1.wav", "npc/fast_zombie/claw_miss2.wav" },
 }
+-- HL2's leap: from 200 to 300 units, at most 128 up or down, facing you; it
+-- crouches (ACT_RANGE_ATTACK1) and springs at its AE_FASTZOMBIE_LEAP event,
+-- flies at your middle on a ballistic arc (at most 1000 units/s) and claws
+-- you on touch. It leaps whether or not you are looking at it.
 ENT.LeapAttack = {
-	Damage = 15,
-	MinDist = 160,
-	MaxDist = 650,
-	MaxRise = 200,
-	MaxDrop = 400,
-	Delay = 4,
-	Chance = 0.8,
+	Damage = 5,
+	MinDist = 200,
+	MaxDist = 300,
+	MaxRise = 128,
+	MaxDrop = 128,
+	Delay = 3,                   -- HL2: 2 s after the leap, 1 more after landing
+	Chance = 1,
 	Reach = 40,
 	DamageType = DMG_SLASH,
-	Force = 300,
-	Anim = { "LeapStrike", ACT_RANGE_ATTACK1, ACT_JUMP },
-	Sound = "Leap",
+	Force = 500,
+	Velocity = "hl2",
+	WindUp = 0.4,                -- seconds, when the model has no AE_FASTZOMBIE_LEAP event
+	WindUpAnim = { ACT_RANGE_ATTACK1 },
+	WindUpEvent = "AE_FASTZOMBIE_LEAP",
+	WindUpSound = "NPC_FastZombie.RangeAttack",
+	Anim = { "LeapStrike", ACT_JUMP },
+	Sound = "NPC_FastZombie.LeapAttack",
 	HitSound = { "npc/fast_zombie/claw_strike1.wav", "npc/fast_zombie/claw_strike2.wav", "npc/fast_zombie/claw_strike3.wav" },
 	Recover = 0.3,
 }

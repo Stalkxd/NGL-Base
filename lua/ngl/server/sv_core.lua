@@ -157,15 +157,31 @@ function Core.Count() return #List end
 
 local players = {}
 
-local losTrace = { mask = MASK_SOLID_BRUSHONLY }
+-- Line of sight: walls, and doors and props too (a brush-only trace saw
+-- straight through prop doors, crates and cars, so NPCs shot at you through
+-- them). A trace has to take CONTENTS_MONSTER to hit any model entity, so
+-- it would stop on every NPC in a crowd as well; with the NGL NPCs'
+-- collision group it passes through them (they don't collide with each
+-- other) in the engine, without a Lua filter. Glass and grates don't block
+-- (no CONTENTS_WINDOW / GRATE): you can be seen and shot through a window.
+local LOS_MASK = bit.bor(CONTENTS_SOLID, CONTENTS_MOVEABLE, CONTENTS_MONSTER, CONTENTS_BLOCKLOS)
+local losTrace = { mask = LOS_MASK, collisiongroup = COLLISION_GROUP_NPC_SCRIPTED }
 local losResult = {}
 losTrace.output = losResult
 
-local function canSee(npc, from, ent)
+local function lineOfSight(from, ent, ignore)
 	losTrace.start = from
 	losTrace.endpos = ent:WorldSpaceCenter()
+	losTrace.filter = ignore
 	util.TraceLine(losTrace)
-	return not losResult.Hit
+	if not losResult.Hit then return true end
+	local hit = losResult.Entity
+	return hit == ent or (IsValid(hit) and hit:GetParent() == ent)
+end
+Core.LineOfSight = lineOfSight
+
+local function canSee(npc, from, ent)
+	return lineOfSight(from, ent, npc)
 end
 
 -- Nearest hostile within sight, checking line of sight on at most the 3
@@ -618,6 +634,7 @@ end
 ----------------------------------------------------------------------------
 
 local shotTrace = { mask = MASK_SHOT }
+local SHOT_PAST = 48 -- the silent shot's trace goes this far past the aim point
 local shotResult = {}
 shotTrace.output = shotResult
 
@@ -682,11 +699,23 @@ local function fire(npc, enemy, shots, visual, dst)
 	end
 
 	-- Nobody close enough to see it: one silent trace, expected damage.
+	-- It goes on a little past the aim point: a trace that stops exactly at
+	-- the target's middle missed small or hunched models (headcrabs, fast
+	-- zombies), whose hitboxes don't reach their box's centre, so they
+	-- never took damage in battles away from players. Reaching the aim
+	-- point with nothing in the way counts as a hit too.
+	local dir = dst - src
+	local len = dir:Length()
+	if len > 1 then dir:Mul(1 / len) end
 	shotTrace.start = src
-	shotTrace.endpos = dst
+	shotTrace.endpos = dst + dir * SHOT_PAST
 	shotTrace.filter = npc
 	util.TraceLine(shotTrace)
 	local hit = shotResult.Entity
+	if enemy and hit ~= enemy and shotResult.Fraction * (len + SHOT_PAST) >= len - 4 then
+		hit = enemy -- nothing before the aim point: it was inside the target's box
+		shotResult.HitPos = dst
+	end
 	if enemy and hit == enemy or not enemy and IsValid(hit) and (hit:IsPlayer() or hit.IsNGLNPC) and Core.IsHostile(npc, hit) then
 		local dmg = DamageInfo()
 		dmg:SetDamage(w.Damage * shots * (w.Accuracy or 0.6))
@@ -703,6 +732,7 @@ Core.Fire = fire
 -- Ranged attack for this think: fires the shots owed since the last one
 -- (far NPCs think rarely but deal the same damage over time), handles the
 -- clip and reload. `enemy` may be nil with `dst` set to shoot at an area.
+local FIRE_CONE = math.cos(math.rad(50)) -- fires at what is within this angle of where it faces
 local function shoot(npc, now, dt, enemy, dst)
 	local w = npc.Weapon
 	if not w then return end
@@ -717,6 +747,26 @@ local function shoot(npc, now, dt, enemy, dst)
 		return
 	end
 	npc.NGLFireAccum = acc - shots * w.Delay
+	-- Only at what's in front of it. A soldier running one way with the
+	-- enemy behind it shot backwards out of a gun pointing forwards (the
+	-- run faces where it goes, see BehaveUpdate). It holds fire until it
+	-- has turned (walking and standing NPCs turn to the target at once).
+	-- Vehicles aim their own turrets; ENT.FireAnyDirection lets others too.
+	-- Only where a player can see it: further out NPCs face where they walk
+	-- even while strafing (see BehaveUpdate), and nobody sees the gun.
+	if npc.NGLNear and not (npc.IsVehicleNPC or npc.FireAnyDirection) then
+		local p = npc:GetPos()
+		local t = dst or enemy:GetPos()
+		local dx, dy = t.x - p.x, t.y - p.y
+		local l = math.sqrt(dx * dx + dy * dy)
+		if l > 24 then
+			local r = math.rad(npc:GetAngles().y)
+			if (dx * math.cos(r) + dy * math.sin(r)) / l < FIRE_CONE then
+				npc.NGLFireAccum = 0
+				return
+			end
+		end
+	end
 	if npc:OnAttack(enemy or dst, "ranged") == true then return end
 
 	local clipSize = w.Clip or 0
@@ -754,11 +804,28 @@ function Core.StartMelee(npc, target, now)
 	if not m or not IsValid(target) then return false end
 	npc.NGLNextMelee = now + (m.Delay or 1.5)
 	npc.NGLMeleeTarget = target
-	npc.NGLMeleeHitAt = now + (m.HitDelay or 0.4)
 	Core.StopMoving(npc)
 	npc.NGLCrouch = false
 	npc.NGLFace = target:GetPos()
-	local dur = npc:NGLPlayMeleeAnim() or m.Duration or 1
+	local played, seq = npc:NGLPlayMeleeAnim()
+	local dur = played or m.Duration or 1
+	-- When the blows land: on the animation's own hit events when the model
+	-- has them (each one a blow, like HL2's zombies), else after HitDelay.
+	local times = played and m.UseEvents ~= false and npc.NGLHitTimes and npc:NGLHitTimes(seq, played)
+	if times and #times > 0 then
+		npc.NGLMeleeHitAt = now + times[1]
+		local rest = {}
+		for k = 2, #times do rest[#rest + 1] = now + times[k] end
+		npc.NGLMeleeMore = #rest > 0 and rest or nil
+	elseif type(m.HitDelay) == "table" then -- several blows: { 0.2, 0.45 }
+		npc.NGLMeleeHitAt = now + (m.HitDelay[1] or 0.4)
+		local rest = {}
+		for k = 2, #m.HitDelay do rest[#rest + 1] = now + m.HitDelay[k] end
+		npc.NGLMeleeMore = #rest > 0 and rest or nil
+	else
+		npc.NGLMeleeHitAt = now + (m.HitDelay or 0.4)
+		npc.NGLMeleeMore = nil
+	end
 	npc.NGLBusyUntil = max(npc.NGLBusyUntil or 0, now + dur)
 	npc:NGLSound("Attack")
 	if npc.NGLNextThink and npc.NGLNextThink > npc.NGLMeleeHitAt then npc.NGLNextThink = npc.NGLMeleeHitAt end
@@ -769,7 +836,15 @@ local function resolveMelee(npc)
 	local m = npc.Melee
 	local t = npc.NGLMeleeTarget
 	npc.NGLMeleeHitAt, npc.NGLMeleeTarget = nil, nil
-	if not m or not IsValid(t) or (t.NGLDying) then return end
+	if not m or not IsValid(t) or (t.NGLDying) then npc.NGLMeleeMore = nil return end
+	-- More blows in this swing (left claw, right claw): the next one.
+	local more = npc.NGLMeleeMore
+	if more then
+		npc.NGLMeleeHitAt = table.remove(more, 1)
+		npc.NGLMeleeTarget = t
+		if #more == 0 then npc.NGLMeleeMore = nil end
+		if npc.NGLNextThink and npc.NGLNextThink > npc.NGLMeleeHitAt then npc.NGLNextThink = npc.NGLMeleeHitAt end
+	end
 
 	local pos, tPos = npc:GetPos(), t:GetPos()
 	local reach = (m.Range or 70) * 1.3

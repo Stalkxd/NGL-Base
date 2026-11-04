@@ -78,51 +78,115 @@ function L.Can(npc, target, dist, now, def)
 	return true
 end
 
--- Leap at `target` (an entity or a position). opts.vel: launch with this
--- velocity instead of the engine's jump (for something thrown, already in
--- the air). Returns true when it took off.
-function L.Start(npc, target, def, now, opts)
-	def = def or npc.LeapAttack
-	if not def or npc.NGLDying then return false end
-	local ent = not isvector(target) and IsValid(target) and target or nil
+-- HL2's leap (CFastZombie::LeapAttack, also the headcrab's): straight at
+-- the target's middle, as high as it needs to get there (16..120 units up),
+-- sideways speed to arrive just then, at most 1000 units/s in all.
+local function hl2Velocity(npc, tPos, g)
 	local pos = npc:GetPos()
-	local tPos
-	if ent then
-		tPos = ent:GetPos()
-		-- Lead a running target a little.
-		local v = ent:GetVelocity()
-		local lead = def.Lead or 0.25
-		tPos = Vector(tPos.x + v.x * lead, tPos.y + v.y * lead, tPos.z)
-	elseif isvector(target) then
-		tPos = target
-	else
-		return false
-	end
+	g = math.max(g or 1000, 1)
+	local height = math.Clamp(tPos.z - pos.z, 16, 120)
+	local speed = math.sqrt(2 * g * height)
+	local time = speed / g
+	local v = (tPos - pos) * (1 / time)
+	v.z = speed
+	local len = v:Length()
+	if len > 1000 then v:Mul(1000 / len) end
+	return v
+end
+
+local function aimPos(ent, def)
+	-- HL2 jumps at the middle of the target; others at its feet, led a little.
+	if def.Velocity == "hl2" then return ent:WorldSpaceCenter() end
+	local tPos = ent:GetPos()
+	local v = ent:GetVelocity()
+	local lead = def.Lead or 0.25
+	return Vector(tPos.x + v.x * lead, tPos.y + v.y * lead, tPos.z)
+end
+
+local function face(npc, tPos)
+	local d = tPos - npc:GetPos()
+	if d.x ~= 0 or d.y ~= 0 then npc:SetAngles(Angle(0, math.deg(math.atan2(d.y, d.x)), 0)) end
+end
+
+-- Takes off (after the wind-up, if any).
+local function launch(npc, S, now, opts)
+	local def, ent = S.def, S.target
+	local tPos = IsValid(ent) and aimPos(ent, def) or S.pos
+	local pos = npc:GetPos()
 	local dir = tPos - pos
 	dir.z = 0
 	if dir:LengthSqr() < 1 then dir = npc:GetForward() dir.z = 0 end
 	dir:Normalize()
-
-	NGL.Core.StopMoving(npc)
-	npc.NGLCrouch = false
-	npc.NGLMoving, npc.NGLSteer = false, nil
 	npc:SetAngles(Angle(0, dir:Angle().y, 0))
-
 	if opts and opts.vel then
 		npc.loco:Jump()
 		npc.loco:SetVelocity(opts.vel)
+	elseif def.Velocity == "hl2" then
+		npc.loco:Jump()
+		npc.loco:SetVelocity(hl2Velocity(npc, tPos, npc.loco:GetGravity()))
 	else
 		-- Aim a little past it so we reach it before coming down.
 		local over = def.Overshoot or 24
 		npc.loco:JumpAcrossGap(Vector(tPos.x + dir.x * over, tPos.y + dir.y * over, tPos.z), dir)
 	end
+	S.phase, S.t0 = nil, now
+	playFirst(npc, def.Anim)
+	sayLine(npc, def.Sound)
+end
 
-	npc.NGLLeapState = { target = ent, def = def, t0 = now, hit = false }
+-- Leap at `target` (an entity or a position). opts.vel: launch with this
+-- velocity instead of the engine's jump (for something thrown, already in
+-- the air). Returns true when it took off (or started winding up).
+-- def.WindUp: seconds crouched for the jump first (def.WindUpAnim, its
+-- def.WindUpEvent from the model when it has one, like HL2's fast zombie's
+-- AE_FASTZOMBIE_LEAP), turning to keep facing the target; def.WindUpSound.
+function L.Start(npc, target, def, now, opts)
+	def = def or npc.LeapAttack
+	if not def or npc.NGLDying then return false end
+	local ent = not isvector(target) and IsValid(target) and target or nil
+	local tPos
+	if ent then
+		tPos = ent:GetPos()
+	elseif isvector(target) then
+		tPos = target
+	else
+		return false
+	end
+
+	NGL.Core.StopMoving(npc)
+	npc.NGLCrouch = false
+	npc.NGLMoving, npc.NGLSteer = false, nil
+	face(npc, tPos)
+
+	local S = { target = ent, pos = tPos, def = def, t0 = now, hit = false }
+	npc.NGLLeapState = S
 	npc.NGLNextLeap = now + (def.Delay or 3)
 	npc.NGLBusyUntil = now + 5 -- no AI decisions in the air; set again on landing
 	npc.NGLFace = nil
-	playFirst(npc, def.Anim)
-	sayLine(npc, def.Sound)
+
+	local wind = not (opts and opts.vel) and def.WindUp
+	if wind then
+		local t = type(wind) == "number" and wind or 0.4
+		local played = false
+		local anims = def.WindUpAnim
+		if type(anims) ~= "table" then anims = { anims } end
+		for i = 1, table.maxn(anims) do
+			local a = anims[i]
+			local dur = a and npc:PlayAnim(a, false)
+			if dur then
+				played = true
+				local ev = def.WindUpEvent and npc.NGLEventTimes and npc:NGLEventTimes(npc.NGLAnimSeq, dur, { [def.WindUpEvent] = true })
+				if ev and ev[1] then t = ev[1] end
+				break
+			end
+		end
+		if played or t > 0 then
+			S.phase, S.launchAt = "windup", now + t
+			sayLine(npc, def.WindUpSound)
+			return true
+		end
+	end
+	launch(npc, S, now, opts)
 	return true
 end
 
@@ -155,6 +219,19 @@ end
 function L.Update(npc, now)
 	local S = npc.NGLLeapState
 	local def = S.def
+	if S.phase == "windup" then
+		local ent = S.target
+		if ent and (not IsValid(ent) or ent.NGLDying or ent:Health() <= 0) then
+			-- Nothing to jump at any more: stand up again.
+			npc.NGLLeapState = nil
+			npc.NGLBusyUntil = now
+			npc.NGLAct, npc.NGLAnimUntil = nil, nil
+			return
+		end
+		if ent then face(npc, ent:GetPos()) end
+		if now >= S.launchAt then launch(npc, S, now) end
+		return
+	end
 	local t = now - S.t0
 	local target = S.target
 	if not S.hit and target then

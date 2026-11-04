@@ -2,7 +2,7 @@
 -- Everything server-side lives under lua/ngl/server, client files under lua/ngl/client.
 
 NGL = NGL or {}
-NGL.Version = "0.20.0"
+NGL.Version = "0.21.0"
 
 if SERVER then
 	AddCSLuaFile()
@@ -17,6 +17,7 @@ if SERVER then
 	include("ngl/server/sv_air.lua")
 	include("ngl/server/sv_reinforce.lua")
 	include("ngl/server/sv_projectile.lua")
+	include("ngl/server/sv_physproj.lua")
 	include("ngl/server/sv_leap.lua")
 	include("ngl/server/sv_zombies.lua")
 	include("ngl/server/sv_nav.lua")
