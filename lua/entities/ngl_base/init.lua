@@ -250,7 +250,7 @@ function ENT:Initialize()
 	self:NGLSetMoveMode("walk")
 	self.loco:SetAcceleration(900)
 	self.loco:SetDeceleration(900)
-	self.loco:SetStepHeight(18)
+	self.loco:SetStepHeight(self.StepHeight or ((NGL.StepHeight or 26) + 2)) -- a bit over what the grid links
 
 	-- NGL NPCs walk through each other (no blocked paths, no new paths to
 	-- find in a crowd) and push each other aside instead (Core.PushCheck).
@@ -302,7 +302,7 @@ end
 -- ACT_RUN). Outside full-detail range the cheaper FrameAdvance is enough.
 function ENT:BodyUpdate()
 	self:NGLUpdateMoveYaw()
-	if self.NGLMoving and self.NGLDetail then
+	if self.NGLMoving and self.NGLDetail and not self.NGLStandStill then
 		self:BodyMoveXY() -- also advances the frame
 	else
 		self:FrameAdvance()
@@ -520,7 +520,20 @@ function ENT:BehaveUpdate(interval)
 			local dot = dx * ex + dy * ey
 			aim = dot > 0 and dot * dot > 0.25 * (dx * dx + dy * dy) * (ex * ex + ey * ey)
 		end
-		if crouch and A.CrouchWalk then
+		-- Pressing on but not getting anywhere (up against you, a wall or a
+		-- crowd): stand, don't walk on the spot.
+		local v = self.loco:GetVelocity()
+		local still = v.x * v.x + v.y * v.y < 15 * 15
+		if not still then
+			self.NGLStillSince = nil
+		elseif not self.NGLStillSince then
+			self.NGLStillSince = now
+		end
+		self.NGLStandStill = still and now - self.NGLStillSince > 0.3 or nil
+		if self.NGLStandStill then
+			if self:GetPlaybackRate() ~= 1 then self:SetPlaybackRate(1) end
+			self:NGLSetAct(crouch and A.CrouchIdle and (fighting and A.CrouchAim or A.CrouchIdle) or (fighting and A.IdleAim or A.Idle))
+		elseif crouch and A.CrouchWalk then
 			self:NGLSetAct(A.CrouchWalk)
 		elseif self.NGLMoveMode == "walk" then
 			self:NGLSetAct(aim and A.WalkAim or A.Walk)
@@ -529,9 +542,11 @@ function ENT:BehaveUpdate(interval)
 		end
 	elseif crouch and A.CrouchIdle then
 		self.NGLMoving = false
+		self.NGLStillSince, self.NGLStandStill = nil, nil
 		self:NGLSetAct(fighting and A.CrouchAim or A.CrouchIdle)
 	else
 		self.NGLMoving = false
+		self.NGLStillSince, self.NGLStandStill = nil, nil
 		self:NGLSetAct(fighting and A.IdleAim or A.Idle)
 	end
 
@@ -1003,13 +1018,19 @@ function ENT:NGLHitTimes(seq, dur) return self:NGLEventTimes(seq, dur, HIT_EVENT
 -- The model's hit events as the engine plays them, where it hands them to
 -- us: the blow lands right on the claw's frame.
 local GetAnimEventName = util.GetAnimEventNameByID
+-- Other events go to ENT:OnAnimEventName(name) (the poison zombie's crab
+-- throw) and to a leap waiting on its wind-up event (sv_leap.lua).
 function ENT:HandleAnimEvent(event, eventTime, cycle, typ, options)
-	if not (self.NGLMeleeHitAt and GetAnimEventName) then return end
+	if not GetAnimEventName then return end
 	local name = GetAnimEventName(event)
-	if name and HIT_EVENTS[name] then
+	if not name then return end
+	self.NGLLiveEvents = true
+	if self.NGLMeleeHitAt and HIT_EVENTS[name] then
 		self.NGLLiveHits = true
 		NGL.Core.ResolveMelee(self)
 	end
+	if self.NGLLeapState and NGL.Leap then NGL.Leap.OnEvent(self, name) end
+	if self.OnAnimEventName then self:OnAnimEventName(name) end
 end
 
 -- The melee swing animation: Melee.Anim (or Anims.Melee). Full body unless

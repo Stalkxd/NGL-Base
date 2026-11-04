@@ -452,7 +452,7 @@ local SHORTCUT_EVERY = 0.4
 local SHORTCUT_AHEAD = 3
 local SHORTCUT_MAX = 600        -- no further than this in one go
 local SHORTCUT_SAMPLE = 32
-local SHORT_STEP = 18
+local SHORT_STEP = NGL.StepHeight or 26
 local cutHull = { mask = MASK_NPCSOLID_BRUSHONLY, output = {} }
 local cutDown = { mask = MASK_NPCSOLID_BRUSHONLY, output = {} }
 
@@ -1540,7 +1540,11 @@ local function playerOverlap(npc, now)
 		local ply = players[i]
 		local pp = ply:GetPos()
 		local dz = pp.z - pos.z
-		if dz < h and dz > -(ply:Crouching() and 36 or 72) then
+		local ph = ply:Crouching() and 36 or 72
+		-- Standing on a player's head (a headcrab after its bite): off it,
+		-- or it rides there out of reach of your gun.
+		if dz <= -ph + 4 and dz > -ph - 12 then dz = 0 end
+		if dz < h and dz > -ph then
 			local ox, oy = pos.x - pp.x, pos.y - pp.y
 			local d2 = ox * ox + oy * oy
 			if d2 < touch * touch then

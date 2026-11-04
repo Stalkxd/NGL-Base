@@ -46,8 +46,10 @@ local cvMaxDrop = CreateConVar("ngl_nav_max_drop", "250", FCVAR_ARCHIVE, "Highes
 local cvMaxUp = CreateConVar("ngl_nav_max_up", "72", FCVAR_ARCHIVE, "Highest ledge (units) ngl_nav_generate links for jumping up onto.", 0, 256)
 
 -- Hull the generator checks against: a standing NPC above step height
--- (HL2's person hull, 26 wide).
-local STEP = 18
+-- (HL2's person hull, 26 wide). The step is NGL.StepHeight, which NPCs
+-- walk up too (ngl_base sets it on their locomotion): taller than a
+-- player's 18, so big concrete stairs like gm_construct's are walked.
+local STEP = NGL.StepHeight or 26
 local HULL_MINS = Vector(-13, -13, 0)
 local HULL_MAXS = Vector(13, 13, 72 - STEP)
 local MIN_NORMAL_Z = 0.7 -- steeper than ~45 degrees is not walkable
@@ -1066,9 +1068,9 @@ end
 local KIND_CODE, CODE_KIND = { drop = 1, jump = 2, up = 3, climb = 4, walk = 5, vault = 6 },
 	{ "drop", "jump", "up", "climb", "walk", "vault" }
 Nav.KindCode, Nav.CodeKind = KIND_CODE, CODE_KIND
-local FORMAT = 6 -- 6: binary with areas, stairs linked; 5 and older are made again (no stairs)
+local FORMAT = 7 -- 7: steps up to NGL.StepHeight; 6 and older are made again
 
--- Binary format (FORMAT 5 and 6, the same layout): a text header line "NGLNAVB<format> <spacing>
+-- Binary format (FORMAT 5 to 7, the same layout): a text header line "NGLNAVB<format> <spacing>
 -- <points> <links> <areas>", then fixed-size records, all compressed:
 --   point: grid x, y (2 bytes each), height x8 (4), links bitmask (1),
 --          offset x, y (1 each)                                  11 bytes
@@ -1178,7 +1180,7 @@ function Nav.Load()
 	local header = nl and text:sub(1, nl - 1) or text
 	local bver, bS, bn, blinks, bareas = header:match("^NGLNAVB(%d+) (%d+) (%d+) (%d+) (%d+)$")
 	if bver and tonumber(bver) < FORMAT then
-		-- Made before stairs were linked (walkable() and restZ()).
+		-- Made before stairs and taller steps were linked.
 		print("[NGL] This map's nav grid is from an older version: making a new one (your edits are kept).")
 		return false
 	end

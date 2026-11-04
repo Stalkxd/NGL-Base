@@ -24,6 +24,7 @@ ENT.LeapAttack = {
 	Delay = 3,
 	Chance = 1,
 	Reach = 26,
+	Bounce = true,            -- off the target after the bite (sv_leap.lua)
 	Force = 80,
 	-- Ready to jump: HL2's warning hiss (NPC_BlackHeadcrab.Telegraph) while
 	-- it gathers itself, then the jump at the model's AE_HEADCRAB_JUMPATTACK.
