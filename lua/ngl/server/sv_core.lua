@@ -276,7 +276,12 @@ end
 -- positions from each NPC's last think: no extra traces.
 local PUSH_LOOK = 24          -- how far past touching we look ahead
 local SHOVE_TIME = 0.3        -- a shove lasts this long, renewed while touching
-local function radiusOf(e) local h = e.Hull return h and h[2].x or 18 end
+local function radiusOf(e)
+	local r = e.NGLRadius
+	if r then return r end
+	local h = e.Hull
+	return h and h[2].x or 18
+end
 
 local function idOf(e) return e.EntIndex and e:EntIndex() or tonumber(tostring(e):match("0x(%x+)") or "0", 16) or 0 end
 
@@ -349,7 +354,10 @@ Core.PushCheck = pushCheck
 -- same spot): both are shoved apart, slowly, until they're clear. Nobody's
 -- path or goal changes. Positions from the spatial grid.
 local OVERLAP_SPEED = 70
-local nudgeTrace = { mask = MASK_NPCSOLID_BRUSHONLY, output = {} }
+-- Walls, props and players stop a shove; other NGL NPCs (their collision
+-- group) don't.
+local nudgeTrace = { mask = MASK_NPCSOLID, collisiongroup = COLLISION_GROUP_NPC_SCRIPTED, output = {} }
+local nudgeFilter = {}
 
 local function boundsOf(npc)
 	local mins, maxs
@@ -362,8 +370,15 @@ local function slideTo(npc, pos, to)
 	local t = nudgeTrace
 	t.start, t.endpos = pos + Vector(0, 0, 4), to + Vector(0, 0, 4)
 	t.mins, t.maxs = boundsOf(npc)
-	t.filter = npc
+	local ig = npc.NGLShoveIgnore -- the player it is stepping out of
+	if ig and IsValid(ig) then
+		nudgeFilter[1], nudgeFilter[2] = npc, ig
+		t.filter = nudgeFilter
+	else
+		t.filter = npc
+	end
 	local tr = util.TraceHull(t)
+	nudgeFilter[1], nudgeFilter[2] = nil, nil
 	if tr.Hit or tr.StartSolid then return false end
 	npc:SetPos(to)
 	npc.NGLGridPos = to
@@ -375,12 +390,12 @@ end
 function Core.ShoveStep(npc, pos, interval, now)
 	local sh = npc.NGLShove
 	if not sh then return nil end
-	if now >= sh.untilT or npc.IsVehicleNPC then npc.NGLShove = nil return nil end
+	if now >= sh.untilT or npc.IsVehicleNPC then npc.NGLShove, npc.NGLShoveIgnore = nil, nil return nil end
 	local step = sh.speed * math.min(interval or 0.015, 0.1)
 	if step < 0.5 then return nil end
 	local to = Vector(pos.x + sh.x * step, pos.y + sh.y * step, pos.z)
 	if slideTo(npc, pos, to) then return to end
-	npc.NGLShove = nil -- against a wall: stays where it is
+	npc.NGLShove, npc.NGLShoveIgnore = nil, nil -- against a wall: stays where it is
 	return nil
 end
 
@@ -797,6 +812,8 @@ local function pick(s)
 	return s
 end
 
+local cvMeleeDebug = CreateConVar("ngl_debug_melee", "0", FCVAR_NONE, "Print each melee swing's animation and when its blows land.", 0, 1)
+
 -- Starts a swing at `target`. The blow lands HitDelay seconds later (the NPC
 -- thinks again right then), if the target is still in reach and in front.
 function Core.StartMelee(npc, target, now)
@@ -813,9 +830,13 @@ function Core.StartMelee(npc, target, now)
 	-- has them (each one a blow, like HL2's zombies), else after HitDelay.
 	local times = played and m.UseEvents ~= false and npc.NGLHitTimes and npc:NGLHitTimes(seq, played)
 	if times and #times > 0 then
-		npc.NGLMeleeHitAt = now + times[1]
+		-- The engine hands this NPC its hit events as they play
+		-- (ENT:HandleAnimEvent): they land the blows; these times are
+		-- only a fallback, a little later, if one goes missing.
+		local late = npc.NGLLiveHits and 0.35 or 0
+		npc.NGLMeleeHitAt = now + times[1] + late
 		local rest = {}
-		for k = 2, #times do rest[#rest + 1] = now + times[k] end
+		for k = 2, #times do rest[#rest + 1] = now + times[k] + late end
 		npc.NGLMeleeMore = #rest > 0 and rest or nil
 	elseif type(m.HitDelay) == "table" then -- several blows: { 0.2, 0.45 }
 		npc.NGLMeleeHitAt = now + (m.HitDelay[1] or 0.4)
@@ -827,6 +848,15 @@ function Core.StartMelee(npc, target, now)
 		npc.NGLMeleeMore = nil
 	end
 	npc.NGLBusyUntil = max(npc.NGLBusyUntil or 0, now + dur)
+	if cvMeleeDebug:GetBool() then
+		local list = {}
+		local at = npc.NGLMeleeHitAt
+		list[1] = string.format("%.2f", at - now)
+		for _, t in ipairs(npc.NGLMeleeMore or {}) do list[#list + 1] = string.format("%.2f", t - now) end
+		print(string.format("[NGL] %s swing %s (%.2f s): blows at %s s (%s)", npc:GetClass(),
+			seq and npc:GetSequenceName(seq) or "?", dur, table.concat(list, ", "),
+			(times and #times > 0) and "model events" or "Melee.HitDelay"))
+	end
 	npc:NGLSound("Attack")
 	if npc.NGLNextThink and npc.NGLNextThink > npc.NGLMeleeHitAt then npc.NGLNextThink = npc.NGLMeleeHitAt end
 	return true
@@ -863,6 +893,7 @@ local function resolveMelee(npc)
 	end
 	npc:OnMeleeHit(t, hit)
 end
+Core.ResolveMelee = resolveMelee
 
 local ATTACK_KEEP_SQR_PAD = 1.2 * 1.2
 local STUCK_SQR = 16 * 16
@@ -897,12 +928,13 @@ local function straightOk(npc, now, pos, tPos)
 	-- Only the next stretch: what's beyond is checked as we get closer.
 	local dx, dy = tPos.x - pos.x, tPos.y - pos.y
 	local d = math.sqrt(dx * dx + dy * dy)
-	local to = tPos
+	local to, zTol = tPos, nil
 	if d > LINE_CHECK_DIST then
 		local f = LINE_CHECK_DIST / d
 		to = Vector(pos.x + dx * f, pos.y + dy * f, pos.z + (tPos.z - pos.z) * f)
+		zTol = 96 -- only a guess at the height half way
 	end
-	c.ok = NGL.Nav.WalkLine(pos, to) ~= false
+	c.ok = NGL.Nav.WalkLine(pos, to, zTol) ~= false
 	npc.NGLLineCheck = c
 	return c.ok
 end
@@ -1492,45 +1524,34 @@ function Core.RunOrder(npc, now, dt, pos, o, enemy, visible)
 end
 
 -- One AI decision for one NPC. `dt` is the time since its last think.
--- Players stuck in NPCs: shoves and leaps move NPCs with SetPos and the
--- world-only hull check above, and a headcrab lands on you, so an NPC ends
--- up inside a player, who then can't move. While one overlaps a player it
--- goes to the debris group (players walk out of it; bullets, the world and
--- props still hit it), is nudged off, and goes back once it is clear.
+-- Players and NPCs, as in HL2: NPCs are solid to players and never end up
+-- inside one. Melee NPCs stop a body's width short (see the fight), shoves
+-- don't move them into a player (slideTo), and one that ends up inside a
+-- player anyway (a headcrab landing on you) steps straight back out of
+-- them, nothing else changes.
 local PLAYER_R = 16
 local function playerOverlap(npc, now)
-	if npc.IsVehicleNPC then return end
+	if npc.IsVehicleNPC or npc.NGLTraverse or npc.NGLLeapState then return end
 	local pos = npc:GetPos()
 	local myR = radiusOf(npc)
 	local h = npc.Hull and npc.Hull[2].z or 72
-	local touch, clear = myR + PLAYER_R + 2, myR + PLAYER_R + 10
-	local inside, near
+	local touch = myR + PLAYER_R
 	for i = 1, #players do
 		local ply = players[i]
 		local pp = ply:GetPos()
 		local dz = pp.z - pos.z
-		local ph = ply:Crouching() and 36 or 72
-		if dz < h and dz > -ph then
+		if dz < h and dz > -(ply:Crouching() and 36 or 72) then
 			local ox, oy = pos.x - pp.x, pos.y - pp.y
 			local d2 = ox * ox + oy * oy
-			if d2 < clear * clear then
-				near = true
-				if d2 < touch * touch then
-					inside = true
-					local d = math.sqrt(d2)
-					local bx, by
-					if d >= 1 then bx, by = ox / d, oy / d else bx, by = apartDir(npc, pos, ply, pp) end
-					shove(npc, bx, by, 80, now)
-				end
+			if d2 < touch * touch then
+				local d = math.sqrt(d2)
+				local bx, by
+				if d >= 1 then bx, by = ox / d, oy / d else bx, by = apartDir(npc, pos, ply, pp) end
+				npc.NGLShoveIgnore = ply
+				shove(npc, bx, by, 160, now)
+				return
 			end
 		end
-	end
-	if inside and not npc.NGLPassPlayer then
-		npc.NGLPassPlayer = npc:GetCollisionGroup()
-		npc:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
-	elseif not near and npc.NGLPassPlayer then
-		npc:SetCollisionGroup(npc.NGLPassPlayer)
-		npc.NGLPassPlayer = nil
 	end
 end
 
@@ -1539,7 +1560,7 @@ local function think(npc, now, dt, nearestPlayerSqr)
 	local detailSqr = cvDetail:GetFloat() ^ 2
 	npc.NGLDetail = nearestPlayerSqr < (npc.NGLDetail and detailSqr * DETAIL_LEAVE or detailSqr)
 	if npc.NGLMeleeHitAt and now >= npc.NGLMeleeHitAt then resolveMelee(npc) end
-	if npc.NGLPassPlayer or nearestPlayerSqr < 10000 then playerOverlap(npc, now) end
+	if nearestPlayerSqr < 10000 then playerOverlap(npc, now) end
 	if npc:OnAIThink(dt) == true then return end
 	if now < (npc.NGLBusyUntil or 0) then -- mid-swing or playing a locked animation
 		gridUpdate(npc, npc:GetPos())
@@ -1677,6 +1698,19 @@ local function think(npc, now, dt, nearestPlayerSqr)
 			npc.NGLPath, npc.NGLGoal = nil, nil
 		else
 			chase(npc, now, pos, tPos, true)
+			-- Walking straight at it: stop a body's width short, not in it
+			-- (between thinks the NPC keeps walking to where it aimed).
+			local g = npc.NGLGoal
+			if npc.NGLDirect and g == tPos then
+				local gap = radiusOf(npc) + (enemy:IsPlayer() and PLAYER_R or radiusOf(enemy)) + 4
+				local ddx, ddy = tPos.x - pos.x, tPos.y - pos.y
+				local dl = math.sqrt(ddx * ddx + ddy * ddy)
+				if dl > gap then
+					npc.NGLGoal = Vector(tPos.x - ddx / dl * gap, tPos.y - ddy / dl * gap, tPos.z)
+				else
+					npc.NGLGoal = nil
+				end
+			end
 		end
 		return
 	end

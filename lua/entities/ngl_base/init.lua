@@ -261,6 +261,10 @@ function ENT:Initialize()
 	-- Smaller (headcrabs) or bigger than a person.
 	local hull = self.Hull
 	if hull then self:SetCollisionBounds(hull[1], hull[2]) end
+	-- How wide it really is (a poison zombie's box is wider than a person's),
+	-- for keeping clear of players and each other (sv_core.lua).
+	local _, cmax = self:GetCollisionBounds()
+	if cmax and cmax.x > 0 then self.NGLRadius = math.min(cmax.x, cmax.y) end
 	-- Zombies: show the headcrab riding on it (sv_zombies.lua).
 	if self.Headcrab and NGL.Zombie then NGL.Zombie.ShowCrab(self, true) end
 
@@ -350,6 +354,10 @@ function ENT:RunBehaviour() end
 function ENT:BehaveUpdate(interval)
 	if self.NGLDying then return end
 	local t0 = SysTime()
+	-- A melee blow lands on its tick, not on the next AI think (up to a
+	-- tenth of a second later, more in a big fight), so it matches the swing.
+	local hitAt = self.NGLMeleeHitAt
+	if hitAt and CurTime() >= hitAt then NGL.Core.ResolveMelee(self) end
 
 	local pos = self:GetPos()
 
@@ -991,6 +999,18 @@ function ENT:NGLEventTimes(seq, dur, events)
 	return t
 end
 function ENT:NGLHitTimes(seq, dur) return self:NGLEventTimes(seq, dur, HIT_EVENTS) end
+
+-- The model's hit events as the engine plays them, where it hands them to
+-- us: the blow lands right on the claw's frame.
+local GetAnimEventName = util.GetAnimEventNameByID
+function ENT:HandleAnimEvent(event, eventTime, cycle, typ, options)
+	if not (self.NGLMeleeHitAt and GetAnimEventName) then return end
+	local name = GetAnimEventName(event)
+	if name and HIT_EVENTS[name] then
+		self.NGLLiveHits = true
+		NGL.Core.ResolveMelee(self)
+	end
+end
 
 -- The melee swing animation: Melee.Anim (or Anims.Melee). Full body unless
 -- Melee.Gesture is true. Returns the duration for a full-body swing.
