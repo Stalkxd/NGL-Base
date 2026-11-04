@@ -1,7 +1,7 @@
--- NGL fast zombie. Comes at you from out of sight: while you watch it, it
--- runs off to a spot at your side or back you can't see (the "ambusher" AI
--- mode, sv_aimodes.lua), waits for you to look away, then rushes and leaps
--- at you (ENT.LeapAttack) and claws. Climbs walls too high to jump: the
+-- NGL fast zombie. Never just runs at you: when it sees you it gets out of
+-- your sight and lies low a few seconds (the "tricky" AI mode,
+-- sv_aimodes.lua), then rushes and leaps at you (ENT.LeapAttack) and claws
+-- when you don't expect it. Climbs walls too high to jump: the
 -- climb links ngl_nav_generate puts at high walls (sv_nav_climb.lua).
 -- Fields only, no code.
 AddCSLuaFile()
@@ -20,7 +20,7 @@ ENT.EyeHeight = 50
 ENT.CrouchChance = 0
 ENT.WanderRadius = 400
 ENT.EnemyMemory = 15            -- keeps track of you while it hides
-ENT.AIMode = "ambusher"
+ENT.AIMode = "tricky"         -- hides when it sees you, then a surprise attack (sv_aimodes.lua)
 ENT.Group = false
 ENT.JumpDown = 400              -- drops off roofs to get at you
 ENT.JumpUp = 72

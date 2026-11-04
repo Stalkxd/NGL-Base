@@ -18,6 +18,9 @@
 --             where you're looking. While you watch it, it runs to a spot
 --             at your side or back you can't see, waits there until you
 --             look away or come close, then rushes and leaps at you.
+--   tricky    the fast zombie's own: never just runs at you. On seeing you
+--             it gets out of sight and lies low a few seconds, then comes
+--             at you when you don't expect it; later it does it again.
 --
 -- Your own mode (any addon, server side):
 --   NGL.RegisterAIMode("sniper", {
@@ -406,6 +409,105 @@ NGL.RegisterAIMode("ambusher", {
 			npc.NGLAmbush = { enemy = enemy, phase = "rush", untilT = now + (mode.RushTime or 5) }
 			npc:NGLSound("Alert", true)
 			npc:NGLSetMoveMode("run")
+			Core.Chase(npc, now, pos, tPos, visible)
+			return true
+		end
+		if npc.NGLGoal or npc.NGLPath or npc.NGLPathPending then Core.StopMoving(npc) end
+		npc.NGLFace = tPos
+		return true
+	end,
+})
+
+----------------------------------------------------------------------------
+-- tricky: fast zombies that never just run at you. When one sees you it
+-- gets out of your sight first and lies low for a few seconds, then comes
+-- at you all at once (a rush and a leap) when you don't expect it: you look
+-- away, you walk up close, or it has waited long enough. After a while
+-- fighting it breaks off and does it again.
+----------------------------------------------------------------------------
+
+local TRICK_YAWS = { 180, 135, -135, 90, -90, 45, -45, 0 } -- behind you first
+local trickYaws = {}
+
+NGL.RegisterAIMode("tricky", {
+	HideMin = 250,         -- hiding spots this far from the enemy
+	HideMax = 700,
+	Hide = { 3, 7 },       -- seconds lying low once hidden
+	MoveTime = 7,          -- seconds to get out of sight before giving up on it
+	RushTime = 7,          -- seconds of all-out attack after the surprise
+	HideDelay = 8,         -- seconds fighting normally before it hides again
+	Pounce = 380,          -- you this close and not looking its way: go
+	Cornered = 160,        -- you this close: it fights, whatever it was doing
+	Engaged = 300,         -- in a fight this close: it doesn't break off to hide
+
+	Fight = function(npc, enemy, dist, visible, now, dt)
+		if npc.Weapon then return end
+		local Core = core()
+		local mode = npc.NGLMode
+		local pos, tPos = npc:GetPos(), enemy:GetPos()
+		local A = npc.NGLTrick
+		if A and A.enemy ~= enemy then A = nil end
+
+		local function rush(alert)
+			npc.NGLTrick = { enemy = enemy, phase = "rush", untilT = now + (mode.RushTime or 7) }
+			if alert then npc:NGLSound("Alert", true) end
+			npc:NGLSetMoveMode("run")
+		end
+
+		if A and A.phase == "rush" then
+			if now < A.untilT then
+				if visible then return end -- the default: close in, leap, claw
+				npc:NGLSetMoveMode("run")
+				Core.Chase(npc, now, pos, tPos, false)
+				npc.NGLFace = nil
+				return true
+			end
+			npc.NGLTrick, A = nil, nil
+			npc.NGLNextTrick = now + (mode.HideDelay or 8)
+		end
+
+		if not A then
+			-- Fighting normally for now, or already at it up close.
+			if now < (npc.NGLNextTrick or 0) or dist < (mode.Engaged or 300) then return end
+			if not visible then return end -- hunt where it was last seen
+			local face = Core.FacingYaw(enemy)
+			for i, a in ipairs(TRICK_YAWS) do trickYaws[i] = face + a end
+			local spot = Core.FindHiddenSpot(npc, Core.EyeOf(enemy), tPos, mode.HideMin or 250, mode.HideMax or 700, trickYaws)
+			if not spot then
+				npc.NGLNextTrick = now + 3 -- nowhere to hide here: try again soon
+				return
+			end
+			A = { enemy = enemy, phase = "hide", spot = spot, from = tPos, untilT = now + (mode.MoveTime or 7) }
+			npc.NGLTrick = A
+			Core.StopMoving(npc)
+		end
+
+		if dist < (mode.Cornered or 160) then rush(false) return end
+		-- The enemy went far from where we planned round: plan again.
+		if A.from:DistToSqr(tPos) > 600 * 600 then
+			npc.NGLTrick = nil
+			return
+		end
+		npc.NGLLastSeenT = now -- it keeps track of you while it hides
+
+		if A.phase == "hide" then
+			if pos:DistToSqr(A.spot) < 80 * 80 or now > A.untilT then
+				local h = mode.Hide or { 3, 7 }
+				A.phase, A.untilT = "wait", now + Rand(h[1], h[2])
+				Core.StopMoving(npc)
+				return true
+			end
+			npc.NGLCrouch = false
+			npc:NGLSetMoveMode("run")
+			Core.Chase(npc, now, pos, A.spot, false)
+			npc.NGLFace = nil
+			return true
+		end
+
+		-- Lying low: go when the wait is over, or you come close without
+		-- looking its way.
+		if now >= A.untilT or (dist < (mode.Pounce or 380) and not watching(enemy, pos)) then
+			rush(true)
 			Core.Chase(npc, now, pos, tPos, visible)
 			return true
 		end
