@@ -177,6 +177,14 @@ function L.Start(npc, target, def, now, opts)
 				played = true
 				local ev = def.WindUpEvent and npc.NGLEventTimes and npc:NGLEventTimes(npc.NGLAnimSeq, dur, { [def.WindUpEvent] = true })
 				if ev and ev[1] then t = ev[1] end
+				-- The engine hands this NPC its events as they play: the
+				-- jump goes on the event itself (L.OnEvent); this is only a
+				-- fallback, a little later.
+				if def.WindUpEvent and npc.NGLLiveEvents then t = t + 0.35 end
+				if GetConVar("ngl_debug_melee"):GetBool() then
+					print(string.format("[NGL] %s wind-up %s (%.2f s): jumps at %.2f s (%s)", npc:GetClass(),
+						npc:GetSequenceName(npc.NGLAnimSeq) or "?", dur, t, (ev and ev[1]) and "model event" or "WindUp"))
+				end
 				break
 			end
 		end
@@ -188,6 +196,15 @@ function L.Start(npc, target, def, now, opts)
 	end
 	launch(npc, S, now, opts)
 	return true
+end
+
+-- An animation event while leaping (ENT:HandleAnimEvent): the wind-up's
+-- jump event takes off right then.
+function L.OnEvent(npc, name)
+	local S = npc.NGLLeapState
+	if S and S.phase == "windup" and S.def.WindUpEvent == name then
+		launch(npc, S, CurTime())
+	end
 end
 
 -- Throw velocity for something launched from `src` to land on `dst`
@@ -247,9 +264,15 @@ function L.Update(npc, now)
 				dir:Normalize()
 				hurt(npc, target, def, dir)
 				if npc.NGLNear and def.HitSound then npc:EmitSound(pick(def.HitSound)) end
-				-- Stop on it instead of flying on through.
+				-- Stop on it instead of flying on through; a headcrab
+				-- (def.Bounce) bounces back off it as in HL2, so it doesn't
+				-- land on your head, out of reach of your gun.
 				local v = npc.loco:GetVelocity()
-				npc.loco:SetVelocity(Vector(v.x * 0.15, v.y * 0.15, math.min(v.z, 0)))
+				if def.Bounce then
+					npc.loco:SetVelocity(Vector(-dir.x * 120, -dir.y * 120, math.max(v.z, 0) * 0.3))
+				else
+					npc.loco:SetVelocity(Vector(v.x * 0.15, v.y * 0.15, math.min(v.z, 0)))
+				end
 				npc:OnLeapHit(target, true)
 			end
 		end

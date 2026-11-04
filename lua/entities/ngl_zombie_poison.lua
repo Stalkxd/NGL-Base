@@ -73,6 +73,8 @@ ENT.Sounds = {
 ENT.IdleSoundDelay = { 6, 14 }
 
 if SERVER then
+	local THROW_EVENT = { AE_ZOMBIE_POISON_THROW_CRAB = true }
+
 	-- Which back crabs are still there (bodygroups on the model).
 	function ENT:NGLShowBackCrabs()
 		local bgs, n = self.CrabBodygroups, self.NGLCrabs or 0
@@ -104,31 +106,58 @@ if SERVER then
 
 		self:StopMoving()
 		self:LookAt(enemy)
-		local played = false
+		local dur = false
 		for _, a in ipairs(th.Anim) do
-			if self:PlayAnim(a, true) then played = true break end
+			dur = self:PlayAnim(a, true)
+			if dur then break end
 		end
-		if not played then self.NGLBusyUntil = now + th.ReleaseAt + 0.3 end
+		-- The crab leaves the hand on the model's own throw event (HL2's
+		-- AE_ZOMBIE_POISON_THROW_CRAB), not after a set time; ReleaseAt
+		-- only without one.
+		local at = th.ReleaseAt
+		local ev = dur and self:NGLEventTimes(self.NGLAnimSeq, dur, THROW_EVENT)
+		if ev and ev[1] then at = ev[1] end
+		if self.NGLLiveEvents then at = at + 0.35 end -- the event itself throws it (OnAnimEventName)
+		if not dur then self.NGLBusyUntil = now + at + 0.3 end
+		if GetConVar("ngl_debug_melee"):GetBool() then
+			print(string.format("[NGL] %s throw %s (%.2f s): crab leaves at %.2f s (%s)", self:GetClass(),
+				dur and self:GetSequenceName(self.NGLAnimSeq) or "?", dur or 0, at, (ev and ev[1]) and "model event" or "ReleaseAt"))
+		end
 		self:Speak("Throw")
-		timer.Simple(th.ReleaseAt, function()
-			if not IsValid(self) or self.NGLDying or (self.NGLCrabs or 0) <= 0 then return end
-			local target = IsValid(enemy) and enemy or self.NGLEnemy
-			if not IsValid(target) then return end
-			local pos = self:GetPos()
-			local fwd = target:GetPos() - pos
-			fwd.z = 0
-			fwd:Normalize()
-			local src = Vector(pos.x + fwd.x * 24, pos.y + fwd.y * 24, pos.z + 70)
-			-- Lands just short of the target, then goes for it.
-			local tp = target:GetPos()
-			local dst = tp - fwd * 40
-			local crab = NGL.Zombie.SpawnCrab(self.CrabClass, src, fwd:Angle().y, target, { throwTo = dst, time = th.FlightTime })
-			if crab then
-				self.NGLCrabs = self.NGLCrabs - 1
-				self:NGLShowBackCrabs()
-			end
+		local id = (self.NGLThrowId or 0) + 1
+		self.NGLThrowId = id
+		self.NGLThrowAt = enemy
+		timer.Simple(at, function()
+			if IsValid(self) and self.NGLThrowId == id then self:NGLReleaseCrab() end
 		end)
 		return true
+	end
+
+	-- The crab in its hand goes: lands just short of the target, then goes for it.
+	function ENT:NGLReleaseCrab()
+		local enemy = self.NGLThrowAt
+		self.NGLThrowAt = nil
+		self.NGLThrowId = (self.NGLThrowId or 0) + 1 -- a later timer does nothing
+		if self.NGLDying or (self.NGLCrabs or 0) <= 0 or enemy == nil then return end
+		local target = IsValid(enemy) and enemy or self.NGLEnemy
+		if not IsValid(target) then return end
+		local th = self.Throw
+		local pos = self:GetPos()
+		local fwd = target:GetPos() - pos
+		fwd.z = 0
+		fwd:Normalize()
+		local src = Vector(pos.x + fwd.x * 24, pos.y + fwd.y * 24, pos.z + 70)
+		local tp = target:GetPos()
+		local dst = tp - fwd * 40
+		local crab = NGL.Zombie.SpawnCrab(self.CrabClass, src, fwd:Angle().y, target, { throwTo = dst, time = th.FlightTime })
+		if crab then
+			self.NGLCrabs = self.NGLCrabs - 1
+			self:NGLShowBackCrabs()
+		end
+	end
+
+	function ENT:OnAnimEventName(name)
+		if name == "AE_ZOMBIE_POISON_THROW_CRAB" and self.NGLThrowAt ~= nil then self:NGLReleaseCrab() end
 	end
 
 	-- Crabs still on its back come off with it.

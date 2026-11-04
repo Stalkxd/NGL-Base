@@ -20,6 +20,7 @@ ENT.LeapAttack = {
 	Delay = 1.5,
 	Chance = 0.8,
 	Reach = 26,
+	Bounce = true,            -- off the target after the bite (sv_leap.lua)
 	DamageType = DMG_SLASH,
 	Force = 100,
 	Anim = { ACT_RANGE_ATTACK1, "attack" },
