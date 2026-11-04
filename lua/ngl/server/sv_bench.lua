@@ -88,7 +88,7 @@ local function serverFrameMs()
 end
 
 local function newBucket()
-	return { frame = {}, lua = {}, overruns = 0, ticks = 0 }
+	return { frame = {}, lua = {}, late = {}, spikes = {}, overruns = 0, ticks = 0, gcAlloc = 0, gcCycles = 0 }
 end
 
 local function stats(list)
@@ -299,7 +299,28 @@ local function sample(run, bucket)
 
 	local ms = serverFrameMs()
 	if ms then bucket.frame[#bucket.frame + 1] = ms end
-	bucket.lua[#bucket.lua + 1] = B.LuaTime * 1000
+	local luaMs = B.LuaTime * 1000
+	bucket.lua[#bucket.lua + 1] = luaMs
+
+	-- How late NGL thinks ran this tick (the AI budget was full when this
+	-- grows), and the Lua heap: what's allocated, and when a GC cycle ends
+	-- (the heap shrinks). A Lua spike on the tick a cycle ended is a GC pause.
+	if (B.ThinkN or 0) > 0 then bucket.late[#bucket.late + 1] = B.ThinkLate / B.ThinkN * 1000 end
+	local gc = collectgarbage("count")
+	local last = bucket.lastGc
+	local dropped = 0
+	if last then
+		if gc < last then
+			dropped = last - gc
+			bucket.gcCycles = bucket.gcCycles + 1
+		else
+			bucket.gcAlloc = bucket.gcAlloc + (gc - last)
+		end
+	end
+	bucket.lastGc = gc
+	if luaMs > engine.TickInterval() * 500 and #bucket.spikes < 50 then
+		bucket.spikes[#bucket.spikes + 1] = { tick = bucket.ticks, lua_ms = luaMs, heap_kb = math.floor(gc), gc_freed_kb = math.floor(dropped) }
+	end
 
 	-- A tick that arrives much later than the tick interval means the server
 	-- could not keep up (or, on a listen server, the client frame was slow).
@@ -346,6 +367,10 @@ local function finish(run)
 		baseline_frame_ms = base,
 		frame_ms = loaded,
 		bench_lua_ms = lua,
+		think_late_ms = stats(run.loaded.late),
+		lua_spikes = run.loaded.spikes,
+		gc_alloc_kb_per_s = run.loaded.gcAlloc / math.max(0.001, run.duration or cvDuration:GetFloat()),
+		gc_cycles = run.loaded.gcCycles,
 		overruns = run.loaded.overruns,
 		ticks = run.loaded.ticks,
 		baseline_overruns = run.baseline.overruns,
@@ -401,6 +426,12 @@ local function finish(run)
 	end
 	if lua and lua.max > 0 then
 		say(p, "  NGL / bench Lua:       " .. fmt(lua))
+		if result.think_late_ms then say(p, "  NGL thinks late by:    " .. fmt(result.think_late_ms)) end
+		say(p, string.format("  Lua heap: %.0f KB allocated a second, %d GC cycles ended", result.gc_alloc_kb_per_s, result.gc_cycles))
+		for _, sp in ipairs(result.lua_spikes) do
+			say(p, string.format("  Lua spike: tick %d, %.1f ms%s", sp.tick, sp.lua_ms,
+				sp.gc_freed_kb > 0 and string.format(" (a GC cycle ended on it, %d KB freed)", sp.gc_freed_kb) or ""))
+		end
 	end
 	say(p, string.format("  Late ticks, empty:     %d of %d", run.baseline.overruns, run.baseline.ticks))
 	say(p, string.format("  Late ticks, loaded:    %d of %d", run.loaded.overruns, run.loaded.ticks))
@@ -520,6 +551,7 @@ hook.Add("Tick", "NGL.Bench.Harness", function()
 	-- B.LuaTime accumulates agent Lua time between two harness ticks. Whether
 	-- the light driver runs before or after this hook only shifts it by a tick.
 	B.LuaTime = 0
+	B.ThinkLate, B.ThinkN = 0, 0
 end)
 
 ----------------------------------------------------------------------------

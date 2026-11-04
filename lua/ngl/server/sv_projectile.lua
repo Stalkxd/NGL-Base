@@ -40,6 +40,9 @@ local nextId = 0
 local trace = { mask = MASK_SHOT }
 local result = {}
 trace.output = result
+-- Resolved at once (nobody near): bounding boxes only, like the silent
+-- shot in sv_core.lua (no bone setup on the NPCs the trace passes).
+local silentTrace = { mask = bit.band(MASK_SHOT, bit.bnot(CONTENTS_HITBOX)), output = result }
 
 local function pick(s)
 	if type(s) == "table" then return s[math.random(#s)] end
@@ -77,8 +80,8 @@ function Proj.Fire(attacker, def, src, dst, visual, opts)
 			local d = dst - src
 			local len = d:Length()
 			local past = (def.Radius or 0) > 0 and 0 or 48
-			trace.start, trace.endpos, trace.filter = src, len > 1 and dst + d * (past / len) or dst, attacker
-			util.TraceLine(trace)
+			silentTrace.start, silentTrace.endpos, silentTrace.filter = src, len > 1 and dst + d * (past / len) or dst, attacker
+			util.TraceLine(silentTrace)
 			local target = opts and opts.target
 			local hitEnt = result.Entity
 			if IsValid(target) and hitEnt ~= target and result.Fraction * (len + past) >= len - 4 then hitEnt = target end

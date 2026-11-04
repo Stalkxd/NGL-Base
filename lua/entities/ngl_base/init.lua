@@ -20,6 +20,11 @@ local resolvedPoses = {} -- [model] = { aim = bool, move = bool }
 local resolvedSounds = {} -- [class .. model] = { Pain = { ... }, ... }
 local Core -- NGL.Core, set on first use (entities load after the autorun files)
 
+local cvAnimFar = CreateConVar("ngl_anim_rate_far", "0.05", FCVAR_ARCHIVE,
+	"Seconds between animation updates on the server for NPCs players can see but that are beyond ngl_anim_detail_range (0 = every tick).", 0, 0.15)
+local cvAnimHidden = CreateConVar("ngl_anim_rate_hidden", "0.15", FCVAR_ARCHIVE,
+	"Seconds between animation updates on the server for NPCs no player can see (0 = every tick). The engine caps one update at 0.2 s of animation.", 0, 0.19)
+
 -- Empty default hooks.
 function ENT:OnSpawned() end
 function ENT:OnSeeEnemy(enemy) end
@@ -300,13 +305,33 @@ end
 -- Engine calls this every tick. Same cost as the stock NextBot version, but
 -- it handles every movement activity (the stock one only knows ACT_WALK and
 -- ACT_RUN). Outside full-detail range the cheaper FrameAdvance is enough.
+--
+-- Away from full detail the frame isn't advanced every tick: every
+-- ngl_anim_rate_far seconds for NPCs a player may see, every
+-- ngl_anim_rate_hidden for ones nobody can (FrameAdvance catches up the
+-- time since the last one, so cycles keep their speed). Each skipped advance
+-- is engine work saved, and a cycle that changes less often is sent to
+-- clients less often. One-off animations (swings, throws, leaps, climbs)
+-- always advance every tick, so their events and ends come on time.
 function ENT:BodyUpdate()
+	local t0 = SysTime()
 	self:NGLUpdateMoveYaw()
 	if self.NGLMoving and self.NGLDetail and not self.NGLStandStill then
 		self:BodyMoveXY() -- also advances the frame
 	else
-		self:FrameAdvance()
+		local gap = 0
+		if not (self.NGLAnimUntil or self.NGLLeapState or self.NGLTraverse or self.NGLDying) then
+			if self.NGLSeen == false then gap = cvAnimHidden:GetFloat()
+			elseif not self.NGLDetail then gap = cvAnimFar:GetFloat() end
+		end
+		local now = CurTime()
+		if gap <= 0 or now >= (self.NGLNextAnim or 0) then
+			self.NGLNextAnim = now + gap
+			self:FrameAdvance()
+		end
 	end
+	local B = NGL.Bench
+	if B then B.LuaTime = B.LuaTime + (SysTime() - t0) end
 end
 
 -- Legs follow the direction we actually move in (strafing, or walking while
@@ -319,7 +344,7 @@ local MOVE_YAW_RATE = 720 -- degrees per second the legs can swing
 function ENT:NGLUpdateMoveYaw()
 	if not self.NGLPoses.move then return end
 	local target = 0
-	if self.NGLMoving and self.NGLNear then
+	if self.NGLMoving and self.NGLNear and self.NGLSeen ~= false then
 		local v = self.loco:GetVelocity()
 		local dx, dy = v.x, v.y
 		if dx * dx + dy * dy < 400 then
@@ -353,6 +378,8 @@ function ENT:RunBehaviour() end
 
 function ENT:BehaveUpdate(interval)
 	if self.NGLDying then return end
+	-- Moved along its path at each think instead (sv_core.lua, railStep).
+	if self.NGLRail then return end
 	local t0 = SysTime()
 	-- A melee blow lands on its tick, not on the next AI think (up to a
 	-- tenth of a second later, more in a big fight), so it matches the swing.

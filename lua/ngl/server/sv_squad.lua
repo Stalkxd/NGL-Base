@@ -192,6 +192,7 @@ function Squad:Contact(from, pos, now)
 			and npc:OnAlerted(from, pos) ~= true then
 			npc.NGLInvestigate = pos
 			npc.NGLInvestigateUntil = now + 20
+			if NGL.Core.Wake then NGL.Core.Wake(npc) end
 		end
 	end
 end
