@@ -336,7 +336,8 @@ function Nav.ToolUse(ply, mode, button, pos, radius)
 		ply.NGLNavLinkA = nil
 		if button == "right" then
 			-- Just the square aimed at, nothing round it.
-			local a, b = Nav.AreaBox and Nav.AreaBox(pos)
+			local a, b
+			if Nav.AreaBox then a, b = Nav.AreaBox(pos) end
 			if not a then
 				res = "no square there"
 			else

@@ -1492,11 +1492,54 @@ function Core.RunOrder(npc, now, dt, pos, o, enemy, visible)
 end
 
 -- One AI decision for one NPC. `dt` is the time since its last think.
+-- Players stuck in NPCs: shoves and leaps move NPCs with SetPos and the
+-- world-only hull check above, and a headcrab lands on you, so an NPC ends
+-- up inside a player, who then can't move. While one overlaps a player it
+-- goes to the debris group (players walk out of it; bullets, the world and
+-- props still hit it), is nudged off, and goes back once it is clear.
+local PLAYER_R = 16
+local function playerOverlap(npc, now)
+	if npc.IsVehicleNPC then return end
+	local pos = npc:GetPos()
+	local myR = radiusOf(npc)
+	local h = npc.Hull and npc.Hull[2].z or 72
+	local touch, clear = myR + PLAYER_R + 2, myR + PLAYER_R + 10
+	local inside, near
+	for i = 1, #players do
+		local ply = players[i]
+		local pp = ply:GetPos()
+		local dz = pp.z - pos.z
+		local ph = ply:Crouching() and 36 or 72
+		if dz < h and dz > -ph then
+			local ox, oy = pos.x - pp.x, pos.y - pp.y
+			local d2 = ox * ox + oy * oy
+			if d2 < clear * clear then
+				near = true
+				if d2 < touch * touch then
+					inside = true
+					local d = math.sqrt(d2)
+					local bx, by
+					if d >= 1 then bx, by = ox / d, oy / d else bx, by = apartDir(npc, pos, ply, pp) end
+					shove(npc, bx, by, 80, now)
+				end
+			end
+		end
+	end
+	if inside and not npc.NGLPassPlayer then
+		npc.NGLPassPlayer = npc:GetCollisionGroup()
+		npc:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
+	elseif not near and npc.NGLPassPlayer then
+		npc:SetCollisionGroup(npc.NGLPassPlayer)
+		npc.NGLPassPlayer = nil
+	end
+end
+
 local function think(npc, now, dt, nearestPlayerSqr)
 	npc.NGLNear = nearestPlayerSqr < cvVisual:GetFloat() ^ 2
 	local detailSqr = cvDetail:GetFloat() ^ 2
 	npc.NGLDetail = nearestPlayerSqr < (npc.NGLDetail and detailSqr * DETAIL_LEAVE or detailSqr)
 	if npc.NGLMeleeHitAt and now >= npc.NGLMeleeHitAt then resolveMelee(npc) end
+	if npc.NGLPassPlayer or nearestPlayerSqr < 10000 then playerOverlap(npc, now) end
 	if npc:OnAIThink(dt) == true then return end
 	if now < (npc.NGLBusyUntil or 0) then -- mid-swing or playing a locked animation
 		gridUpdate(npc, npc:GetPos())
