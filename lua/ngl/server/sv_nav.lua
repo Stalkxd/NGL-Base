@@ -988,7 +988,7 @@ end
 -- line has to go from grid point to linked grid point all the way (so not
 -- over a ledge, into a wall or off the grid). nil when a isn't on the grid
 -- at all (nothing to go by).
-function Nav.WalkLine(a, b)
+function Nav.WalkLine(a, b, zTol)
 	if not Nav.Loaded then return nil end
 	local S = Nav.S
 	local dx, dy, dz = b.x - a.x, b.y - a.y, b.z - a.z
@@ -1006,6 +1006,9 @@ function Nav.WalkLine(a, b)
 		if not cur or not linked(prev, cur) then return false end
 		prev = cur
 	end
+	-- And it gets there: not under it on the floor below (someone at the top
+	-- of the stairs, or on a balcony, seen from underneath).
+	if abs(NZ[prev] - b.z) > (zTol or 48) then return false end
 	return true
 end
 
@@ -1275,11 +1278,17 @@ local footResult = {}
 footTrace.output = footResult
 local function restZ(x, y, z)
 	footTrace.filter = hullTrace.filter
-	footTrace.start = Vector(x, y, z + STEP + 4)
 	footTrace.endpos = Vector(x, y, z - 4)
-	util.TraceHull(footTrace)
-	if footResult.StartSolid or not footResult.Hit then return z end
-	return math.max(z, footResult.HitPos.z)
+	-- From high enough for steep stairs; lower under a low ceiling.
+	for _, up in ipairs({ STEP * 2 + 8, STEP + 4 }) do
+		footTrace.start = Vector(x, y, z + up)
+		util.TraceHull(footTrace)
+		if not footResult.StartSolid then
+			if not footResult.Hit then return z end
+			return math.max(z, footResult.HitPos.z)
+		end
+	end
+	return z
 end
 
 -- A person fits all the way from a to b, a step above the ground. One hull
