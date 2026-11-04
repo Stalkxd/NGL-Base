@@ -10,7 +10,7 @@ ENT.Spawnable = false
 
 ENT.Model = "models/headcrabclassic.mdl"
 ENT.Faction = "zombies"
-ENT.StartHealth = 10
+ENT.StartHealth = 5             -- one crowbar swing kills it, even with damage scaled down on hard (HL2: 10)
 ENT.RunSpeed = 130
 ENT.WalkSpeed = 50
 ENT.SightRange = 2000

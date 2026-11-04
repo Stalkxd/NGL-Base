@@ -249,7 +249,10 @@ NGL.RegisterAIMode("defender", {
 		end
 		npc.NGLCover = nil
 		if visible and now >= (npc.NGLNextCover or 0) and npc:Health() < npc:GetMaxHealth() * (mode.HurtCover or 0.5) then
-			npc.NGLNextCover = now + 2 -- nowhere to hide: look again shortly
+			-- Nowhere to hide: look again in a while. Each look is up to 24
+			-- traces, and on open ground a hurt defender found nothing every
+			-- time, so 2 s made defenders (many of the rebels) costly.
+			npc.NGLNextCover = now + 5
 			local spot = Core.FindHiddenSpot(npc, Core.EyeOf(enemy), home, 120, leash)
 			if spot then
 				npc.NGLNextCover = now + 12
@@ -326,6 +329,15 @@ NGL.RegisterAIMode("ambusher", {
 		local pos, tPos = npc:GetPos(), enemy:GetPos()
 		local A = npc.NGLAmbush
 		if A and A.enemy ~= enemy then A = nil end
+
+		-- In leap range and in view: leap, whether or not the enemy is
+		-- looking at it (hiding is for getting close, not for this).
+		local lp = npc.LeapAttack
+		if visible and lp and NGL.Leap and NGL.Leap.Can(npc, enemy, dist, now, lp) then
+			npc.NGLAmbush = { enemy = enemy, phase = "rush", untilT = now + (mode.RushTime or 5) }
+			if npc:OnAttack(enemy, "leap") ~= true then NGL.Leap.Start(npc, enemy, lp, now) end
+			return true
+		end
 
 		-- Close: go for it (the default leaps and claws).
 		if dist < (mode.Strike or 420) then

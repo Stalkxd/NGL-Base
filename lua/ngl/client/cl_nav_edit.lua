@@ -124,7 +124,7 @@ hook.Add("PostDrawTranslucentRenderables", "NGL.NavView", function(depth, sky)
 	if tr.Hit then
 		local r = GetConVarNumber("ngl_nav_radius")
 		local mode = GetConVarString("ngl_nav_mode")
-		if mode ~= "area" then
+		if mode ~= "area" and mode ~= "squares" then
 			r = 24
 			-- The grid point a click here would use.
 			local now = CurTime()

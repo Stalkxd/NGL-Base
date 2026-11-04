@@ -7,7 +7,7 @@ ENT.PrintName = "Fast Headcrab (NGL)"
 ENT.Spawnable = false
 
 ENT.Model = "models/headcrab.mdl"
-ENT.StartHealth = 10
+ENT.StartHealth = 5             -- one crowbar swing
 ENT.RunSpeed = 280
 ENT.WalkSpeed = 80
 ENT.AttackRange = 350

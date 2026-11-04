@@ -1,6 +1,9 @@
 -- NGL Nav Editor: fix the NGL nav grid by hand, like any other tool.
 --   Area mode:  left click adds walkable area round the spot (flood-filled
 --               within the radius), right click removes the grid there.
+--   Squares:    left click merges the small squares (areas) within the
+--               radius into bigger ones; right click removes just the one
+--               square you aim at, nothing round it.
 --   Link mode:  left click where the jump starts, then left click where it
 --               lands: NPCs jump down there, up onto it (short ones), or
 --               across, if it's level. Right click removes links near the spot.
@@ -33,8 +36,8 @@ TOOL.Information = {
 if CLIENT then
 	language.Add("tool.ngl_nav.name", "NGL Nav Editor")
 	language.Add("tool.ngl_nav.desc", "Edit where NGL NPCs can walk and jump")
-	language.Add("tool.ngl_nav.left", "Area: add walkable area. Link / Climb / Connect: set the start, then the other end")
-	language.Add("tool.ngl_nav.right", "Area: remove area. Link / Climb / Connect: remove links here")
+	language.Add("tool.ngl_nav.left", "Area: add walkable area. Squares: merge small squares in the circle. Link / Climb / Connect: set the start, then the other end")
+	language.Add("tool.ngl_nav.right", "Area: remove area. Squares: remove only the square you aim at. Link / Climb / Connect: remove links here")
 	language.Add("tool.ngl_nav.reload", "Undo last edit")
 end
 
@@ -43,7 +46,7 @@ local function use(self, trace, button)
 	local ply = self:GetOwner()
 	if not (NGL and NGL.Nav and NGL.Nav.ToolUse) then return false end
 	local mode = self:GetClientInfo("mode")
-	if mode ~= "link" and mode ~= "climb" and mode ~= "connect" then mode = "area" end
+	if mode ~= "link" and mode ~= "climb" and mode ~= "connect" and mode ~= "squares" then mode = "area" end
 	local radius = math.Clamp(self:GetClientNumber("radius", 160), 16, 1024)
 	return NGL.Nav.ToolUse(ply, mode, button, trace.HitPos, radius)
 end
@@ -69,6 +72,7 @@ if CLIENT then
 		panel:Help("Fix where NGL NPCs walk. The grid is made on its own for maps without one (ngl_nav_auto 0 turns that off). Edits are saved per map and kept when the grid is made again.")
 		local combo = panel:ComboBox("Mode", "ngl_nav_mode")
 		combo:AddChoice("Walkable area (add / remove)", "area")
+		combo:AddChoice("Squares (merge small ones / remove one)", "squares")
 		combo:AddChoice("Jump links (down, up, across gaps)", "link")
 		combo:AddChoice("Climb links (for climbing NPCs)", "climb")
 		combo:AddChoice("Connect two grid points (doorways, narrow places)", "connect")

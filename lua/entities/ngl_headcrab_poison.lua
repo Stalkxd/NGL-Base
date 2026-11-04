@@ -25,7 +25,13 @@ ENT.LeapAttack = {
 	Chance = 1,
 	Reach = 26,
 	Force = 80,
-	Anim = { ACT_RANGE_ATTACK1 },
+	-- Ready to jump: HL2's warning hiss (NPC_BlackHeadcrab.Telegraph) while
+	-- it gathers itself, then the jump at the model's AE_HEADCRAB_JUMPATTACK.
+	WindUp = 0.5,
+	WindUpAnim = { ACT_RANGE_ATTACK1 },
+	WindUpEvent = "AE_HEADCRAB_JUMPATTACK",
+	WindUpSound = "Telegraph",
+	Anim = false,            -- the wind-up animation carries on in the air
 	Sound = "Leap",
 	HitSound = { "npc/headcrab_poison/ph_poisonbite1.wav", "npc/headcrab_poison/ph_poisonbite2.wav", "npc/headcrab_poison/ph_poisonbite3.wav" },
 	Recover = 0.8,
@@ -40,6 +46,7 @@ ENT.Sounds = {
 	Death = { "npc/headcrab_poison/ph_rattle1.wav", "npc/headcrab_poison/ph_rattle2.wav" },
 	Leap = { "npc/headcrab_poison/ph_jump1.wav", "npc/headcrab_poison/ph_jump2.wav", "npc/headcrab_poison/ph_jump3.wav" },
 	Rattle = { "npc/headcrab_poison/ph_rattle1.wav", "npc/headcrab_poison/ph_rattle2.wav", "npc/headcrab_poison/ph_rattle3.wav" },
+	Telegraph = { "npc/headcrab_poison/ph_warning1.wav", "npc/headcrab_poison/ph_warning2.wav", "npc/headcrab_poison/ph_warning3.wav" },
 }
 
 if SERVER then

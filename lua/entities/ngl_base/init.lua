@@ -713,7 +713,11 @@ function ENT:OnKilled(dmginfo)
 	if self.Headcrab and NGL.Zombie then NGL.Zombie.OnKilled(self, dmginfo) end
 
 	local mode = cvRagdolls:GetInt()
-	if mode == 2 then
+	if mode ~= 0 and dmginfo:IsDamageType(DMG_DISSOLVE) then
+		-- Dissolved (the AR2's energy ball): only a server ragdoll can
+		-- dissolve, and the engine does it for this damage type.
+		self:BecomeRagdoll(dmginfo)
+	elseif mode == 2 then
 		self:BecomeRagdoll(dmginfo)
 	elseif mode == 1 then
 		-- The client turns the model into a ragdoll (see cl_init.lua); the
@@ -854,12 +858,18 @@ function ENT:PlayAnim(anim, lock, rate)
 	rate = rate or 1
 	local seq = isstring(anim) and self:LookupSequence(anim) or self:SelectWeightedSequence(anim)
 	if not seq or seq < 0 then return false end
-	self:SetSequence(seq)
+	-- ResetSequence, not SetSequence: it also tells clients the animation
+	-- started over. With SetSequence a dedicated server's clients didn't see
+	-- a sequence restart (the same melee swing, jump or climb twice in a
+	-- row) and blended the old cycle into the new one, so the animation
+	-- jumped or played out of step (singleplayer hides it).
+	self:ResetSequence(seq)
 	self:ResetSequenceInfo()
 	self:SetCycle(0)
 	self:SetPlaybackRate(rate)
 	local dur = self:SequenceDuration(seq) / rate
 	local now = CurTime()
+	self.NGLAnimSeq = seq
 	self.NGLAnimUntil = now + dur
 	self.NGLAnimLock = lock ~= false
 	if self.NGLAnimLock then
@@ -883,6 +893,105 @@ function ENT:PlayGesture(anim)
 	return true
 end
 
+-- The melee swing's own timing: HL2's zombies hurt you on their model's
+-- animation events (AE_ZOMBIE_ATTACK_RIGHT, _LEFT, _BOTH), at a set point of
+-- the swing, not after a fixed delay. A fixed HitDelay made the poison
+-- zombie's blow land well after its claw came down. So the .mdl is read
+-- once per model and sequence (a few file reads, cached; never in a fight)
+-- for the cycles of those events. Sequences from $includemodel files are
+-- looked up there by name. None found: Melee.HitDelay as before.
+local HIT_EVENTS = { AE_ZOMBIE_ATTACK_RIGHT = true, AE_ZOMBIE_ATTACK_LEFT = true, AE_ZOMBIE_ATTACK_BOTH = true }
+local SEQDESC_SIZE, EVENT_SIZE = 212, 80 -- mstudioseqdesc_t, mstudioevent_t (studio.h, MDL 44-49)
+local hitCycles = {} -- [model .. "|" .. sequence name] = { cycle, ... } or false
+
+local function readString(f, at)
+	f:Seek(at)
+	local raw = f:Read(64)
+	return raw and raw:match("^[^%z]*") or ""
+end
+
+-- Cycles of the hit events of the sequence called `label` in `path`.
+-- nil: no such sequence there; false: it has none. `depth`: include models.
+local function scanModel(path, label, depth, events)
+	local f = file.Open(path, "rb", "GAME")
+	if not f then return nil end
+	local result
+	local ok = pcall(function()
+		f:Seek(4)
+		local ver = f:ReadLong()
+		if not ver or ver < 44 or ver > 49 then return end
+		f:Seek(188)
+		local nseq, seqidx = f:ReadLong(), f:ReadLong()
+		if nseq and nseq > 0 and nseq < 4096 then
+			for s = 0, nseq - 1 do
+				local base = seqidx + s * SEQDESC_SIZE
+				f:Seek(base + 4)
+				local labelAt = f:ReadLong()
+				if string.lower(readString(f, base + labelAt)) == label then
+					f:Seek(base + 24)
+					local nev, evidx = f:ReadLong(), f:ReadLong()
+					result = false
+					for k = 0, math.min(nev or 0, 64) - 1 do
+						local e = base + evidx + k * EVENT_SIZE
+						f:Seek(e)
+						local cycle = f:ReadFloat()
+						f:Seek(e + 76)
+						local nameAt = f:ReadLong()
+						if nameAt and nameAt > 0 and events[readString(f, e + nameAt)] and cycle then
+							result = result or {}
+							result[#result + 1] = math.Clamp(cycle, 0, 1)
+						end
+					end
+					return
+				end
+			end
+		end
+		if depth <= 0 then return end
+		f:Seek(336)
+		local ninc, incidx = f:ReadLong(), f:ReadLong()
+		local includes = {}
+		for k = 0, math.min(ninc or 0, 16) - 1 do
+			local g = incidx + k * 8
+			f:Seek(g + 4)
+			local nameAt = f:ReadLong()
+			local name = nameAt and readString(f, g + nameAt)
+			if name and name ~= "" then includes[#includes + 1] = name end
+		end
+		f:Close()
+		f = nil
+		for _, inc in ipairs(includes) do
+			if not string.StartWith(string.lower(inc), "models/") then inc = "models/" .. inc end
+			local r = scanModel(inc, label, depth - 1, events)
+			if r ~= nil then result = r return end
+		end
+	end)
+	if f then f:Close() end
+	if not ok then return nil end
+	if result then table.sort(result) end
+	return result
+end
+
+-- Seconds into an animation of `dur` seconds at which the model's events
+-- named in `events` (a set; default the melee hit events) fire, or nil.
+function ENT:NGLEventTimes(seq, dur, events)
+	if not seq or seq < 0 then return nil end
+	events = events or HIT_EVENTS
+	local model = self:GetModel()
+	local label = string.lower(self:GetSequenceName(seq) or "")
+	if label == "" then return nil end
+	local key = model .. "|" .. label .. "|" .. table.concat(table.GetKeys(events), ",")
+	local c = hitCycles[key]
+	if c == nil then
+		c = scanModel(model, label, 2, events) or false
+		hitCycles[key] = c
+	end
+	if not c then return nil end
+	local t = {}
+	for k, cy in ipairs(c) do t[k] = cy * dur end
+	return t
+end
+function ENT:NGLHitTimes(seq, dur) return self:NGLEventTimes(seq, dur, HIT_EVENTS) end
+
 -- The melee swing animation: Melee.Anim (or Anims.Melee). Full body unless
 -- Melee.Gesture is true. Returns the duration for a full-body swing.
 function ENT:NGLPlayMeleeAnim()
@@ -894,7 +1003,7 @@ function ENT:NGLPlayMeleeAnim()
 		return nil
 	end
 	local dur = self:PlayAnim(act, true, m.AnimRate)
-	return dur or nil
+	return dur or nil, dur and self.NGLAnimSeq or nil
 end
 
 -- Sound ------------------------------------------------------------------

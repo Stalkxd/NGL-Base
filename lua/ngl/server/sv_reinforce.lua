@@ -19,8 +19,9 @@
 --
 -- A wave is a vehicle when the leader has no vehicle of its own left and the
 -- fight is heavy: the target is a player or a vehicle, or VehicleThreat or
--- more enemies stand near it. Otherwise soldiers. With no open sky the
--- vehicle drives in from out of sight, like the soldiers walk in.
+-- more enemies stand near it. Otherwise soldiers. A vehicle only comes
+-- hanging under a dropship: with no open sky, or nowhere to land, that
+-- wave is soldiers instead.
 
 NGL.Reinforce = NGL.Reinforce or {}
 local R = NGL.Reinforce
@@ -175,18 +176,26 @@ function R.Call(npc, sq, enemy, now, rc, vehicle)
 	local Air = NGL.Air
 	-- On foot by choice (ngl_reinforce_onfoot); the dropship if no hidden
 	-- spot is free.
+	-- A vehicle only ever comes by dropship (it never just drives in from
+	-- out of sight): no ship, no vehicle, and the caller sends soldiers.
 	local mode = cvOnFoot:GetInt()
-	if mode == 2 or (mode == 1 and math.random() < cvOnFootChance:GetFloat()) then
-		if R.OnFoot(npc, sq, enemy, rc, vehicle) then return true end
+	if not vehicle and (mode == 2 or (mode == 1 and math.random() < cvOnFootChance:GetFloat())) then
+		if R.OnFoot(npc, sq, enemy, rc) then return true end
 	end
 	if not (Air and Air.Ready) then return false end -- still building: try later
-	if Air.Count == 0 or R.Indoors(npc) then return R.OnFoot(npc, sq, enemy, rc, vehicle) end
+	if Air.Count == 0 or R.Indoors(npc) then
+		if vehicle then return false end
+		return R.OnFoot(npc, sq, enemy, rc)
+	end
 
 	if R.CountShips() >= cvShips:GetInt() then return false end
 	local ePos = enemy:GetPos()
 	local ground, top = Air.FindLanding(npc:GetPos(), ePos, rc.ShipRadius)
 	local entry = ground and Air.EntryPoint(top, ePos)
-	if not entry then return R.OnFoot(npc, sq, enemy, rc, vehicle) end -- nowhere to land nearby
+	if not entry then -- nowhere to land nearby
+		if vehicle then return false end
+		return R.OnFoot(npc, sq, enemy, rc)
+	end
 	local ship = ents.Create(rc.Ship or "ngl_dropship")
 	if not IsValid(ship) then return false end
 	ship:SetPos(entry)

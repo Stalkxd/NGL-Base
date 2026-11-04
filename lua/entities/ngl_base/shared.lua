@@ -86,7 +86,9 @@ ENT.Weapon = {
 -- 	Damage = 20,
 -- 	Range = 70,                 -- reach in units (the blow lands up to 1.3x this, in front of the NPC)
 -- 	Delay = 1.5,                -- seconds between swings
--- 	HitDelay = 0.4,             -- seconds from the start of the swing to the blow
+-- 	HitDelay = 0.4,             -- seconds from the start of the swing to the blow; a list ({ 0.2, 0.45 })
+-- 	                            -- for several blows. Models with HL2 zombie hit events (AE_ZOMBIE_ATTACK_*)
+-- 	                            -- hit on those instead, one blow each; UseEvents = false to turn that off
 -- 	DamageType = DMG_SLASH,
 -- 	Force = 200,                -- knockback
 -- 	Anim = nil,                 -- activity or sequence name; default Anims.Melee
@@ -109,7 +111,13 @@ ENT.Melee = nil
 -- 	DamageType = DMG_SLASH, Force = 200,
 -- 	Poison = false,               -- true: HL2 poison bite, takes a player down to 1 health (NPCs take NPCDamage)
 -- 	NPCDamage = nil,              -- damage to NPCs when Poison
--- 	Anim = nil, LandAnim = nil,   -- activity, sequence name or a list tried in order
+-- 	Anim = nil, LandAnim = nil,   -- activity, sequence name or a list tried in order (Anim: in the air)
+-- 	Velocity = nil,               -- "hl2": HL2's jump (at the target's middle, 16..120 up, max 1000 u/s);
+-- 	                              -- nil: the engine's gap jump at its feet
+-- 	WindUp = nil,                 -- seconds gathering itself before it springs (nil: at once), playing
+-- 	WindUpAnim = nil,             -- this, and springing at the model's WindUpEvent when it has it
+-- 	WindUpEvent = nil,            -- (e.g. "AE_FASTZOMBIE_LEAP"); keeps turning to face the target
+-- 	WindUpSound = nil,            -- Sounds kind or sound path, when it starts winding up
 -- 	Sound = nil,                  -- Sounds kind ("Leap") or a sound path, at take-off
 -- 	HitSound = nil,               -- sound or list, when it hits
 -- 	Recover = 0.4,                -- seconds after landing before it does anything else

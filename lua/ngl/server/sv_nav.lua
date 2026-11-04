@@ -241,6 +241,39 @@ local function sortNodes(order)
 	end)
 end
 
+-- How far an area reaches round its points, for drawing it as a square
+-- like the Source navmesh: half way to the next point where there is one
+-- on every point of that side, else a person's half width (a wall or a
+-- ledge there). Sets A.ex0, ex1, ey0, ey1.
+local EXT_HALF = 16
+local function areaSide(byDir, A, dir)
+	local nodes = {}
+	-- the points along that side, walking from one corner to the other
+	-- +x side: up the x1 column from c10; -x: up the x0 column from c00;
+	-- +y side: along the y1 row from c01; -y: along the y0 row from c00
+	local from = (dir == 1 and A.c10) or (dir == 3 and A.c01) or A.c00
+	local step = (dir == 1 or dir == 2) and 3 or 1
+	nodes[1] = from
+	local cur, guard = from, 0
+	local stopAt = (dir == 1 and A.c11) or (dir == 2 and A.c01) or (dir == 3 and A.c11) or A.c10
+	while cur ~= stopAt and guard < 64 do
+		cur = byDir[cur][step]
+		if not cur then break end
+		nodes[#nodes + 1] = cur
+		guard = guard + 1
+	end
+	for _, n in ipairs(nodes) do
+		local o = byDir[n][dir]
+		if not o or byDir[o][OPP[dir]] ~= n then return EXT_HALF end
+	end
+	return Nav.S * 0.5
+end
+local function areaExtents(A, byDir)
+	local p00, p11 = nodePos(A.c00), nodePos(A.c11)
+	A.ex0, A.ex1 = p00.x - areaSide(byDir, A, 2), p11.x + areaSide(byDir, A, 1)
+	A.ey0, A.ey1 = p00.y - areaSide(byDir, A, 4), p11.y + areaSide(byDir, A, 3)
+end
+
 -- Merges the points in `order` (sorted, see sortNodes) that have no area yet
 -- in AreaOf into new areas, numbered by alloc(); returns their numbers.
 local buildAreasOver
@@ -342,41 +375,7 @@ buildAreasOver = function(order, byDir, Areas, AreaOf, alloc)
 			end
 		end
 	end
-	-- How far each area reaches round its points, for drawing it as a
-	-- square like the Source navmesh: half way to the next point where
-	-- there is one on every point of that side, else a person's half width
-	-- (a wall or a ledge there).
-	local S = Nav.S
-	local HALF = 16
-	local function side(A, dir)
-		local nodes = {}
-		local function at(c) nodes[#nodes + 1] = c end
-		-- the points along that side, walking from one corner to the other
-		-- +x side: up the x1 column from c10; -x: up the x0 column from c00;
-		-- +y side: along the y1 row from c01; -y: along the y0 row from c00
-		local from = (dir == 1 and A.c10) or (dir == 3 and A.c01) or A.c00
-		local step = (dir == 1 or dir == 2) and 3 or 1
-		at(from)
-		local cur, guard = from, 0
-		local stopAt = (dir == 1 and A.c11) or (dir == 2 and A.c01) or (dir == 3 and A.c11) or A.c10
-		while cur ~= stopAt and guard < AREA_MAX do
-			cur = byDir[cur][step]
-			if not cur then break end
-			at(cur)
-			guard = guard + 1
-		end
-		for _, n in ipairs(nodes) do
-			local o = byDir[n][dir]
-			if not o or byDir[o][OPP[dir]] ~= n then return HALF end
-		end
-		return S * 0.5
-	end
-	for _, a in ipairs(made) do
-		local A = Areas[a]
-		local p00, p11 = nodePos(A.c00), nodePos(A.c11)
-		A.ex0, A.ex1 = p00.x - side(A, 2), p11.x + side(A, 1)
-		A.ey0, A.ey1 = p00.y - side(A, 4), p11.y + side(A, 3)
-	end
+	for _, a in ipairs(made) do areaExtents(Areas[a], byDir) end
 	return made
 end
 
@@ -393,6 +392,53 @@ local function buildLinks()
 	Nav.IslandWalk, Nav.IslandAny = nil, nil
 end
 Nav.BuildLinks = buildLinks
+
+-- Each point's neighbour in each direction, worked out when first asked.
+local function lazyByDir()
+	local NX, NY, NZ, NM, dead = Nav.NX, Nav.NY, Nav.NZ, Nav.NM, Nav.Dead
+	local tol = linkTol()
+	return setmetatable({}, { __index = function(t, i)
+		local bd = {}
+		if not dead[i] then
+			local m, ix, iy, z = NM[i], NX[i], NY[i], NZ[i]
+			for d = 1, 8 do
+				if bit.band(m, bit.lshift(1, d - 1)) ~= 0 then
+					local j = nodeAt(ix + DIRS[d][1], iy + DIRS[d][2], z, tol)
+					if j then bd[d] = j end
+				end
+			end
+		end
+		t[i] = bd
+		return bd
+	end })
+end
+
+-- Area numbers freed (Areas[h] == false): move the last areas into them so
+-- the list has no gaps.
+local function fillAreaHoles(holes)
+	local Areas, AreaOf, Cells = Nav.Areas, Nav.AreaOf, Nav.Cells
+	table.sort(holes, function(a, b) return a > b end)
+	for _, h in ipairs(holes) do
+		local last = #Areas
+		while last > 0 and Areas[last] == false and last > h do
+			Areas[last] = nil
+			last = #Areas
+		end
+		if h < last then
+			Areas[h] = Areas[last]
+			Areas[last] = nil
+			local A = Areas[h]
+			for x = A.x0, A.x1 do
+				for y = A.y0, A.y1 do
+					local c = Cells[cellKey(x, y)]
+					if c then for k = 1, #c do if AreaOf[c[k]] == last then AreaOf[c[k]] = h end end end
+				end
+			end
+		elseif h == last then
+			Areas[last] = nil
+		end
+	end
+end
 
 -- Rebuilds the grid round one spot after an edit there (points added or
 -- removed within r of p), instead of the whole map: the neighbour lists,
@@ -416,21 +462,7 @@ function Nav.RebuildAround(p, r)
 			if c then for k = 1, #c do local i = c[k]; T[i] = true; list[#list + 1] = i end end
 		end
 	end
-	-- Each point's neighbour in each direction, worked out when first asked.
-	local byDir = setmetatable({}, { __index = function(t, i)
-		local bd = {}
-		if not dead[i] then
-			local m, ix, iy, z = NM[i], NX[i], NY[i], NZ[i]
-			for d = 1, 8 do
-				if bit.band(m, bit.lshift(1, d - 1)) ~= 0 then
-					local j = nodeAt(ix + DIRS[d][1], iy + DIRS[d][2], z, tol)
-					if j then bd[d] = j end
-				end
-			end
-		end
-		t[i] = bd
-		return bd
-	end })
+	local byDir = lazyByDir()
 	-- Neighbour lists.
 	for _, i in ipairs(list) do
 		local nb = {}
@@ -529,28 +561,196 @@ function Nav.RebuildAround(p, r)
 		local h = table.remove(holes)
 		return h or #Areas + 1
 	end)
-	-- Numbers left over: move the last areas into them.
-	table.sort(holes, function(a, b) return a > b end)
-	for _, h in ipairs(holes) do
-		local last = #Areas
-		if h < last then
-			Areas[h] = Areas[last]
-			Areas[last] = nil
-			local A = Areas[h]
-			for x = A.x0, A.x1 do
-				for y = A.y0, A.y1 do
-					local c = Cells[cellKey(x, y)]
-					if c then for k = 1, #c do if AreaOf[c[k]] == last then AreaOf[c[k]] = h end end end
-				end
-			end
-		elseif h == last then
-			Areas[last] = nil
-		end
-	end
+	fillAreaHoles(holes)
 	Nav.AreaEdges = nil
 	Nav.IslandWalk, Nav.IslandAny = nil, nil
 	Nav.Version = (Nav.Version or 0) + 1
 	return true
+end
+
+-- Merging squares (the NGL Nav Editor's Squares mode). The grid is cut
+-- into areas greedily, so it leaves thin and one-point squares at the edges
+-- of rooms and where the AREA_MAX cap cuts a floor. Two areas side by side
+-- become one when the result is still a proper area: a rectangle with every
+-- point linked both ways to the next, and either open floor all through
+-- (every point on its grid spot and every square between whole) or a
+-- single row of points moved the same way (a hall). So paths through a
+-- merged area are as straight as through a generated one.
+local MERGE_MAX = 32 -- grid squares a side for a merged area
+
+local function eachMember(a, fn)
+	local A, AreaOf, Cells = Nav.Areas[a], Nav.AreaOf, Nav.Cells
+	for x = A.x0, A.x1 do
+		for y = A.y0, A.y1 do
+			local c = Cells[cellKey(x, y)]
+			if c then for k = 1, #c do if AreaOf[c[k]] == a then fn(c[k]) end end end
+		end
+	end
+end
+
+local function areaSize(A) return (A.x1 - A.x0 + 1) * (A.y1 - A.y0 + 1) end
+
+-- Can area a and area b, b right next to it on the +x (dir 1) or +y (dir 3)
+-- side, become one? Returns the joined area's fields.
+local function mergeShape(byDir, a, b, dir)
+	local Areas, AreaOf, OX, OY = Nav.Areas, Nav.AreaOf, Nav.OX, Nav.OY
+	local A, B = Areas[a], Areas[b]
+	if not (A and B) or a == b then return nil end
+	local w, h
+	if dir == 1 then
+		if A.y0 ~= B.y0 or A.y1 ~= B.y1 or B.x0 ~= A.x1 + 1 then return nil end
+		w, h = B.x1 - A.x0 + 1, A.y1 - A.y0 + 1
+	else
+		if A.x0 ~= B.x0 or A.x1 ~= B.x1 or B.y0 ~= A.y1 + 1 then return nil end
+		w, h = A.x1 - A.x0 + 1, B.y1 - A.y0 + 1
+	end
+	if w > MERGE_MAX or h > MERGE_MAX then return nil end
+	-- The points along the seam, a's side and b's side, in order.
+	local sa, sb = {}, {}
+	local cur = dir == 1 and A.c10 or A.c01
+	local step = dir == 1 and 3 or 1
+	local stop = A.c11
+	for _ = 1, MERGE_MAX + 1 do
+		local o = byDir[cur][dir]
+		if not (o and AreaOf[o] == b and byDir[o][OPP[dir]] == cur) then return nil end
+		sa[#sa + 1], sb[#sb + 1] = cur, o
+		if cur == stop then break end
+		cur = byDir[cur][step]
+		if not cur or AreaOf[cur] ~= a then return nil end
+	end
+	if sa[#sa] ~= stop then return nil end
+	local two = w >= 2 and h >= 2
+	local ox, oy = OX[A.c00], OY[A.c00]
+	local ok = true
+	local function check(i)
+		if two then
+			if OX[i] ~= 0 or OY[i] ~= 0 then ok = false end
+		elseif OX[i] ~= ox or OY[i] ~= oy then
+			ok = false
+		end
+	end
+	eachMember(a, check)
+	if ok then eachMember(b, check) end
+	if not ok then return nil end
+	if two then
+		-- Every square across the seam is open floor.
+		for k = 1, #sa - 1 do
+			local p, q, p2, q2 = sa[k], sb[k], sa[k + 1], sb[k + 1]
+			local whole
+			if dir == 1 then whole = squareWhole(byDir, p, q, p2, q2) else whole = squareWhole(byDir, p, p2, q, q2) end
+			if not whole then return nil end
+		end
+	end
+	local M = { x0 = A.x0, y0 = A.y0, x1 = B.x1, y1 = B.y1, big = two, strip = (not two) or nil, c00 = A.c00, c11 = B.c11 }
+	if dir == 1 then M.c10, M.c01 = B.c10, A.c01 else M.c10, M.c01 = A.c10, B.c01 end
+	return M
+end
+
+-- Merges areas with a point within r of p into their neighbours, smallest
+-- first, until nothing more joins up. Returns how many merges it made.
+function Nav.MergeAreas(p, r)
+	if not (Nav.Areas and Nav.AreaOf) then return 0 end
+	local Areas, AreaOf, dead = Nav.Areas, Nav.AreaOf, Nav.Dead
+	local S = Nav.S
+	local byDir = lazyByDir()
+	local cr = math.ceil(r / S)
+	local cx, cy = floor(p.x / S + 0.5), floor(p.y / S + 0.5)
+	local r2 = r * r
+	local want, list = {}, {}
+	for x = cx - cr, cx + cr do
+		for y = cy - cr, cy + cr do
+			local c = Nav.Cells[cellKey(x, y)]
+			if c then
+				for k = 1, #c do
+					local i = c[k]
+					local a = AreaOf[i]
+					local q = nodePos(i)
+					if a and Areas[a] and not dead[i] and not want[a] and abs(q.z - p.z) < 100
+						and (q.x - p.x) ^ 2 + (q.y - p.y) ^ 2 <= r2 then
+						want[a] = true
+						list[#list + 1] = a
+					end
+				end
+			end
+		end
+	end
+	local holes, merges = {}, 0
+	local function join(a, b, M)
+		eachMember(b, function(i) AreaOf[i] = a end)
+		Areas[b] = false
+		holes[#holes + 1] = b
+		Areas[a] = M
+		areaExtents(M, byDir)
+		merges = merges + 1
+	end
+	local changed = true
+	local rounds = 0
+	while changed and rounds < 64 do
+		changed, rounds = false, rounds + 1
+		table.sort(list, function(x, y)
+			local X, Y = Areas[x], Areas[y]
+			if not X or not Y then return X and true or false end
+			return areaSize(X) < areaSize(Y)
+		end)
+		for _, a in ipairs(list) do
+			local A = Areas[a]
+			if A then
+				-- The neighbour on each side: +x, +y (a is the low one), -x, -y (it is).
+				local best, bestM, bestLow, bestSize
+				local function try(low, high, dir)
+					local M = mergeShape(byDir, low, high, dir)
+					if M then
+						local size = areaSize(Areas[low == a and high or low])
+						if not bestSize or size < bestSize then best, bestM, bestLow, bestSize = (low == a and high or low), M, low, size end
+					end
+				end
+				local e = byDir[A.c10][1]
+				if e and AreaOf[e] then try(a, AreaOf[e], 1) end
+				local n = byDir[A.c01][3]
+				if n and AreaOf[n] then try(a, AreaOf[n], 3) end
+				local wst = byDir[A.c00][2]
+				if wst and AreaOf[wst] then try(AreaOf[wst], a, 1) end
+				local s = byDir[A.c00][4]
+				if s and AreaOf[s] then try(AreaOf[s], a, 3) end
+				if best then
+					local high = bestLow == a and best or a
+					join(bestLow, high, bestM)
+					if not want[bestLow] then want[bestLow] = true; list[#list + 1] = bestLow end
+					changed = true
+				end
+			end
+		end
+		local keep = {}
+		for _, a in ipairs(list) do if Areas[a] then keep[#keep + 1] = a end end
+		list = keep
+	end
+	if merges > 0 then
+		fillAreaHoles(holes)
+		Nav.AreaEdges = nil
+		Nav.IslandWalk, Nav.IslandAny = nil, nil
+		Nav.Version = (Nav.Version or 0) + 1
+	end
+	return merges
+end
+
+-- The area under a world position: its number and the box round its
+-- points ({ x0, y0, x1, y1, z0, z1 }), for removing just that square.
+function Nav.AreaBox(pos)
+	local n = Nav.Nearest(pos)
+	local a = n and Nav.AreaOf and Nav.AreaOf[n]
+	if not (a and Nav.Areas[a]) then return nil end
+	local b
+	eachMember(a, function(i)
+		local q = nodePos(i)
+		if not b then
+			b = { q.x, q.y, q.x, q.y, q.z, q.z }
+		else
+			b[1], b[2] = math.min(b[1], q.x), math.min(b[2], q.y)
+			b[3], b[4] = math.max(b[3], q.x), math.max(b[4], q.y)
+			b[5], b[6] = math.min(b[5], q.z), math.max(b[6], q.z)
+		end
+	end)
+	return a, b
 end
 
 local function addLink(a, b, kind, h)

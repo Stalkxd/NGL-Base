@@ -11,6 +11,9 @@
 --   climb  { a, b }  a climb between a and b, both ways (ENT.Climb NPCs)
 --   connect { a, b } a walk link between the points nearest a and b, both ways
 --   unlink { p, r }  jump, climb and walk links starting or ending within r of p taken out
+--   merge  { p, r }  small squares (areas) within r of p joined into their neighbours
+--   square { b }     one square taken out: the points inside box b = { x0, y0, x1, y1, z0, z1 }
+--                    (only that square's points, nothing round it)
 
 local Nav = NGL.Nav
 local I = Nav._I
@@ -196,6 +199,52 @@ function APPLY.unlink(e)
 	return string.format("removed %d links", n)
 end
 
+function APPLY.square(e)
+	local b = e.b
+	if type(b) ~= "table" or #b < 6 then return "skipped" end
+	local n = 0
+	local S = Nav.S
+	for x = floor(b[1] / S) - 1, floor(b[3] / S) + 1 do
+		for y = floor(b[2] / S) - 1, floor(b[4] / S) + 1 do
+			local c = Nav.Cells[I.cellKey(x, y)]
+			if c then
+				for k = 1, #c do
+					local i = c[k]
+					if not Nav.Dead[i] then
+						local q = Nav.NodePos(i)
+						if q.x >= b[1] - 1 and q.x <= b[3] + 1 and q.y >= b[2] - 1 and q.y <= b[4] + 1
+							and q.z >= b[5] - 8 and q.z <= b[6] + 8 then
+							Nav.Dead[i] = true
+							n = n + 1
+						end
+					end
+				end
+			end
+		end
+	end
+	return string.format("removed the square (%d points)", n)
+end
+
+-- Merging is done on the areas, which the grid builds again whenever it is
+-- loaded or compacted, so merges go on after everything else (ApplyMerges).
+function APPLY.merge(e)
+	local n = Nav.MergeAreas(vec(e.p), e.r)
+	return n > 0 and string.format("merged %d squares", n) or "nothing to merge here"
+end
+
+-- The merge edits again, after the areas were made again (all of them, or
+-- only those near `p` within `r` after an edit there).
+local function applyMerges(p, r)
+	for _, e in ipairs(Nav.Edits or {}) do
+		if e.op == "merge" and (not p or vec(e.p):Distance(p) < r + e.r + 32 * Nav.S) then
+			Nav.MergeAreas(vec(e.p), e.r)
+		end
+	end
+end
+
+local function boxCenter(b) return Vector((b[1] + b[3]) * 0.5, (b[2] + b[4]) * 0.5, (b[5] + b[6]) * 0.5) end
+local function boxRadius(b) return math.sqrt((b[3] - b[1]) ^ 2 + (b[4] - b[2]) ^ 2) * 0.5 + 8 end
+
 local function apply(e)
 	local f = APPLY[e.op]
 	if not f or not Nav.Loaded and e.op ~= "add" then return "skipped" end
@@ -211,8 +260,11 @@ end
 function Nav.ApplyEdits()
 	local list = Nav.Edits or Nav.LoadEdits()
 	if #list == 0 then return end
-	for _, e in ipairs(list) do apply(e) end
+	for _, e in ipairs(list) do
+		if e.op ~= "merge" then apply(e) end
+	end
 	compact()
+	applyMerges()
 end
 
 -- Adds one edit (from the tool), applies it and saves. Returns the result.
@@ -224,9 +276,17 @@ function Nav.AddEdit(e)
 	local res = apply(e)
 	-- Only what the edit touched is built again (Nav.RebuildAround); the
 	-- whole grid only for the first area on a map with none.
-	if e.op == "add" or e.op == "remove" then
-		if not (wasLoaded and Nav.RebuildAround(vec(e.p), e.r + Nav.S)) then compact() end
-	else
+	if e.op == "add" or e.op == "remove" or e.op == "square" then
+		local p, r
+		if e.op == "square" then p, r = boxCenter(e.b), boxRadius(e.b) else p, r = vec(e.p), e.r end
+		if not (wasLoaded and Nav.RebuildAround(p, r + Nav.S)) then
+			compact()
+			applyMerges()
+		else
+			-- The squares round here were cut again: merge them again too.
+			applyMerges(p, r)
+		end
+	elseif e.op ~= "merge" then
 		I.buildLinks()
 	end
 	Nav.Cache, Nav.Wide = {}, {}
@@ -260,7 +320,7 @@ local function say(ply, msg)
 	if IsValid(ply) then ply:PrintMessage(HUD_PRINTCENTER, msg) else print("[NGL] " .. msg) end
 end
 
--- mode: "area", "link", "climb" or "connect"; button: "left", "right" or "reload".
+-- mode: "area", "squares", "link", "climb" or "connect"; button: "left", "right" or "reload".
 function Nav.ToolUse(ply, mode, button, pos, radius)
 	if not allowed(ply) then say(ply, "NGL Nav Editor: superadmins only") return false end
 	if Nav.Generating() then say(ply, "Nav grid is being generated, wait a moment") return false end
@@ -272,6 +332,24 @@ function Nav.ToolUse(ply, mode, button, pos, radius)
 	end
 	local p = tab(pos)
 	local res
+	if mode == "squares" then
+		ply.NGLNavLinkA = nil
+		if button == "right" then
+			-- Just the square aimed at, nothing round it.
+			local a, b = Nav.AreaBox and Nav.AreaBox(pos)
+			if not a then
+				res = "no square there"
+			else
+				for k = 1, 6 do b[k] = math.Round(b[k], 1) end
+				res = Nav.AddEdit({ op = "square", b = b })
+			end
+		else
+			res = Nav.AddEdit({ op = "merge", p = p, r = radius })
+		end
+		say(ply, res)
+		Nav.SendView(ply)
+		return true
+	end
 	if mode == "link" or mode == "climb" or mode == "connect" then
 		if button == "right" then
 			ply.NGLNavLinkA = nil

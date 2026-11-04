@@ -72,9 +72,17 @@ end
 function Proj.Fire(attacker, def, src, dst, visual, opts)
 	if not visual then
 		if math.random() < (def.Accuracy or 0.6) then
-			trace.start, trace.endpos, trace.filter = src, dst, attacker
+			-- A little past the aim point, so it reaches into small targets
+			-- (see the silent shot in sv_core.lua); blasts land at the aim point.
+			local d = dst - src
+			local len = d:Length()
+			local past = (def.Radius or 0) > 0 and 0 or 48
+			trace.start, trace.endpos, trace.filter = src, len > 1 and dst + d * (past / len) or dst, attacker
 			util.TraceLine(trace)
-			land(def, attacker, result.HitPos, result.Entity)
+			local target = opts and opts.target
+			local hitEnt = result.Entity
+			if IsValid(target) and hitEnt ~= target and result.Fraction * (len + past) >= len - 4 then hitEnt = target end
+			land(def, attacker, result.HitPos, hitEnt)
 		end
 		return
 	end
