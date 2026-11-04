@@ -646,8 +646,99 @@ local function mergeShape(byDir, a, b, dir)
 	return M
 end
 
--- Merges areas with a point within r of p into their neighbours, smallest
--- first, until nothing more joins up. Returns how many merges it made.
+-- Cuts the points of the areas in `list` into new areas again, biggest
+-- rectangles first (up to MERGE_MAX a side), instead of the greedy cut that
+-- made them. Returns the new areas' numbers; freed numbers go in `holes`.
+local function recutAreas(byDir, list, holes)
+	local Areas, AreaOf, OX, OY, NX, NY = Nav.Areas, Nav.AreaOf, Nav.OX, Nav.OY, Nav.NX, Nav.NY
+	local nodes = {}
+	for _, a in ipairs(list) do eachMember(a, function(i) nodes[#nodes + 1] = i end) end
+	for _, i in ipairs(nodes) do AreaOf[i] = nil end
+	for _, a in ipairs(list) do Areas[a] = false; holes[#holes + 1] = a end
+	sortNodes(nodes)
+	table.sort(holes, function(x, y) return x > y end) -- lowest last: used first
+	local function alloc() return table.remove(holes) or #Areas + 1 end
+	local function free(i) return i and not AreaOf[i] and OX[i] == 0 and OY[i] == 0 end
+	-- wide[i]: whole squares in a row going +x from i, every corner free.
+	local wide
+	local function wideOf(i)
+		local v = wide[i]
+		if v then return v end
+		v = 0
+		local bd = byDir[i]
+		local e, n = bd[1], bd[3]
+		local ne = e and byDir[e][3]
+		if free(i) and free(e) and free(n) and free(ne) and squareWhole(byDir, i, e, n, ne) then
+			v = wideOf(e) + 1
+			if v > MERGE_MAX - 1 then v = MERGE_MAX - 1 end
+		end
+		wide[i] = v
+		return v
+	end
+	local made = {}
+	for _ = 1, #nodes do
+		wide = {}
+		local best, bw, bh, barea = nil, 0, 0, 3
+		for _, i in ipairs(nodes) do
+			local w0 = free(i) and wideOf(i) or 0
+			if w0 > 0 and (w0 + 1) * MERGE_MAX > barea then
+				-- Grow upwards: the rectangle is as wide as its narrowest row.
+				local w, cur = w0, i
+				for h = 2, MERGE_MAX do
+					local area = (w + 1) * h
+					if area > barea then best, bw, bh, barea = i, w + 1, h, area end
+					cur = byDir[cur][3]
+					local nw = cur and wideOf(cur) or 0
+					if nw == 0 then break end
+					if nw < w then w = nw end
+					if (w + 1) * MERGE_MAX <= barea then break end
+				end
+			end
+		end
+		if not best then break end
+		local a = alloc()
+		made[#made + 1] = a
+		local row, top = best, best
+		local c10, c11
+		for r = 1, bh do
+			local cur = row
+			for k = 1, bw do
+				AreaOf[cur] = a
+				if k < bw then cur = byDir[cur][1] end
+			end
+			if r == 1 then c10 = cur end
+			if r == bh then top, c11 = row, cur end
+			if r < bh then row = byDir[row][3] end
+		end
+		local A = { x0 = NX[best], y0 = NY[best], x1 = NX[best] + bw - 1, y1 = NY[best] + bh - 1, big = true,
+			c00 = best, c10 = c10, c01 = top, c11 = c11 }
+		Areas[a] = A
+		areaExtents(A, byDir)
+	end
+	-- What is left (edges, halls, single points) is cut the usual way.
+	local rest = {}
+	for _, i in ipairs(nodes) do if not AreaOf[i] then rest[#rest + 1] = i end end
+	for _, a in ipairs(buildAreasOver(rest, byDir, Areas, AreaOf, alloc)) do made[#made + 1] = a end
+	-- Floor full of gaps can come out in more pieces this way than the usual
+	-- cut (tried on scratch tables): then the usual cut it is.
+	local inSet = {}
+	for _, i in ipairs(nodes) do inSet[i] = true end
+	local scratchOf = setmetatable({}, { __index = function(_, i) if not inSet[i] then return AreaOf[i] end end })
+	local nScratch = 0
+	local usual = #buildAreasOver(nodes, byDir, {}, scratchOf, function() nScratch = nScratch + 1; return nScratch end)
+	if usual < #made then
+		for _, i in ipairs(nodes) do AreaOf[i] = nil end
+		for _, a in ipairs(made) do Areas[a] = false; holes[#holes + 1] = a end
+		table.sort(holes, function(x, y) return x > y end)
+		made = buildAreasOver(nodes, byDir, Areas, AreaOf, alloc)
+	end
+	return made
+end
+
+-- Merges the areas with a point within r of p: their points are cut into
+-- areas again, biggest rectangles first, then each joined with the areas
+-- next to it where they make a proper area. Returns how many squares fewer
+-- there are.
 function Nav.MergeAreas(p, r)
 	if not (Nav.Areas and Nav.AreaOf) then return 0 end
 	local Areas, AreaOf, dead = Nav.Areas, Nav.AreaOf, Nav.Dead
@@ -674,7 +765,24 @@ function Nav.MergeAreas(p, r)
 			end
 		end
 	end
+	if #list == 0 then return 0 end
+	-- And the areas next to those, so a small brush on a sliver still joins
+	-- it to the big floor beside it.
+	for k = 1, #list do
+		eachMember(list[k], function(i)
+			local bd = byDir[i]
+			for d = 1, 4 do
+				local o = bd[d]
+				local b = o and AreaOf[o]
+				if b and Areas[b] and not want[b] and abs(Nav.NZ[o] - p.z) < 200 then want[b] = true; list[#list + 1] = b end
+			end
+		end)
+	end
+	local before = #list
 	local holes, merges = {}, 0
+	list = recutAreas(byDir, list, holes)
+	local made = #list
+	for _, a in ipairs(list) do want[a] = true end
 	local function join(a, b, M)
 		eachMember(b, function(i) AreaOf[i] = a end)
 		Areas[b] = false
@@ -724,13 +832,12 @@ function Nav.MergeAreas(p, r)
 		for _, a in ipairs(list) do if Areas[a] then keep[#keep + 1] = a end end
 		list = keep
 	end
-	if merges > 0 then
-		fillAreaHoles(holes)
-		Nav.AreaEdges = nil
-		Nav.IslandWalk, Nav.IslandAny = nil, nil
-		Nav.Version = (Nav.Version or 0) + 1
-	end
-	return merges
+	fillAreaHoles(holes)
+	Nav.AreaEdges = nil
+	Nav.IslandWalk, Nav.IslandAny = nil, nil
+	Nav.Version = (Nav.Version or 0) + 1
+	-- Squares fewer: the ones cut again less what they became, and each join.
+	return math.max(before - made, 0) + merges
 end
 
 -- The area under a world position: its number and the box round its
@@ -956,9 +1063,9 @@ end
 local KIND_CODE, CODE_KIND = { drop = 1, jump = 2, up = 3, climb = 4, walk = 5, vault = 6 },
 	{ "drop", "jump", "up", "climb", "walk", "vault" }
 Nav.KindCode, Nav.CodeKind = KIND_CODE, CODE_KIND
-local FORMAT = 5 -- 5: binary with areas; 4: text (still loads); older grids are made again
+local FORMAT = 6 -- 6: binary with areas, stairs linked; 5 and older are made again (no stairs)
 
--- Binary format (FORMAT 5): a text header line "NGLNAVB<format> <spacing>
+-- Binary format (FORMAT 5 and 6, the same layout): a text header line "NGLNAVB<format> <spacing>
 -- <points> <links> <areas>", then fixed-size records, all compressed:
 --   point: grid x, y (2 bytes each), height x8 (4), links bitmask (1),
 --          offset x, y (1 each)                                  11 bytes
@@ -1067,6 +1174,11 @@ function Nav.Load()
 	local nl = text:find("\n", 1, true)
 	local header = nl and text:sub(1, nl - 1) or text
 	local bver, bS, bn, blinks, bareas = header:match("^NGLNAVB(%d+) (%d+) (%d+) (%d+) (%d+)$")
+	if bver and tonumber(bver) < FORMAT then
+		-- Made before stairs were linked (walkable() and restZ()).
+		print("[NGL] This map's nav grid is from an older version: making a new one (your edits are kept).")
+		return false
+	end
 	if bver then
 		reset()
 		Nav.S = tonumber(bS)
@@ -1087,7 +1199,7 @@ function Nav.Load()
 	if header2 then ver, S = header2:match("^NGLNAV(%d+) (%d+)") end
 	ver, S = tonumber(ver), tonumber(S)
 	if not S then return false end
-	if ver < 4 then
+	if ver < FORMAT then
 		print("[NGL] This map's nav grid is from an older version: making a new one (your edits are kept).")
 		return false
 	end
@@ -1155,10 +1267,27 @@ local function hullClear(ax, ay, az, bx, by, bz)
 	return not hullResult.Hit and not hullResult.StartSolid
 end
 
+-- Where a person standing at (x, y) on ground z rests: on stairs the box
+-- stands on the step under its front edge, above the ground at its middle
+-- (one flat hull trace down). z if that can't be told.
+local footTrace = { mask = MASK_NPCSOLID_BRUSHONLY, mins = Vector(HULL_MINS.x, HULL_MINS.y, 0), maxs = Vector(HULL_MAXS.x, HULL_MAXS.y, 1) }
+local footResult = {}
+footTrace.output = footResult
+local function restZ(x, y, z)
+	footTrace.filter = hullTrace.filter
+	footTrace.start = Vector(x, y, z + STEP + 4)
+	footTrace.endpos = Vector(x, y, z - 4)
+	util.TraceHull(footTrace)
+	if footResult.StartSolid or not footResult.Hit then return z end
+	return math.max(z, footResult.HitPos.z)
+end
+
 -- A person fits all the way from a to b, a step above the ground. One hull
 -- trace in a straight line; if that hits something, it may only be the
--- ground itself (over the top of a hill, the straight line goes into it):
--- then again in short pieces that follow the ground, SAMPLE units each.
+-- ground itself (over the top of a hill, or stairs, where the straight line
+-- cuts the steps' edges): then again in short pieces that follow the
+-- ground, SAMPLE units each, the way a NextBot walks them: up to the higher
+-- of the two heights it rests at, across, and down.
 local function walkable(ax, ay, az, bx, by, bz)
 	if hullClear(ax, ay, az + STEP, bx, by, bz + STEP) then return true end
 	local dx, dy = bx - ax, by - ay
@@ -1166,6 +1295,7 @@ local function walkable(ax, ay, az, bx, by, bz)
 	local n = math.ceil(len / SAMPLE)
 	if n < 2 then return false end
 	local px, py, pz = ax, ay, az
+	local pr = restZ(ax, ay, az)
 	for k = 1, n do
 		local x, y, z
 		if k == n then
@@ -1177,8 +1307,12 @@ local function walkable(ax, ay, az, bx, by, bz)
 			z = groundAt(x, y, pz + reach, pz - reach)
 			if not z then return false end
 		end
-		if not hullClear(px, py, pz + STEP, x, y, z + STEP) then return false end
-		px, py, pz = x, y, z
+		local r = restZ(x, y, z)
+		local top = math.max(pr, r)
+		if top > pr and not hullClear(px, py, pr + STEP, px, py, top + STEP) then return false end
+		if not hullClear(px, py, top + STEP, x, y, top + STEP) then return false end
+		if r < top and not hullClear(x, y, top + STEP, x, y, r + STEP) then return false end
+		px, py, pz, pr = x, y, z, r
 	end
 	return true
 end
