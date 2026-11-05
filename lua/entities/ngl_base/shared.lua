@@ -16,6 +16,11 @@ ENT.PrintName = "NGL Base NPC"
 ENT.Category = "NGL Base"
 ENT.Spawnable = false
 ENT.IsNGLNPC = true
+-- Drawn in the opaque pass only. Without this the engine picks "both" for a
+-- scripted entity and calls Draw again in the translucent pass, so every NPC
+-- (and its weapon) was drawn twice a frame. Set RENDERGROUP_BOTH in your NPC
+-- if its model really has see-through parts.
+ENT.RenderGroup = RENDERGROUP_OPAQUE
 
 ----------------------------------------------------------------------------
 -- Definition fields (override these in your NPC)

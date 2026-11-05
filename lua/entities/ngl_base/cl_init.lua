@@ -69,7 +69,14 @@ end
 -- Seen again = drawn at once. A new NPC counts as seen until its first
 -- answer comes back. Only one query a frame per NPC (mirrors and water
 -- reflections draw it again in the same frame and would confuse it).
+-- The sprite is put where the NPC will be LEAD seconds from now, from how it
+-- moved since the last frame: the answer comes a frame late, so a fast
+-- zombie running out from behind a wall would otherwise show up already in
+-- front of you. Its body sticking out counts too: the sprite is as big as
+-- the NPC.
 local HIDE_AFTER = 0.15 -- seconds of 0 before an NPC counts as hidden
+local LEAD = 0.3        -- seconds ahead the sprite is put
+local LEAD_MAX = 250    -- units ahead at most
 local SHADOW_FLAGS = bit.bor(STUDIO_SHADOWTEXTURE or 0, STUDIO_SHADOWDEPTHTEXTURE or 0)
 
 local function shadowPass(flags)
@@ -95,8 +102,17 @@ function ENT:NGLOccluded(d, shadow)
 		self.NGLVisHandle = h
 		self.NGLSeenAt = now
 	end
-	local r = math.max(16, self:BoundingRadius() * 0.6)
-	if util.PixelVisible(self:WorldSpaceCenter(), r, h) > 0 then
+	local r = math.max(16, self:BoundingRadius() * 0.8)
+	local at = self:WorldSpaceCenter()
+	local last, lastT = self.NGLVisLast, self.NGLVisLastT
+	self.NGLVisLast, self.NGLVisLastT = at, now
+	if last and now > lastT and now - lastT < 0.25 then
+		local lead = (at - last) * (LEAD / (now - lastT))
+		local len = lead:Length()
+		if len > LEAD_MAX then lead:Mul(LEAD_MAX / len) end
+		at = at + lead
+	end
+	if util.PixelVisible(at, r, h) > 0 then
 		self.NGLSeenAt = now
 		self.NGLHidden = false
 	else
