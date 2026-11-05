@@ -23,6 +23,8 @@
 -- ENT.NoImpostor = true are always drawn normally.
 --
 -- Only how this client draws changes, as with the other client settings.
+-- The first pictures are read back and checked (see "self-check" below):
+-- if they come out wrong, pictures turn off and NPCs are drawn normally.
 -- ngl_cl_impostor_show 1 shows the first texture on screen, to see what was
 -- baked.
 
@@ -112,11 +114,17 @@ local function atlas(i)
 		["$vertexalpha"] = "1",
 	})
 	dbg:SetTexture("$basetexture", rt)
+	local dbgColor = CreateMaterial("ngl_impostor_dbgc_" .. i, "UnlitGeneric", {
+		["$basetexture"] = "color/white",
+		["$vertexcolor"] = "1",
+	})
+	dbgColor:SetTexture("$basetexture", rt)
+	mat:SetFloat("$alphatestreference", I.AlphaRef or 0.5)
 	-- Only ever made while baking, inside the frame's rendering: start empty.
 	render.PushRenderTarget(rt)
 	render.Clear(0, 0, 0, 0, true, true)
 	render.PopRenderTarget()
-	a = { rt = rt, mat = mat, dbg = dbg }
+	a = { rt = rt, mat = mat, dbg = dbg, dbgColor = dbgColor }
 	atlases[i] = a
 	return a
 end
@@ -234,6 +242,90 @@ local maskMat = CreateMaterial("ngl_impostor_mask", "UnlitGeneric", {
 	["$model"] = "1",
 })
 
+----------------------------------------------------------------------------
+-- How the picture gets its see-through background, and the self-check
+----------------------------------------------------------------------------
+-- The picture's alpha (1 on the NPC, 0 around it) is what cuts it out.
+-- Graphics drivers and settings differ in how a model writes alpha into a
+-- texture, so there are three ways, tried in turn:
+--   1 "mask"   colour with alpha writes off, then the model again in plain
+--              white with colour writes off: alpha exactly on the outline
+--   2 "shader" one pass, alpha as the model's own shader writes it (may
+--              have small holes where a texture keeps other data in alpha)
+--   3 "depth"  the engine's depth-in-alpha: small but above 0 on the model
+-- After the first pictures of a way, a few of them are read back from the
+-- texture. If they have colour and an outline, that way is used. If not,
+-- the next one is tried. If none works (or nothing is drawn at all),
+-- pictures are turned off for this game and NPCs are drawn normally: an
+-- NPC is never left invisible. Until a way is confirmed, NPCs are drawn
+-- normally too.
+local METHODS = { "mask", "shader", "depth" }
+local ALPHA_REF = { mask = 0.5, shader = 0.5, depth = 0.02 }
+local CHECK_TILES = 4         -- pictures read back per way
+I.Method = I.Method or 1      -- index into METHODS
+I.Confirmed = I.Confirmed or false
+I.Broken = I.Broken or nil    -- why pictures are off, or nil
+I.AlphaRef = ALPHA_REF[METHODS[I.Method]]
+local check = { tiles = 0, color = 0, alpha = 0, unknownAlpha = false }
+I.Check = check
+
+local function say(msg)
+	MsgC(Color(120, 200, 255), "[NGL] ", color_white, msg, "\n")
+end
+
+local function setMethod(m)
+	I.Method = m
+	I.AlphaRef = ALPHA_REF[METHODS[m]]
+	for _, a in pairs(atlases) do a.mat:SetFloat("$alphatestreference", I.AlphaRef) end
+	check.tiles, check.color, check.alpha, check.unknownAlpha = 0, 0, 0, false
+	I.Reset()
+end
+
+-- Reads the picture just made back from the texture (the texture is still
+-- the render target). Only for squares inside the screen's size, which is
+-- what render.CapturePixels reads.
+local function checkTile(x, y)
+	if x + TILE > ScrW() or y + TILE > ScrH() then return end
+	render.CapturePixels()
+	local color, alpha, unknown = false, false, false
+	local minA = METHODS[I.Method] == "depth" and 2 or 127
+	for i = 0, 7 do
+		for j = 0, 7 do
+			local r, g, b, al = render.ReadPixel(x + 3 + i * 6, y + 3 + j * 6)
+			if (r or 0) + (g or 0) + (b or 0) > 15 then color = true end
+			if al == nil then unknown = true elseif al > minA then alpha = true end
+		end
+	end
+	check.tiles = check.tiles + 1
+	if color then check.color = check.color + 1 end
+	if alpha then check.alpha = check.alpha + 1 end
+	if unknown then check.unknownAlpha = true end
+	if check.tiles < CHECK_TILES and check.alpha == 0 then return end
+	local name = METHODS[I.Method]
+	if check.alpha > 0 or (check.unknownAlpha and check.color > 0) then
+		I.Confirmed = true
+		say(string.format("far NPC pictures work (way %d, \"%s\"): %d of %d checked pictures have an outline.", I.Method, name, check.alpha, check.tiles))
+	elseif check.color == 0 then
+		I.Broken = "nothing gets drawn into the picture texture"
+		say("far NPC pictures turned off: " .. I.Broken .. ". NPCs are drawn normally. Please tell the NGL developer.")
+		I.Reset()
+	elseif I.Method < #METHODS then
+		say(string.format("far NPC pictures: way %d (\"%s\") gives colour but no outline, trying way %d.", I.Method, name, I.Method + 1))
+		setMethod(I.Method + 1)
+	else
+		I.Broken = "colour is drawn but no way gives the picture an outline (alpha)"
+		say("far NPC pictures turned off: " .. I.Broken .. ". NPCs are drawn normally. Please tell the NGL developer.")
+		I.Reset()
+	end
+end
+
+local pushed, inCam = false, false -- for putting things back after an error
+
+local function drawRig(ent, wep)
+	ent:DrawModel()
+	if wep then wep:DrawModel() end
+end
+
 local function bake(job)
 	local b = job.b
 	if b.id ~= job.id then return end -- the slot was given to another animation
@@ -246,7 +338,11 @@ local function bake(job)
 	ent:SetCycle((job.f + 0.5) / FRAMES)
 	for name, v in pairs(r.poses) do ent:SetPoseParameter(name, v) end
 	ent:InvalidateBoneCache()
-	if wep then wep:InvalidateBoneCache() end
+	ent:SetupBones()
+	if wep then
+		wep:InvalidateBoneCache()
+		wep:SetupBones()
+	end
 
 	local center = Vector(0, 0, r.cz)
 	local half = r.half
@@ -254,43 +350,63 @@ local function bake(job)
 	local camPos = center + Angle(-ELEV, job.d * (360 / DIRS), 0):Forward() * dist
 	local camAng = (center - camPos):Angle()
 	local x, y = b.x + job.d * TILE, b.y + job.f * TILE
+	local method = METHODS[I.Method]
 
 	render.PushRenderTarget(a.rt)
+	pushed = true
 	cam.Start3D(camPos, camAng, FOV, x, y, TILE, TILE, dist - half * 3, dist + half * 3)
+	inCam = true
 		render.Clear(0, 0, 0, 0, true, true)
-		render.SetWriteDepthToDestAlpha(false)
 		render.SuppressEngineLighting(true)
 		render.SetLightingOrigin(center)
 		render.ResetModelLighting(0.55, 0.55, 0.55)
 		render.SetModelLighting(BOX_TOP, 1, 1, 1)
 		render.SetColorModulation(1, 1, 1)
 		render.SetBlend(1)
-		-- Colour, without touching alpha (model textures keep other things
-		-- in their alpha, which would punch holes in the picture).
-		render.OverrideAlphaWriteEnable(true, false)
-		ent:DrawModel()
-		if wep then wep:DrawModel() end
-		-- Then alpha only: 1 wherever the model is.
-		render.OverrideAlphaWriteEnable(true, true)
-		render.OverrideColorWriteEnable(true, false)
-		render.ClearDepth()
-		render.MaterialOverride(maskMat)
-		ent:DrawModel()
-		if wep then wep:DrawModel() end
-		render.MaterialOverride(nil)
-		render.OverrideColorWriteEnable(false, true)
-		render.OverrideAlphaWriteEnable(false, true)
+		if method == "mask" then
+			render.SetWriteDepthToDestAlpha(false)
+			render.OverrideAlphaWriteEnable(true, false)
+			drawRig(ent, wep)
+			render.OverrideAlphaWriteEnable(true, true)
+			render.OverrideColorWriteEnable(true, false)
+			render.ClearDepth()
+			render.MaterialOverride(maskMat)
+			drawRig(ent, wep)
+			render.MaterialOverride(nil)
+			render.OverrideColorWriteEnable(false, true)
+			render.OverrideAlphaWriteEnable(false, true)
+			render.SetWriteDepthToDestAlpha(true)
+		elseif method == "shader" then
+			render.SetWriteDepthToDestAlpha(false)
+			render.OverrideAlphaWriteEnable(true, true)
+			drawRig(ent, wep)
+			render.OverrideAlphaWriteEnable(false, true)
+			render.SetWriteDepthToDestAlpha(true)
+		else -- depth
+			render.SetWriteDepthToDestAlpha(true)
+			render.OverrideAlphaWriteEnable(true, true)
+			drawRig(ent, wep)
+			render.OverrideAlphaWriteEnable(false, true)
+		end
 		render.SuppressEngineLighting(false)
-		render.SetWriteDepthToDestAlpha(true)
 	cam.End3D()
+	inCam = false
+	if not I.Confirmed and not I.Broken then checkTile(x, y) end
 	render.PopRenderTarget()
+	pushed = false
 
 	b.ready[job.t] = true
 end
 
-local nextClean = 0
-hook.Add("PreRender", "NGL.Impostor.Bake", function()
+hook.Add("PreRender", "NGL.Impostor.Frame", function()
 	for i in pairs(nQuads) do nQuads[i] = 0 end
+end)
+
+-- Baking runs after the frame is drawn; the new pictures are used from the
+-- next frame on. A Lua error while baking turns pictures off instead of
+-- leaving the render target pushed (which would break the whole screen).
+local nextClean = 0
+local function bakeQueued()
 	local now = RealTime()
 
 	if now > nextClean then
@@ -303,21 +419,35 @@ hook.Add("PreRender", "NGL.Impostor.Bake", function()
 		end
 	end
 
-	if qHead > #queue then return end
+	if qHead > #queue or I.Broken then return end
 	local fog = render.GetFogMode()
 	render.FogMode(MATERIAL_FOG_NONE)
 	local left = cvBake:GetInt()
-	while left > 0 and qHead <= #queue do
+	while left > 0 and qHead <= #queue and not I.Broken do
 		local job = queue[qHead]
 		queue[qHead] = nil
 		qHead = qHead + 1
 		queued[job.qk] = nil
-		bake(job)
+		local ok, err = pcall(bake, job)
+		if not ok then
+			-- Put the render state back as it was before the picture.
+			render.MaterialOverride(nil)
+			render.OverrideColorWriteEnable(false, true)
+			render.OverrideAlphaWriteEnable(false, true)
+			render.SuppressEngineLighting(false)
+			if inCam then pcall(cam.End3D) end
+			if pushed then pcall(render.PopRenderTarget) end
+			pushed, inCam = false, false
+			I.Broken = "Lua error while making a picture: " .. tostring(err)
+			say("far NPC pictures turned off: " .. I.Broken)
+			I.Reset()
+		end
 		left = left - 1
 	end
 	render.FogMode(fog)
 	if qHead > #queue then queue, qHead = {}, 1 end
-end)
+end
+hook.Add("PostRender", "NGL.Impostor.Bake", bakeQueued)
 
 ----------------------------------------------------------------------------
 -- Drawing
@@ -332,7 +462,7 @@ function I.Draw(npc, d)
 		return false
 	end
 	local range = cvRange:GetFloat()
-	if range <= 0 or cvAtlases:GetInt() <= 0 then
+	if range <= 0 or cvAtlases:GetInt() <= 0 or I.Broken then
 		npc.NGLImp = false
 		return false
 	end
@@ -360,6 +490,8 @@ function I.Draw(npc, d)
 		request(b, di, fi, t)
 		return false
 	end
+	-- Until the self-check has seen pictures come out right, the model.
+	if not I.Confirmed then return false end
 
 	-- The map's light where it stands, now and then.
 	if now >= (npc.NGLImpLightAt or 0) then
@@ -443,22 +575,43 @@ function I.Reset()
 	queue, qHead, queued = {}, 1, {}
 end
 
-concommand.Add("ngl_cl_impostor_reset", function() I.Reset() end)
+-- ngl_cl_impostor_reset also starts the self-check again from the first way.
+function I.Restart()
+	I.Broken, I.Confirmed = nil, false
+	setMethod(1)
+end
+concommand.Add("ngl_cl_impostor_reset", function()
+	I.Restart()
+	say("far NPC pictures reset; checking again.")
+end)
 hook.Add("OnScreenSizeChanged", "NGL.Impostor.Reset", function() I.Reset() end)
 cvars.AddChangeCallback("ngl_cl_impostor_atlases", function() I.Reset() end, "NGL.Impostor")
 
 hook.Add("HUDPaint", "NGL.Impostor.Show", function()
 	local i = cvShow:GetInt()
 	if i <= 0 then return end
+	local status
+	if I.Broken then status = "OFF: " .. I.Broken
+	elseif I.Confirmed then status = string.format("working (way %d, %s)", I.Method, METHODS[I.Method])
+	else status = string.format("checking way %d (%s): %d pictures read, %d with colour, %d with outline", I.Method, METHODS[I.Method], check.tiles, check.color, check.alpha) end
 	local a = atlases[i]
-	if not a then return end
-	local s = math.min(ScrH() - 40, 768)
-	surface.SetDrawColor(40, 40, 40, 200)
-	surface.DrawRect(20, 20, s, s)
-	surface.SetDrawColor(255, 255, 255, 255)
-	surface.SetMaterial(a.dbg)
-	surface.DrawTexturedRect(20, 20, s, s)
+	local s = math.floor(math.min(ScrH() - 80, (ScrW() - 60) / 2, 768))
+	if a then
+		-- Left: colour only (what was drawn). Right: as used (cut out by alpha).
+		surface.SetDrawColor(255, 0, 255, 255)
+		surface.DrawRect(20, 20, s, s)
+		surface.SetDrawColor(255, 255, 255, 255)
+		surface.SetMaterial(a.dbgColor)
+		surface.DrawTexturedRect(20, 20, s, s)
+		surface.SetDrawColor(255, 0, 255, 255)
+		surface.DrawRect(40 + s, 20, s, s)
+		surface.SetDrawColor(255, 255, 255, 255)
+		surface.SetMaterial(a.dbg)
+		surface.DrawTexturedRect(40 + s, 20, s, s)
+	end
 	local used = 0
 	for _, b in ipairs(blocks) do if b.atlas == i and b.id then used = used + 1 end end
-	draw.SimpleText(string.format("NGL impostors: texture %d, %d / %d animations", i, used, PER_ATLAS), "DermaDefault", 24, 24 + s, color_white)
+	draw.SimpleText(string.format("NGL far NPC pictures, texture %d: %d / %d animations. Left: colour, right: cut out (magenta = see-through). %s",
+		i, used, PER_ATLAS, a and "" or "(texture not made yet)"), "DermaDefault", 24, 28 + s, color_white)
+	draw.SimpleText("Status: " .. status, "DermaDefault", 24, 44 + s, I.Broken and Color(255, 120, 120) or color_white)
 end)
