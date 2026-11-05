@@ -68,7 +68,30 @@ function Z.SpawnCrab(class, pos, yaw, enemy, opts)
 	return crab
 end
 
--- The crab comes off a dying zombie (ENT:OnKilled).
+-- Where a crab of `class` fits coming off a zombie standing at `pos`: as
+-- high up its body as there's room for, never inside a wall, a prop or the
+-- floor. A crab spawned overlapping a wall was stuck there, and bullets hit
+-- the wall in front of it: it looked invincible.
+local fitTrace = { mask = MASK_NPCSOLID, collisiongroup = COLLISION_GROUP_NPC_SCRIPTED, output = {} }
+local function crabSpot(class, npc, pos, height)
+	local stored = scripted_ents.GetStored(class)
+	local hull = stored and stored.t and stored.t.Hull
+	local mins = hull and hull[1] or Vector(-12, -12, 0)
+	local maxs = hull and hull[2] or Vector(12, 12, 20)
+	local t = fitTrace
+	t.start = pos + Vector(0, 0, 4)
+	t.endpos = pos + Vector(0, 0, math.max(4, height))
+	t.mins, t.maxs = mins, maxs
+	t.filter = npc
+	local tr = util.TraceHull(t)
+	if tr.StartSolid then return nil end -- not even room on the ground
+	return tr.HitPos
+end
+
+-- The crab comes off a dying zombie (ENT:OnKilled). It's spawned on the next
+-- tick, once the zombie's death is done, not in the middle of the damage
+-- that killed it; the crab on its head is taken off the body now, so the
+-- ragdoll is made without it.
 local HEAD_BAND = 14 -- damage this close to the top of the head is a head shot
 function Z.OnKilled(npc, dmginfo)
 	if not npc.Headcrab then return end
@@ -79,7 +102,12 @@ function Z.OnKilled(npc, dmginfo)
 	if hp and hp ~= vector_origin and hp.z > top - HEAD_BAND and hp:Distance2DSqr(pos) < 40 * 40 then
 		return -- shot in the head: the crab died too (it stays on the body)
 	end
-	local crab = Z.SpawnCrab(npc.Headcrab, Vector(pos.x, pos.y, pos.z + (npc.EyeHeight or 60) - 8),
-		npc:GetAngles().y, npc.NGLEnemy, { leap = false })
-	if crab then Z.ShowCrab(npc, false) end
+	if not Z.CanSpawnCrab() then return end
+	local spot = crabSpot(npc.Headcrab, npc, pos, (npc.EyeHeight or 60) - 8)
+	if not spot then return end -- nowhere it fits: it died with the zombie
+	Z.ShowCrab(npc, false)
+	local class, yaw, enemy = npc.Headcrab, npc:GetAngles().y, npc.NGLEnemy
+	timer.Simple(0, function()
+		Z.SpawnCrab(class, spot, yaw, enemy, { leap = false })
+	end)
 end
