@@ -17,6 +17,8 @@ local cvOcclusion = CreateClientConVar("ngl_cl_occlusion", "1", true, false,
 	"1 = NGL NPCs hidden behind walls or props aren't drawn (the graphics card tells us, a frame late, whether any of the NPC would show). 0 = off.", 0, 1)
 local cvOcclusionNear = CreateClientConVar("ngl_cl_occlusion_near", "600", true, false,
 	"NGL NPCs closer than this are always drawn, even when they seem hidden (no popping right next to you).", 0, 50000)
+local cvEventRange = CreateClientConVar("ngl_cl_event_range", "1500", true, false,
+	"NGL NPCs further than this skip their animations' client events (footstep sounds, dust, shells): each one is a sound or an effect made on this client. 0 = always.", 0, 50000)
 local cvReflectRange = CreateClientConVar("ngl_cl_reflection_range", "1500", true, false,
 	"NGL NPCs further than this from you aren't drawn in water reflections and other extra views (cameras, mirrors), which draw everything again. 0 = always.", 0, 50000)
 
@@ -50,6 +52,7 @@ local function settings()
 	Set.shadow = sq(cvShadowRange)
 	Set.flex = sq(cvFlexRange)
 	Set.reflect = sq(cvReflectRange)
+	Set.event = sq(cvEventRange)
 	Set.occlusion = cvOcclusion:GetBool()
 	local near = cvOcclusionNear:GetFloat()
 	Set.occlusionNear = near * near
@@ -80,6 +83,7 @@ end
 -- Counters for the client benchmark (cl_bench.lua): what Draw did this frame.
 NGL.ClStats = NGL.ClStats or { drawn = 0, occluded = 0, far = 0, impostor = 0 }
 local Stats = NGL.ClStats
+Stats.events, Stats.eventsCut, Stats.sounds = Stats.events or 0, Stats.eventsCut or 0, Stats.sounds or 0
 
 -- Level of detail on this client, from near to far:
 --   full     the model as the engine picks it, with weapon and shadow
@@ -279,6 +283,25 @@ function ENT:Draw(flags)
 		self:NGLRemoveWeaponModel()
 	end
 end
+
+-- The model's client-side animation events (footsteps, sounds, effects),
+-- which the engine plays for every NPC this client has, drawn or not. Far
+-- ones are skipped (returning true stops the event).
+function ENT:FireAnimationEvent(pos, ang, event, name)
+	Stats.events = Stats.events + 1
+	local S = settings()
+	if S.event < HUGE and EyePos():DistToSqr(self:GetPos()) > S.event then
+		Stats.eventsCut = Stats.eventsCut + 1
+		return true
+	end
+end
+
+-- Sounds this client makes for NGL NPCs itself (from those events), for the
+-- benchmark.
+hook.Add("EntityEmitSound", "NGL.ClSounds", function(data)
+	local e = data.Entity
+	if e and e.IsNGLNPC then Stats.sounds = Stats.sounds + 1 end
+end)
 
 function ENT:NGLRemoveWeaponModel()
 	if IsValid(self.NGLWeaponEnt) then

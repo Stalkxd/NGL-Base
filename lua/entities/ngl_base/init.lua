@@ -1075,6 +1075,8 @@ local GetAnimEventName = util.GetAnimEventNameByID
 -- Other events go to ENT:OnAnimEventName(name) (the poison zombie's crab
 -- throw) and to a leap waiting on its wind-up event (sv_leap.lua).
 function ENT:HandleAnimEvent(event, eventTime, cycle, typ, options)
+	local C = NGL.FX and NGL.FX.Count
+	if C then C.events = C.events + 1 end
 	if not GetAnimEventName then return end
 	local name = GetAnimEventName(event)
 	if not name then return end
