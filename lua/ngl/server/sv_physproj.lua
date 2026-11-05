@@ -88,3 +88,112 @@ hook.Add("Tick", "NGL.CombineBall", function()
 		end
 	end
 end)
+
+-- Rockets and grenades against vehicles (the APC).
+--
+-- A NextBot's collision box can't turn and is square, so the APC's is a
+-- 160 x 160 box in its middle: HL2's RPG rocket (and the SMG grenade)
+-- flew through its nose, its back end and the turret as if they weren't
+-- there. Each tick, every such projectile in the air is checked against
+-- the box of each vehicle's model, turned with it; one that would go into
+-- it this tick goes off right there, as if it hit the model.
+--
+-- Projectiles: HL2's rpg_missile, apc_missile and grenade_ar2 explode
+-- (their own damage, a 200 radius blast), crossbow_bolt hits for its
+-- damage, and addon projectiles whose class has "rocket" or "missile" in
+-- it are touched against the vehicle (their own code explodes them) or,
+-- with no touch code, explode like the RPG's. Cost: nothing while no
+-- vehicle or no projectile exists.
+
+local EXPLODE = { rpg_missile = true, apc_missile = true, grenade_ar2 = true }
+local BOLT = { crossbow_bolt = true }
+PP.Vehicles = PP.Vehicles or {}
+PP.Shots = PP.Shots or {}
+
+local function isShot(cls)
+	return EXPLODE[cls] or BOLT[cls] or string.find(cls, "rocket", 1, true) ~= nil or string.find(cls, "missile", 1, true) ~= nil
+end
+
+-- A vehicle NPC spawned (ngl_apc's OnSpawned): its model's box, measured once.
+function PP.AddVehicle(npc)
+	local mins, maxs = npc:GetModelBounds()
+	if not mins then return end
+	npc.NGLShotMins, npc.NGLShotMaxs = mins, maxs
+	PP.Vehicles[npc] = true
+end
+
+hook.Add("OnEntityCreated", "NGL.VehicleShots", function(e)
+	if e.IsNGLNPC or not isShot(e:GetClass()) then return end
+	PP.Shots[e] = true
+end)
+
+local function explode(shot, pos, owner)
+	local dmg = shot:GetInternalVariable("m_flDamage")
+	if not isnumber(dmg) or dmg <= 0 then dmg = 150 end
+	local fx = EffectData()
+	fx:SetOrigin(pos)
+	util.Effect("Explosion", fx, true, true)
+	shot:Remove()
+	util.BlastDamage(game.GetWorld(), IsValid(owner) and owner or game.GetWorld(), pos, 200, dmg)
+end
+
+local function hit(shot, veh, pos)
+	local cls = shot:GetClass()
+	local owner = shot:GetOwner()
+	if BOLT[cls] then
+		local dmg = DamageInfo()
+		local d = shot:GetInternalVariable("m_flDamage")
+		dmg:SetDamage(isnumber(d) and d > 0 and d or 100)
+		dmg:SetDamageType(DMG_BULLET)
+		dmg:SetAttacker(IsValid(owner) and owner or shot)
+		dmg:SetInflictor(shot)
+		dmg:SetDamagePosition(pos)
+		veh:TakeDamageInfo(dmg)
+		shot:EmitSound("Weapon_Crossbow.BoltHitWorld")
+		shot:Remove()
+	elseif not EXPLODE[cls] and shot:IsScripted() and (shot.Touch or shot.StartTouch) then
+		shot:SetPos(pos)
+		local fn = shot.StartTouch or shot.Touch
+		local ok = pcall(fn, shot, veh)
+		if ok and IsValid(shot) and shot.Touch and fn ~= shot.Touch then pcall(shot.Touch, shot, veh) end
+		if IsValid(shot) and not shot.NGLTouchedVeh then
+			shot.NGLTouchedVeh = true -- its code chose not to go off: leave it be
+		end
+	else
+		explode(shot, pos, owner)
+	end
+end
+
+hook.Add("Tick", "NGL.VehicleShots", function()
+	if not next(PP.Shots) or not next(PP.Vehicles) then return end
+	local dt = engine.TickInterval()
+	for veh in pairs(PP.Vehicles) do
+		if not IsValid(veh) or veh.NGLDying then PP.Vehicles[veh] = nil end
+	end
+	for shot in pairs(PP.Shots) do
+		if not IsValid(shot) then
+			PP.Shots[shot] = nil
+		elseif not shot.NGLTouchedVeh then
+			local pos = shot:GetPos()
+			local from = shot.NGLShotLast or pos
+			shot.NGLShotLast = pos
+			local to = pos + shot:GetVelocity() * dt
+			local delta = to - from
+			local owner = shot:GetOwner()
+			for veh in pairs(PP.Vehicles) do
+				if veh ~= owner then
+					local mins, maxs = veh.NGLShotMins, veh.NGLShotMaxs
+					local c = veh:GetPos()
+					local r = maxs:Distance(mins) * 0.5 + delta:Length()
+					if pos:DistToSqr(c) < (r + 200) * (r + 200) then
+						local hp = util.IntersectRayWithOBB(from, delta, c, veh:GetAngles(), mins, maxs)
+						if hp then
+							hit(shot, veh, hp)
+							break
+						end
+					end
+				end
+			end
+		end
+	end
+end)

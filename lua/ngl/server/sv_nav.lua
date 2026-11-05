@@ -1180,9 +1180,14 @@ function Nav.Load()
 	local header = nl and text:sub(1, nl - 1) or text
 	local bver, bS, bn, blinks, bareas = header:match("^NGLNAVB(%d+) (%d+) (%d+) (%d+) (%d+)$")
 	if bver and tonumber(bver) < FORMAT then
-		-- Made before stairs and taller steps were linked.
-		print("[NGL] This map's nav grid is from an older version: making a new one (your edits are kept).")
-		return false
+		-- Made before stairs and taller steps were linked. With ngl_nav_auto
+		-- a new one is made; without it the old one is used (same layout,
+		-- formats 5 to 7) rather than leaving the NPCs with no grid at all.
+		if cvAuto:GetBool() then
+			print("[NGL] This map's nav grid is from an older version: making a new one (your edits are kept).")
+			return false
+		end
+		print("[NGL] This map's nav grid is from an older version: using it anyway (ngl_nav_auto is 0). ngl_nav_generate makes a new one with stairs and taller steps linked; your edits are kept.")
 	end
 	if bver then
 		reset()
@@ -1204,7 +1209,7 @@ function Nav.Load()
 	if header2 then ver, S = header2:match("^NGLNAV(%d+) (%d+)") end
 	ver, S = tonumber(ver), tonumber(S)
 	if not S then return false end
-	if ver < FORMAT then
+	if ver < FORMAT and (ver < 4 or cvAuto:GetBool()) then
 		print("[NGL] This map's nav grid is from an older version: making a new one (your edits are kept).")
 		return false
 	end
@@ -2517,6 +2522,82 @@ function Nav.Reachable(s, t, caps)
 	return true
 end
 
+-- The map's own navmesh, when there's no NGL grid.
+--
+-- With no grid (ngl_nav_auto 0 and no ngl_nav_generate yet, or a grid that
+-- couldn't be made) NPCs would only walk straight at things. A map that
+-- has a Source navmesh (a .nav file, or nav_generate) gives them paths
+-- from it instead (ngl_nav_source): the engine's own path search for that
+-- NPC, a few a tick within ngl_nav_budget, and paths from about the same
+-- spot to about the same goal shared for a few seconds. No jumps, climbs
+-- or editor links: those are the grid's.
+local cvSource = CreateConVar("ngl_nav_source", "1", FCVAR_ARCHIVE,
+	"With no NGL nav grid, NPCs take paths from the map's own navmesh (a .nav file or nav_generate) if it has one.", 0, 1)
+local srcQueue, srcCache = {}, {}
+local SRC_CACHE_TIME, SRC_REGION, SRC_GOAL = 4, 128, 256
+local SRC_MAX_QUEUE = 64
+
+-- Is there anything to search paths on: the grid, or the map's navmesh?
+function Nav.Usable()
+	return Nav.Loaded or (cvSource:GetBool() and navmesh.IsLoaded())
+end
+
+function Nav.SourcePath(from, to, callback, wanted, npc)
+	if not (cvSource:GetBool() and navmesh.IsLoaded()) or not IsValid(npc) then return false end
+	local key = string.format("%d:%d:%d|%d:%d:%d|%s", floor(from.x / SRC_REGION), floor(from.y / SRC_REGION),
+		floor(from.z / 64), floor(to.x / SRC_GOAL), floor(to.y / SRC_GOAL), floor(to.z / 64), npc:GetClass())
+	local hit = srcCache[key]
+	if hit and CurTime() - hit.t < SRC_CACHE_TIME then
+		callback(hit.path)
+		return true
+	end
+	if #srcQueue >= SRC_MAX_QUEUE then
+		callback(nil)
+		return true
+	end
+	srcQueue[#srcQueue + 1] = { npc = npc, to = Vector(to.x, to.y, to.z), cb = callback, wanted = wanted, key = key }
+	return true
+end
+
+local function sourceSearch(job)
+	local hit = srcCache[job.key]
+	if hit and CurTime() - hit.t < SRC_CACHE_TIME then return hit.path end
+	local npc = job.npc
+	local path = Path("Follow")
+	path:SetMinLookAheadDistance(1)
+	path:SetGoalTolerance(24)
+	if not path:Compute(npc, job.to) or not path:IsValid() then
+		path:Invalidate()
+		srcCache[job.key] = { path = nil, t = CurTime() }
+		return nil
+	end
+	local pts = {}
+	for i, seg in ipairs(path:GetAllSegments()) do
+		if i > 1 then pts[#pts + 1] = Vector(seg.pos.x, seg.pos.y, seg.pos.z) end
+	end
+	path:Invalidate()
+	if #pts == 0 then pts = nil end
+	srcCache[job.key] = { path = pts, t = CurTime() }
+	return pts
+end
+
+hook.Add("Tick", "NGL.Nav.Source", function()
+	if #srcQueue == 0 then return end
+	local stop = SysTime() + cvBudget:GetFloat() / 1000
+	local i = 1
+	while i <= #srcQueue and SysTime() < stop do
+		local job = table.remove(srcQueue, 1)
+		if IsValid(job.npc) and (not job.wanted or job.wanted()) then
+			local ok, pts = pcall(sourceSearch, job)
+			job.cb(ok and pts or nil)
+		end
+	end
+	if math.random() < 0.01 then
+		local now = CurTime()
+		for k, v in pairs(srcCache) do if now - v.t > SRC_CACHE_TIME then srcCache[k] = nil end end
+	end
+end)
+
 -- Asks for a path from `from` to `to`. `callback(waypoints or nil)` is called
 -- later, or right away for a cached path, an unreachable spot or a full queue.
 -- Returns false if there is no nav grid.
@@ -2530,11 +2611,13 @@ end
 -- through; anything up to 24 counts as person-sized.
 -- `caps` (optional, see Nav.Caps) lets the path jump up and down ledges,
 -- across gaps or climb; such paths have `path.links` (see toWaypoints).
-function Nav.RequestPath(from, to, callback, wanted, width, caps)
+-- `npc` (optional): the NPC asking, for the map's navmesh (Nav.SourcePath)
+-- when there's no grid.
+function Nav.RequestPath(from, to, callback, wanted, width, caps, npc)
+	if not Nav.Loaded then return Nav.SourcePath(from, to, callback, wanted, npc) end
 	if width and width <= 24 then width = nil end
 	if caps and #Nav.Links == 0 then caps = nil end -- every path the same: share them
 	if width then width = math.ceil(width / 8) * 8 end -- few width classes, more shared work
-	if not Nav.Loaded then return false end
 	local st = Nav.Stats
 	local s, t = Nav.Nearest(from), Nav.Nearest(to)
 	if not s or not t then

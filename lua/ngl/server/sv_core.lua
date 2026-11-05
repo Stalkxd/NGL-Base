@@ -1241,7 +1241,7 @@ Core.SharedPath = sharedPath
 local function chase(npc, now, pos, tPos, visible)
 	local nav = NGL.Nav
 	local forcePath = now < (npc.NGLForcePathUntil or 0)
-	if not (nav and nav.Loaded) or now < (npc.NGLPathFailUntil or 0)
+	if not (nav and (nav.Loaded or nav.Usable and nav.Usable())) or now < (npc.NGLPathFailUntil or 0)
 		or (visible and not forcePath and abs(tPos.z - pos.z) < 96 and straightOk(npc, now, pos, tPos)) then
 		npc.NGLPath = nil
 		npc.NGLGoal = tPos
@@ -1296,7 +1296,7 @@ local function chase(npc, now, pos, tPos, visible)
 		end
 	end, function()
 		return IsValid(npc) and npc.NGLPathReq == req
-	end, npc.NavWidth, npc.NGLNavCaps)
+	end, npc.NavWidth, npc.NGLNavCaps, npc)
 	if npc.NGLPathPending and not npc.NGLPath then
 		npc.NGLGoal = (not forcePath) and tPos or nil
 	end
