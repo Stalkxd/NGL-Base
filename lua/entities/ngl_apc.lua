@@ -381,6 +381,9 @@ function ENT:NGLSignal() return false end
 function ENT:OnSpawned()
 	local h = self.Hull
 	self:SetCollisionBounds(h[1], h[2])
+	-- Rockets and grenades hit the whole model, not just the square box
+	-- in its middle (sv_physproj.lua).
+	if NGL.PhysProj and NGL.PhysProj.AddVehicle then NGL.PhysProj.AddVehicle(self) end
 	-- Our own driving sets the speed; the locomotion just follows it.
 	self.loco:SetAcceleration(2000)
 	self.loco:SetDeceleration(2000)
