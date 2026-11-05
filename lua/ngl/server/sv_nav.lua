@@ -1180,9 +1180,14 @@ function Nav.Load()
 	local header = nl and text:sub(1, nl - 1) or text
 	local bver, bS, bn, blinks, bareas = header:match("^NGLNAVB(%d+) (%d+) (%d+) (%d+) (%d+)$")
 	if bver and tonumber(bver) < FORMAT then
-		-- Made before stairs and taller steps were linked.
-		print("[NGL] This map's nav grid is from an older version: making a new one (your edits are kept).")
-		return false
+		-- Made before stairs and taller steps were linked. With ngl_nav_auto
+		-- a new one is made; without it the old one is used (same layout,
+		-- formats 5 to 7) rather than leaving the NPCs with no grid at all.
+		if cvAuto:GetBool() then
+			print("[NGL] This map's nav grid is from an older version: making a new one (your edits are kept).")
+			return false
+		end
+		print("[NGL] This map's nav grid is from an older version: using it anyway (ngl_nav_auto is 0). ngl_nav_generate makes a new one with stairs and taller steps linked; your edits are kept.")
 	end
 	if bver then
 		reset()
@@ -1204,7 +1209,7 @@ function Nav.Load()
 	if header2 then ver, S = header2:match("^NGLNAV(%d+) (%d+)") end
 	ver, S = tonumber(ver), tonumber(S)
 	if not S then return false end
-	if ver < FORMAT then
+	if ver < FORMAT and (ver < 4 or cvAuto:GetBool()) then
 		print("[NGL] This map's nav grid is from an older version: making a new one (your edits are kept).")
 		return false
 	end
