@@ -457,15 +457,15 @@ local function finish(run)
 			if cf and (ph[1] ~= "baseline" or run.clientMode) then
 				say(p, string.format("  Client FPS, %-12s avg %.0f  (frame avg %.2f ms, p95 %.2f, p99 %.2f)", ph[2] .. ":", 1000 / cf.avg, cf.avg, cf.p95, cf.p99))
 				if run.clientMode and ph[1] ~= "baseline" then
-					say(p, string.format("    NPCs on the client %.0f, drawn %.0f, hidden behind walls %.0f, too far or in fog %.0f (averages a frame)",
-						avg(c.npcs_on_client), avg(c.npcs_drawn), avg(c.npcs_occluded), avg(c.npcs_too_far)))
+					say(p, string.format("    NPCs on the client %.0f, drawn %.0f, as pictures %.0f, hidden behind walls %.0f, too far or in fog %.0f (averages a frame)",
+						avg(c.npcs_on_client), avg(c.npcs_drawn), avg(c.npcs_impostor), avg(c.npcs_occluded), avg(c.npcs_too_far)))
 				end
 			end
 		end
 		local st = client.settings
 		if run.clientMode and st then
-			say(p, string.format("  Client settings: ngl_cl_occlusion %s, ngl_cl_draw_range %s, %s; server ngl_net_cull %d",
-				tostring(st.occlusion), tostring(st.draw_range), tostring(st.resolution), GetConVar("ngl_net_cull"):GetInt()))
+			say(p, string.format("  Client settings: ngl_cl_occlusion %s, ngl_cl_impostor %s (range %s), ngl_cl_draw_range %s, %s; server ngl_net_cull %d",
+				tostring(st.occlusion), tostring(st.impostor), tostring(st.impostor_range), tostring(st.draw_range), tostring(st.resolution), GetConVar("ngl_net_cull"):GetInt()))
 		end
 	end
 	say(p, string.format("  Alive at end:          %d / %d", alive, run.count))

@@ -27,9 +27,10 @@ hook.Add("RenderScene", "NGL.MainView", function(origin) mainOrigin = origin end
 local function inMainView()
 	return mainOrigin == nil or EyePos():DistToSqr(mainOrigin) < 4
 end
+NGL.InMainView = inMainView -- the far-NPC pictures are only drawn there (cl_impostor.lua)
 
 -- Counters for the client benchmark (cl_bench.lua): what Draw did this frame.
-NGL.ClStats = NGL.ClStats or { drawn = 0, occluded = 0, far = 0 }
+NGL.ClStats = NGL.ClStats or { drawn = 0, occluded = 0, far = 0, impostor = 0 }
 local Stats = NGL.ClStats
 
 -- Level of detail on this client, from near to far:
@@ -42,6 +43,8 @@ local Stats = NGL.ClStats
 --            not drawn: no bones set up, nothing rendered
 --   occluded closer, but behind a wall or a prop (ngl_cl_occlusion): not
 --            drawn either until any of it shows again
+--   picture  beyond ngl_cl_impostor_range a flat picture of the NPC instead
+--            of the model (cl_impostor.lua)
 --   not sent a bit beyond ngl_cl_draw_range the server stops sending the
 --            NPC to this client at all (ngl_net_cull, sv_transmit.lua)
 -- Only this client's drawing changes. The server still runs every NPC, and
@@ -51,7 +54,7 @@ local function far(d, r) return r > 0 and d > r * r end
 
 function ENT:NGLDrawLevel(d)
 	-- Shadow
-	local noShadow = far(d, cvShadowRange:GetFloat())
+	local noShadow = far(d, cvShadowRange:GetFloat()) or self.NGLImp == true
 	if noShadow ~= (self.NGLNoShadow or false) then
 		self.NGLNoShadow = noShadow
 		if noShadow then self:DestroyShadow() else self:CreateShadow() end
@@ -156,7 +159,7 @@ function ENT:Draw(flags)
 	local shadow = shadowPass(flags)
 	if shadow then
 		-- Into its shadow texture: only for NPCs that cast one and show.
-		if self.NGLNoShadow or self.NGLHidden or self.NGLFar then return end
+		if self.NGLNoShadow or self.NGLHidden or self.NGLFar or self.NGLImp then return end
 		self:DrawModel()
 		return
 	end
@@ -181,6 +184,12 @@ function ENT:Draw(flags)
 	-- model for when it comes out.
 	if self:NGLOccluded(d) then
 		Stats.occluded = Stats.occluded + 1
+		return
+	end
+	-- Far: a flat picture of it instead (cl_impostor.lua), once one is made.
+	local Imp = NGL.Impostor
+	if Imp and Imp.Draw(self, d) then
+		Stats.impostor = Stats.impostor + 1
 		return
 	end
 
