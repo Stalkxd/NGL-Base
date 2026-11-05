@@ -105,7 +105,7 @@ local function holdingTool()
 end
 V.HoldingTool = holdingTool
 
-hook.Add("PostDrawTranslucentRenderables", "NGL.NavView", function(depth, sky)
+hook.Add("PostDrawTranslucentRenderables", "NGL.NavView", function(depth, _, sky) -- 3D skybox pass (the 2nd is true on maps without one)
 	if sky or not holdingTool() then return end
 	if #V.meshes > 0 then
 		render.SetMaterial(material())

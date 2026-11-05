@@ -59,6 +59,7 @@ S.Client = {
 	{ "ngl_cl_draw_range", "Draw NPCs up to", 1000, 30000, 0 },
 	{ "ngl_cl_impostor", "Far NPCs as pictures", false },
 	{ "ngl_cl_impostor_range", "Pictures from", 500, 20000, 0 },
+	{ "ngl_cl_impostor_quality", "Picture sharpness (next map)", 1, 2, 0 },
 	{ "ngl_cl_occlusion", "Skip NPCs behind walls", false },
 	{ title = "Detail" },
 	{ "ngl_cl_lod_range", "Full model detail up to", 0, 10000, 0 },
