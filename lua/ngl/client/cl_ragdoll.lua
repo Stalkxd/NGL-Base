@@ -42,10 +42,17 @@ function R.Wanted(npc)
 	return npc:GetPos():DistToSqr(from) <= r * r
 end
 
+-- Entities can't be removed while the frame is being drawn, and new bodies
+-- come from ENT:Draw: ones to go are hidden at once and removed in the
+-- next Think.
+local doomed = {}
 local function drop(i)
 	local e = list[i].ent
 	table.remove(list, i)
-	if IsValid(e) then e:Remove() end
+	if IsValid(e) then
+		e:SetNoDraw(true)
+		doomed[#doomed + 1] = e
+	end
 end
 
 -- Takes over a new client ragdoll.
@@ -78,6 +85,11 @@ local function freeze(e)
 end
 
 hook.Add("Think", "NGL.Ragdolls", function()
+	for i = #doomed, 1, -1 do
+		local e = doomed[i]
+		doomed[i] = nil
+		if IsValid(e) then e:Remove() end
+	end
 	local n = #list
 	if n == 0 then return end
 	local now = RealTime()
