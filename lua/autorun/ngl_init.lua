@@ -2,7 +2,7 @@
 -- Everything server-side lives under lua/ngl/server, client files under lua/ngl/client.
 
 NGL = NGL or {}
-NGL.Version = "0.24.2"
+NGL.Version = "0.25.0"
 -- Highest step NPCs walk up (the nav grid links steps up to this; their
 -- locomotion takes a little more). A player's is 18.
 NGL.StepHeight = 26
@@ -13,6 +13,7 @@ if SERVER then
 	AddCSLuaFile("ngl/client/cl_projectile.lua")
 	AddCSLuaFile("ngl/client/cl_nav_edit.lua")
 	AddCSLuaFile("ngl/client/cl_tools.lua")
+	AddCSLuaFile("ngl/client/cl_impostor.lua")
 
 	include("ngl/server/sv_core.lua")
 	include("ngl/server/sv_aimodes.lua")
@@ -38,6 +39,7 @@ else
 	include("ngl/client/cl_projectile.lua")
 	include("ngl/client/cl_nav_edit.lua")
 	include("ngl/client/cl_tools.lua")
+	include("ngl/client/cl_impostor.lua")
 
 	-- Names in the kill feed and other HUD text ("Combine Soldier (NGL)"
 	-- instead of "#ngl_combine_soldier").

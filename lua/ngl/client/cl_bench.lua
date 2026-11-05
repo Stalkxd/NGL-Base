@@ -28,7 +28,7 @@ end
 hook.Add("Think", "NGL.Bench.ClientSample", function()
 	if not bucket then
 		local S = NGL.ClStats
-		if S then S.drawn, S.occluded, S.far = 0, 0, 0 end
+		if S then S.drawn, S.occluded, S.far, S.impostor = 0, 0, 0, 0 end
 		return
 	end
 
@@ -52,6 +52,7 @@ hook.Add("Think", "NGL.Bench.ClientSample", function()
 		bucket.drawn[#bucket.drawn + 1] = S.drawn
 		bucket.occluded[#bucket.occluded + 1] = S.occluded
 		bucket.far[#bucket.far + 1] = S.far
+		bucket.impostor[#bucket.impostor + 1] = S.impostor or 0
 	end
 	if bucket.frames % 15 == 1 then
 		local n = 0
@@ -64,7 +65,7 @@ hook.Add("Think", "NGL.Bench.ClientSample", function()
 		-- Unfocused, the engine sleeps (engine_no_focus_sleep), which ruins the numbers.
 		bucket.unfocused = bucket.unfocused + 1
 	end
-	if S then S.drawn, S.occluded, S.far = 0, 0, 0 end
+	if S then S.drawn, S.occluded, S.far, S.impostor = 0, 0, 0, 0 end
 end)
 
 net.Receive("ngl_bench_phase", function()
@@ -73,7 +74,7 @@ net.Receive("ngl_bench_phase", function()
 	-- "away": the client benchmark's second half, the player turned away
 	-- from the fight.
 	if phase == "baseline" or phase == "loaded" or phase == "away" then
-		bucket = { sv = {}, fps = {}, frames = 0, unfocused = 0, drawn = {}, occluded = {}, far = {}, known = {} }
+		bucket = { sv = {}, fps = {}, frames = 0, unfocused = 0, drawn = {}, occluded = {}, far = {}, impostor = {}, known = {} }
 		buckets[phase] = bucket
 		return
 	end
@@ -95,12 +96,15 @@ net.Receive("ngl_bench_phase", function()
 				npcs_drawn = stats(b.drawn),
 				npcs_occluded = stats(b.occluded),
 				npcs_too_far = stats(b.far),
+				npcs_impostor = stats(b.impostor),
 				npcs_on_client = stats(b.known),
 			}
 		end
 		-- This client's drawing settings, so runs can be compared.
 		report.settings = {
 			occlusion = GetConVar("ngl_cl_occlusion") and GetConVar("ngl_cl_occlusion"):GetInt(),
+			impostor = GetConVar("ngl_cl_impostor") and GetConVar("ngl_cl_impostor"):GetInt(),
+			impostor_range = GetConVar("ngl_cl_impostor_range") and GetConVar("ngl_cl_impostor_range"):GetFloat(),
 			draw_range = GetConVar("ngl_cl_draw_range") and GetConVar("ngl_cl_draw_range"):GetFloat(),
 			fps_max = GetConVar("fps_max") and GetConVar("fps_max"):GetFloat(),
 			resolution = ScrW() .. "x" .. ScrH(),
