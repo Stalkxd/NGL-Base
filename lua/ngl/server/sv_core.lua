@@ -197,8 +197,52 @@ local function lineOfSight(from, ent, ignore)
 end
 Core.LineOfSight = lineOfSight
 
+-- Shared sight checks (ngl_ai_share_los): a squad standing together, or
+-- a horde running at one player, all ask "can I see it?" from nearly the
+-- same spot within the same moment. The answer only depends on the walls
+-- between (NGL NPCs don't block each other's sight), so each target keeps
+-- its last few answers, and an NPC whose eyes are within LOS_SHARE_DIST of
+-- where one was asked from, less than LOS_SHARE_TIME ago, takes it instead
+-- of tracing again.
+local cvShareLos = CreateConVar("ngl_ai_share_los", "1", FCVAR_ARCHIVE,
+	"1 = NGL NPCs standing close together share line-of-sight checks to the same target (one trace answers for all of them for a moment).", 0, 1)
+local LOS_SHARE_TIME = 0.3
+local LOS_SHARE_SQR = 48 * 48
+local LOS_SLOTS = 4
+local losCount -- NGL.FX.Count (sv_fx.lua, loaded later): losTraces, losShared
+
 local function canSee(npc, from, ent)
-	return lineOfSight(from, ent, npc)
+	if not cvShareLos:GetBool() then return lineOfSight(from, ent, npc) end
+	losCount = losCount or (NGL.FX and NGL.FX.Count)
+	local now = CurTime()
+	local C = ent.NGLLosCache
+	if C then
+		local x, y, z = from.x, from.y, from.z
+		for i = 1, LOS_SLOTS do
+			local e = C[i]
+			if e and now - e.t < LOS_SHARE_TIME then
+				local dx, dy, dz = e.x - x, e.y - y, e.z - z
+				if dx * dx + dy * dy + dz * dz < LOS_SHARE_SQR then
+					if losCount then losCount.losShared = (losCount.losShared or 0) + 1 end
+					return e.vis
+				end
+			end
+		end
+	else
+		C = { n = 0 }
+		ent.NGLLosCache = C
+	end
+	local vis = lineOfSight(from, ent, npc)
+	if losCount then losCount.losTraces = (losCount.losTraces or 0) + 1 end
+	local k = C.n % LOS_SLOTS + 1
+	C.n = k
+	local e = C[k]
+	if not e then
+		e = {}
+		C[k] = e
+	end
+	e.x, e.y, e.z, e.t, e.vis = from.x, from.y, from.z, now, vis
+	return vis
 end
 
 -- Nearest hostile within sight, checking line of sight on at most the 3
@@ -849,6 +893,7 @@ shotTrace.output = shotResult
 
 -- Deals damage from an NGL NPC (melee hits, custom attacks).
 function Core.Damage(attacker, target, amount, dmgType, pos, force)
+	if NGL.Off.damage and NGL.IsOff(attacker, "damage") then return end -- ngl_debug_parts
 	local dmg = DamageInfo()
 	dmg:SetDamage(amount)
 	dmg:SetDamageType(dmgType or DMG_GENERIC)
@@ -2162,7 +2207,8 @@ local function think(npc, now, dt, nearestPlayerSqr, seen, pos)
 	-- Melee: in reach -> swing (also for NPCs that have a gun).
 	local m = npc.Melee
 	local reach = m and (m.Range or 70)
-	if m and distSqr < reach * reach and abs(tPos.z - pos.z) < 72 and now >= (npc.NGLNextMelee or 0) then
+	if m and distSqr < reach * reach and abs(tPos.z - pos.z) < 72 and now >= (npc.NGLNextMelee or 0)
+		and not (NGL.Off.melee and NGL.IsOff(npc, "melee")) then
 		if npc:OnAttack(enemy, "melee") ~= true then Core.StartMelee(npc, enemy, now) end
 		return
 	end
@@ -2184,7 +2230,7 @@ local function think(npc, now, dt, nearestPlayerSqr, seen, pos)
 			releaseSlot(npc)
 		end
 		local lp = npc.LeapAttack
-		if lp and NGL.Leap and NGL.Leap.Can(npc, enemy, dist, now, lp) then
+		if lp and NGL.Leap and not (NGL.Off.leap and NGL.IsOff(npc, "leap")) and NGL.Leap.Can(npc, enemy, dist, now, lp) then
 			if npc:OnAttack(enemy, "leap") ~= true then NGL.Leap.Start(npc, enemy, lp, now) end
 			return
 		end
@@ -2331,7 +2377,9 @@ hook.Add("Tick", "NGL.Core.Scheduler", function()
 				npc.NGLNextThink = now + interval * Rand(0.9, 1.1)
 
 				local AL = NGL.Alloc
-				if AL and AL.On() then
+				if NGL.Off.think and NGL.IsOff(npc, "think") then
+					-- ngl_debug_parts: no thinking
+				elseif AL and AL.On() then
 					AL.Measure("think: decisions and fighting (the rest)", think, npc, now, dt, best, seen, pos)
 				else
 					think(npc, now, dt, best, seen, pos)
