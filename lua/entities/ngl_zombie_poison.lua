@@ -16,6 +16,9 @@ ENT.RunSpeed = 45                -- never hurries
 ENT.WalkSpeed = 35
 ENT.SightRange = 3000
 ENT.EyeHeight = 64
+-- A person's box, as HL2 gives it (HULL_HUMAN): the model's own bounds
+-- (wide arms and the crabs on its back) were too wide for doorways.
+ENT.Hull = { Vector(-16, -16, 0), Vector(16, 16, 72) }
 ENT.CrouchChance = 0
 ENT.WanderRadius = 250
 ENT.Group = false

@@ -108,7 +108,7 @@ hook.Add("Think", "NGL.Proj", function()
 	end
 end)
 
-hook.Add("PostDrawTranslucentRenderables", "NGL.Proj", function(depth, skybox)
+hook.Add("PostDrawTranslucentRenderables", "NGL.Proj", function(depth, _, skybox) -- 3D skybox pass (the 2nd is true on maps without one)
 	if skybox or next(list) == nil then return end
 	render.SetMaterial(glow)
 	for _, p in pairs(list) do

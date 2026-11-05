@@ -68,7 +68,7 @@ local function ring(pos, r, col)
 	end
 end
 
-hook.Add("PostDrawTranslucentRenderables", "NGL.ToolView", function(depth, sky)
+hook.Add("PostDrawTranslucentRenderables", "NGL.ToolView", function(depth, _, sky) -- 3D skybox pass (the 2nd is true on maps without one)
 	if sky then return end
 	if showTrack() then
 		render.SetColorMaterial()

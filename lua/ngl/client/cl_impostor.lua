@@ -15,8 +15,14 @@
 -- The picture shown is the view nearest to where you look at it from and
 -- the moment nearest to where its animation is, so it still walks, runs
 -- and turns. Pictures are kept in a few big textures (ngl_cl_impostor_atlases,
--- 16 MB of video memory each); when they are full, the pictures of what
--- nobody has needed for a few seconds make room.
+-- 64 MB of video memory each at ngl_cl_impostor_quality 2, 16 MB at 1);
+-- when they are full, the pictures of what nobody has needed for a few
+-- seconds make room.
+--
+-- Zoomed in (a sniper scope, binoculars) an NPC looks as big as one that
+-- much closer, so the range counts the zoom: through a 4x scope the
+-- pictures start 4 times further away, and the NPCs in between are the
+-- real model.
 --
 -- An NPC whose picture isn't baked yet is drawn normally until it is
 -- (ngl_cl_impostor_bake pictures a frame). Vehicles and NPCs with
@@ -36,7 +42,9 @@ local cvOn = CreateClientConVar("ngl_cl_impostor", "1", true, false,
 local cvRange = CreateClientConVar("ngl_cl_impostor_range", "3000", true, false,
 	"NGL NPCs further than this are drawn as flat pictures (ngl_cl_impostor). Lower = more FPS, but you see the pictures closer up.", 0, 50000)
 local cvAtlases = CreateClientConVar("ngl_cl_impostor_atlases", "2", true, false,
-	"Textures for NPC pictures, 16 MB of video memory each, 50 animations of one model each. 0 = no pictures.", 0, 8)
+	"Textures for NPC pictures, 50 animations of one model each (64 MB of video memory each at ngl_cl_impostor_quality 2, 16 MB at 1). 0 = no pictures.", 0, 8)
+local cvQuality = CreateClientConVar("ngl_cl_impostor_quality", "2", true, false,
+	"Sharpness of NPC pictures: 2 = 96 pixels a picture (sharp through scopes), 1 = 48 (a quarter of the video memory). Takes effect on the next map.", 1, 2)
 local cvBake = CreateClientConVar("ngl_cl_impostor_bake", "24", true, false,
 	"Most NPC pictures made a frame. NPCs whose picture isn't made yet are drawn normally.", 1, 512)
 local cvLight = CreateClientConVar("ngl_cl_impostor_light", "2", true, false,
@@ -44,10 +52,11 @@ local cvLight = CreateClientConVar("ngl_cl_impostor_light", "2", true, false,
 local cvShow = CreateClientConVar("ngl_cl_impostor_show", "0", false, false,
 	"Shows NPC picture texture N on screen (1 = the first). 0 = off.", 0, 8)
 
-local ATLAS = 2048                 -- texture size, pixels
-local TILE = 48                    -- one picture, pixels (a far NPC is 10 to 25 tall)
+local QUALITY = cvQuality:GetInt() >= 2 and 2 or 1 -- read once: the textures are made at this size
+local ATLAS = QUALITY == 2 and 4096 or 2048 -- texture size, pixels
+local TILE = QUALITY == 2 and 96 or 48 -- one picture, pixels (a far NPC is 10 to 25 tall, more zoomed in)
 local DIRS, FRAMES = 8, 4          -- views round the model, moments of the animation
-local BLOCK_W, BLOCK_H = DIRS * TILE, FRAMES * TILE -- one animation of one model: 384 x 192
+local BLOCK_W, BLOCK_H = DIRS * TILE, FRAMES * TILE -- one animation of one model: 768 x 384 (quality 1: 384 x 192)
 local BCOLS, BROWS = math.floor(ATLAS / BLOCK_W), math.floor(ATLAS / BLOCK_H)
 local PER_ATLAS = BCOLS * BROWS    -- 5 x 10 = 50 animations a texture
 local FOV = 8                      -- narrow lens from far away: nearly flat, like the picture
@@ -98,7 +107,7 @@ I._slotPlace = slotPlace
 local function atlas(i)
 	local a = atlases[i]
 	if a then return a end
-	local rt = GetRenderTargetEx("ngl_impostor_" .. i, ATLAS, ATLAS, RT_SIZE_NO_CHANGE,
+	local rt = GetRenderTargetEx("ngl_impostor_" .. ATLAS .. "_" .. i, ATLAS, ATLAS, RT_SIZE_NO_CHANGE,
 		MATERIAL_RT_DEPTH_SEPARATE, bit.bor(4, 8, 256), 0, IMAGE_FORMAT_RGBA8888) -- clamp, no mipmaps
 	local mat = CreateMaterial("ngl_impostor_mat_" .. i, "UnlitGeneric", {
 		["$basetexture"] = "color/white",
@@ -399,8 +408,20 @@ local function bake(job)
 	b.ready[job.t] = true
 end
 
+-- How much the view is zoomed in this frame: 1 at your normal field of
+-- view, 0.25 through a 4x scope (an NPC looks as big as one 4 times closer).
+local zoom, ZOOM_DEFAULT = 1, 75
 hook.Add("PreRender", "NGL.Impostor.Frame", function()
 	for i in pairs(nQuads) do nQuads[i] = 0 end
+	local v = render.GetViewSetup and render.GetViewSetup()
+	local fov = v and (v.fov_unscaled or v.fov)
+	local cv = GetConVar("fov_desired")
+	local base = cv and cv:GetFloat() or ZOOM_DEFAULT
+	if fov and fov > 0 and base > 0 and fov < base - 1 then
+		zoom = math.tan(math.rad(fov * 0.5)) / math.tan(math.rad(base * 0.5))
+	else
+		zoom = 1
+	end
 end)
 
 -- Baking runs after the frame is drawn; the new pictures are used from the
@@ -468,6 +489,7 @@ function I.Draw(npc, d)
 		return false
 	end
 	local want
+	d = d * zoom * zoom -- as far as it looks (zoomed in: nearer)
 	if npc.NGLImp then want = d > (range * LEAVE) ^ 2 else want = d > range * range end
 	npc.NGLImp = want
 	if not want then return false end
@@ -542,8 +564,10 @@ end
 
 -- All pictures of the frame, one batch per texture, in the opaque pass
 -- (alpha-tested: they hide what's behind them and get the map's fog).
-hook.Add("PostDrawOpaqueRenderables", "NGL.Impostor.Draw", function(depth, sky)
-	if depth or sky then return end
+-- The third argument, not the second: on maps without a 3D skybox the
+-- second is true for the main view too, and no pictures were drawn there.
+hook.Add("PostDrawOpaqueRenderables", "NGL.Impostor.Draw", function(depth, _, sky3d)
+	if depth or sky3d then return end
 	if NGL.InMainView and not NGL.InMainView() then return end
 	for ai, n in pairs(nQuads) do
 		if n > 0 and atlases[ai] then
