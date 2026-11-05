@@ -16,6 +16,17 @@ local cvOcclusion = CreateClientConVar("ngl_cl_occlusion", "1", true, false,
 	"1 = NGL NPCs hidden behind walls or props aren't drawn (the graphics card tells us, a frame late, whether any of the NPC would show). 0 = off.", 0, 1)
 local cvOcclusionNear = CreateClientConVar("ngl_cl_occlusion_near", "600", true, false,
 	"NGL NPCs closer than this are always drawn, even when they seem hidden (no popping right next to you).", 0, 50000)
+local cvReflectRange = CreateClientConVar("ngl_cl_reflection_range", "1500", true, false,
+	"NGL NPCs further than this from you aren't drawn in water reflections and other extra views (cameras, mirrors), which draw everything again. 0 = always.", 0, 50000)
+
+-- Where the main view is drawn from this frame. Water reflections, cameras
+-- and mirrors draw the world again from somewhere else in the same frame;
+-- Draw tells them apart by the eye position.
+local mainOrigin
+hook.Add("RenderScene", "NGL.MainView", function(origin) mainOrigin = origin end)
+local function inMainView()
+	return mainOrigin == nil or EyePos():DistToSqr(mainOrigin) < 4
+end
 
 -- Counters for the client benchmark (cl_bench.lua): what Draw did this frame.
 NGL.ClStats = NGL.ClStats or { drawn = 0, occluded = 0, far = 0 }
@@ -67,8 +78,10 @@ end
 -- already on screen and reports, a frame later, how much of it showed. 0 for
 -- a short while = hidden behind something: no bones set up, nothing drawn.
 -- Seen again = drawn at once. A new NPC counts as seen until its first
--- answer comes back. Only one query a frame per NPC (mirrors and water
--- reflections draw it again in the same frame and would confuse it).
+-- answer comes back. The query is only made in the main view, drawn to the
+-- screen: water reflections and refractions are drawn first, into their own
+-- textures, and a query there tested the NPC against the wrong picture, so
+-- NPCs in plain view vanished. Elsewhere the last answer is kept.
 -- The sprite is put where the NPC will be LEAD seconds from now, from how it
 -- moved since the last frame: the answer comes a frame late, so a fast
 -- zombie running out from behind a wall would otherwise show up already in
@@ -83,9 +96,11 @@ local function shadowPass(flags)
 	return flags ~= nil and SHADOW_FLAGS ~= 0 and bit.band(flags, SHADOW_FLAGS) ~= 0
 end
 
-function ENT:NGLOccluded(d, shadow)
-	if not cvOcclusion:GetBool() then return false end
-	if shadow then return self.NGLHidden or false end
+function ENT:NGLOccluded(d)
+	if not cvOcclusion:GetBool() then
+		self.NGLHidden = false
+		return false
+	end
 	local near = cvOcclusionNear:GetFloat()
 	local now = RealTime()
 	if d < near * near then
@@ -93,6 +108,7 @@ function ENT:NGLOccluded(d, shadow)
 		self.NGLSeenAt = now
 		return false
 	end
+	if mainOrigin == nil or render.GetRenderTarget() ~= nil then return self.NGLHidden or false end
 	local frame = FrameNumber()
 	if self.NGLVisFrame == frame then return self.NGLHidden or false end
 	self.NGLVisFrame = frame
@@ -137,22 +153,39 @@ function ENT:Draw(flags)
 		return
 	end
 
-	local d = EyePos():DistToSqr(self:GetPos())
 	local shadow = shadowPass(flags)
-	if not self:NGLDrawLevel(d) then
+	if shadow then
+		-- Into its shadow texture: only for NPCs that cast one and show.
+		if self.NGLNoShadow or self.NGLHidden or self.NGLFar then return end
+		self:DrawModel()
+		return
+	end
+	if not inMainView() then
+		-- A water reflection, a camera or a mirror: only NPCs near you, and
+		-- no level-of-detail switching (that follows the main view).
+		local r = cvReflectRange:GetFloat()
+		if self.NGLFar or (r > 0 and mainOrigin and self:GetPos():DistToSqr(mainOrigin) > r * r) then return end
+		self:DrawModel()
+		if IsValid(self.NGLWeaponEnt) and self.NGLWeaponEnt:GetParent() == self then self.NGLWeaponEnt:DrawModel() end
+		return
+	end
+
+	local d = EyePos():DistToSqr(self:GetPos())
+	self.NGLFar = not self:NGLDrawLevel(d)
+	if self.NGLFar then
 		if self.NGLWeaponEnt then self:NGLRemoveWeaponModel() end
-		if not shadow then Stats.far = Stats.far + 1 end
+		Stats.far = Stats.far + 1
 		return
 	end
 	-- Hidden behind a wall: skip the model and the weapon, keep the weapon
 	-- model for when it comes out.
-	if self:NGLOccluded(d, shadow) then
-		if not shadow then Stats.occluded = Stats.occluded + 1 end
+	if self:NGLOccluded(d) then
+		Stats.occluded = Stats.occluded + 1
 		return
 	end
 
 	self:DrawModel()
-	if not shadow then Stats.drawn = Stats.drawn + 1 end
+	Stats.drawn = Stats.drawn + 1
 
 	-- Weapon is a client-only bonemerged model: no extra server entity.
 	-- Skipped far away, where it's a few pixels but still costs a bone merge.
