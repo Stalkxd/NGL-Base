@@ -26,7 +26,11 @@ local function stats(list)
 end
 
 hook.Add("Think", "NGL.Bench.ClientSample", function()
-	if not bucket then return end
+	if not bucket then
+		local S = NGL.ClStats
+		if S then S.drawn, S.occluded, S.far = 0, 0, 0 end
+		return
+	end
 
 	if engine.ServerFrameTime then
 		local ft = engine.ServerFrameTime()
@@ -39,17 +43,37 @@ hook.Add("Think", "NGL.Bench.ClientSample", function()
 
 	bucket.fps[#bucket.fps + 1] = FrameTime() * 1000
 	bucket.frames = bucket.frames + 1
+
+	-- What NGL NPCs' Draw did last frame (cl_init.lua), and every 15 frames
+	-- how many NGL NPCs this client has at all (sent by the server, not
+	-- dormant).
+	local S = NGL.ClStats
+	if S then
+		bucket.drawn[#bucket.drawn + 1] = S.drawn
+		bucket.occluded[#bucket.occluded + 1] = S.occluded
+		bucket.far[#bucket.far + 1] = S.far
+	end
+	if bucket.frames % 15 == 1 then
+		local n = 0
+		for _, e in ipairs(ents.GetAll()) do
+			if e.IsNGLNPC and not e:IsDormant() then n = n + 1 end
+		end
+		bucket.known[#bucket.known + 1] = n
+	end
 	if not system.HasFocus() then
 		-- Unfocused, the engine sleeps (engine_no_focus_sleep), which ruins the numbers.
 		bucket.unfocused = bucket.unfocused + 1
 	end
+	if S then S.drawn, S.occluded, S.far = 0, 0, 0 end
 end)
 
 net.Receive("ngl_bench_phase", function()
 	local phase = net.ReadString()
 
-	if phase == "baseline" or phase == "loaded" then
-		bucket = { sv = {}, fps = {}, frames = 0, unfocused = 0 }
+	-- "away": the client benchmark's second half, the player turned away
+	-- from the fight.
+	if phase == "baseline" or phase == "loaded" or phase == "away" then
+		bucket = { sv = {}, fps = {}, frames = 0, unfocused = 0, drawn = {}, occluded = {}, far = {}, known = {} }
 		buckets[phase] = bucket
 		return
 	end
@@ -68,8 +92,19 @@ net.Receive("ngl_bench_phase", function()
 				client_frame_ms = stats(b.fps),
 				raw_first = b.raw,
 				unfocused_pct = b.frames > 0 and (b.unfocused / b.frames * 100) or 0,
+				npcs_drawn = stats(b.drawn),
+				npcs_occluded = stats(b.occluded),
+				npcs_too_far = stats(b.far),
+				npcs_on_client = stats(b.known),
 			}
 		end
+		-- This client's drawing settings, so runs can be compared.
+		report.settings = {
+			occlusion = GetConVar("ngl_cl_occlusion") and GetConVar("ngl_cl_occlusion"):GetInt(),
+			draw_range = GetConVar("ngl_cl_draw_range") and GetConVar("ngl_cl_draw_range"):GetFloat(),
+			fps_max = GetConVar("fps_max") and GetConVar("fps_max"):GetFloat(),
+			resolution = ScrW() .. "x" .. ScrH(),
+		}
 		buckets = {}
 
 		net.Start("ngl_bench_report")

@@ -808,7 +808,8 @@ local function fire(npc, enemy, shots, visual, dst)
 		npc:NGLGesture("Fire")
 		local dir = dst - src
 		dir:Normalize()
-		npc:FireBullets({
+		-- Tracers and impacts thinned out away from players (sv_fx.lua).
+		npc:FireBullets(NGL.FX.Bullet(npc, {
 			Src = src,
 			Dir = dir,
 			Spread = Vector(w.Spread, w.Spread, 0),
@@ -818,7 +819,7 @@ local function fire(npc, enemy, shots, visual, dst)
 			TracerName = w.Tracer,
 			Attacker = npc,
 			IgnoreEntity = npc,
-		})
+		}, src))
 		if w.MuzzleEffect then
 			local ed = EffectData()
 			ed:SetEntity(npc)
@@ -826,7 +827,7 @@ local function fire(npc, enemy, shots, visual, dst)
 			ed:SetOrigin(src)
 			ed:SetAngles(dir:Angle())
 			ed:SetScale(1)
-			util.Effect(w.MuzzleEffect, ed)
+			NGL.FX.Muzzle(w.MuzzleEffect, ed, src)
 		end
 		if w.Sound then npc:EmitSound(w.Sound) end
 		return

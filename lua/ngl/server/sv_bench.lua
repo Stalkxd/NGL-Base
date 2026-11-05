@@ -7,6 +7,10 @@
 --   ngl_bench <class> <count>          run one benchmark
 --   ngl_bench_sweep <class> <c1,c2,..> run several counts one after another
 --   ngl_bench_compare <count>          nextbot vs light vs npc_combine_s at one count
+--   ngl_bench_client [count] [classA] [classB]
+--                                      client FPS with two real NGL factions
+--                                      fighting in front of you: half the
+--                                      time looking at them, half turned away
 --   ngl_bench_stop                     abort the current run / queue
 --   ngl_bench_clear                    remove every benchmark NPC
 --
@@ -181,7 +185,8 @@ local function buildSlots(origin, yaw, count)
 	return slots
 end
 
-local function spawnOne(class, slot)
+local function spawnOne(class, slot, class2)
+	if class2 and slot.team == 2 then class = class2 end
 	local ent = ents.Create(class)
 	if not IsValid(ent) then return nil end
 
@@ -261,8 +266,8 @@ local function startNext()
 	local job = table.remove(B.Queue, 1)
 	if not job then return end
 
-	if not classExists(job.class) then
-		say(job.ply, "Unknown entity class '" .. job.class .. "', skipping.")
+	if not classExists(job.class) or (job.class2 and not classExists(job.class2)) then
+		say(job.ply, "Unknown entity class '" .. (classExists(job.class) and job.class2 or job.class) .. "', skipping.")
 		return startNext()
 	end
 
@@ -273,6 +278,9 @@ local function startNext()
 
 	B.Active = {
 		class = job.class,
+		class2 = job.class2,
+		clientMode = job.clientMode,
+		origin = origin,
 		count = job.count,
 		ply = job.ply,
 		limit = job.limit,
@@ -290,7 +298,10 @@ local function startNext()
 
 	sendPhase(B.Active, "baseline")
 	say(job.ply, string.format("Benchmark %s x%d: sampling empty baseline for %ds...",
-		job.class, job.count, cvBaseline:GetInt()))
+		job.class2 and (job.class .. " vs " .. job.class2) or job.class, job.count, cvBaseline:GetInt()))
+	if job.clientMode then
+		say(job.ply, "Client benchmark: keep the window focused and don't touch the mouse; the view is turned for you.")
+	end
 end
 
 local function sample(run, bucket)
@@ -360,6 +371,9 @@ local function finish(run)
 		singleplayer = game.SinglePlayer(),
 		players = player.GetCount(),
 		bullets = GetConVar("ngl_bench_bullets"):GetBool(),
+		class2 = run.class2,
+		client_mode = run.clientMode or nil,
+		net_cull = GetConVar("ngl_net_cull") and GetConVar("ngl_net_cull"):GetBool(),
 		god = cvGod:GetBool(),
 		duration = cvDuration:GetFloat(),
 		time = os.date("%Y-%m-%d %H:%M:%S", run.startedAt),
@@ -435,14 +449,31 @@ local function finish(run)
 	end
 	say(p, string.format("  Late ticks, empty:     %d of %d", run.baseline.overruns, run.baseline.ticks))
 	say(p, string.format("  Late ticks, loaded:    %d of %d", run.loaded.overruns, run.loaded.ticks))
-	if client and client.loaded and client.loaded.client_frame_ms then
-		local cf = client.loaded.client_frame_ms
-		say(p, string.format("  Client FPS, loaded:    avg %.0f  (p95 frame %.2f ms)", 1000 / cf.avg, cf.p95))
+	if client then
+		local function avg(st) return st and st.avg or 0 end
+		for _, ph in ipairs({ { "baseline", "empty" }, { "loaded", run.clientMode and "looking" or "loaded" }, { "away", "turned away" } }) do
+			local c = client[ph[1]]
+			local cf = c and c.client_frame_ms
+			if cf and (ph[1] ~= "baseline" or run.clientMode) then
+				say(p, string.format("  Client FPS, %-12s avg %.0f  (frame avg %.2f ms, p95 %.2f, p99 %.2f)", ph[2] .. ":", 1000 / cf.avg, cf.avg, cf.p95, cf.p99))
+				if run.clientMode and ph[1] ~= "baseline" then
+					say(p, string.format("    NPCs on the client %.0f, drawn %.0f, hidden behind walls %.0f, too far or in fog %.0f (averages a frame)",
+						avg(c.npcs_on_client), avg(c.npcs_drawn), avg(c.npcs_occluded), avg(c.npcs_too_far)))
+				end
+			end
+		end
+		local st = client.settings
+		if run.clientMode and st then
+			say(p, string.format("  Client settings: ngl_cl_occlusion %s, ngl_cl_draw_range %s, %s; server ngl_net_cull %d",
+				tostring(st.occlusion), tostring(st.draw_range), tostring(st.resolution), GetConVar("ngl_net_cull"):GetInt()))
+		end
 	end
 	say(p, string.format("  Alive at end:          %d / %d", alive, run.count))
 
 	file.CreateDir("ngl_bench")
-	local name = string.format("ngl_bench/%s_%s_%d_%s.json", result.map, run.class, run.count, os.date("%Y%m%d_%H%M%S", run.startedAt))
+	local label = run.class2 and (run.class .. "_vs_" .. run.class2) or run.class
+	if run.clientMode then label = "client_" .. label end
+	local name = string.format("ngl_bench/%s_%s_%d_%s.json", result.map, label, run.count, os.date("%Y%m%d_%H%M%S", run.startedAt))
 	file.Write(name, util.TableToJSON(result, true))
 	say(p, "  Saved to garrysmod/data/" .. name)
 	say(p, "------------------------------------------------------------")
@@ -488,6 +519,21 @@ local function finish(run)
 	end
 end
 
+-- Client benchmark: turns the reporting player's view to the middle of the
+-- fight, or straight away from it.
+local function lookAt(run, away)
+	local ply = run.reporter
+	if not IsValid(ply) or not run.origin then return end
+	local dir = run.origin + Vector(0, 0, 40) - ply:EyePos()
+	local ang = dir:Angle()
+	if away then
+		ang.y = ang.y + 180
+		ang.p = 0
+	end
+	ang.r = 0
+	ply:SetEyeAngles(ang)
+end
+
 hook.Add("Tick", "NGL.Bench.Harness", function()
 	local run = B.Active
 	if not run then
@@ -509,7 +555,7 @@ hook.Add("Tick", "NGL.Bench.Harness", function()
 		for _ = 1, SPAWN_PER_TICK do
 			local slot = run.slots[run.nextSlot]
 			if not slot then break end
-			spawnOne(run.class, slot)
+			spawnOne(run.class, slot, run.class2)
 			run.nextSlot = run.nextSlot + 1
 		end
 
@@ -528,10 +574,20 @@ hook.Add("Tick", "NGL.Bench.Harness", function()
 			run.lastTick = nil
 			sendPhase(run, "loaded")
 			say(run.ply, string.format("Sampling for %ds...", dur))
+			if run.clientMode then
+				-- First half looking at the fight, second half turned away.
+				run.awayAt = now + dur * 0.5
+				lookAt(run, false)
+			end
 		end
 
 	elseif run.phase == "sampling" then
 		sample(run, run.loaded)
+		if run.awayAt and now >= run.awayAt then
+			run.awayAt = nil
+			lookAt(run, true)
+			sendPhase(run, "away")
+		end
 		if now >= run.phaseEnd then
 			if IsValid(run.reporter) then
 				run.phase = "collecting"
@@ -632,6 +688,24 @@ concommand.Add("ngl_bench_compare", function(ply, _, args)
 	for _, class in ipairs({ "ngl_combine_soldier", "ngl_bench_nextbot", "npc_combine_s" }) do
 		queue(ply, class, count)
 	end
+	kick(ply)
+end)
+
+-- Client FPS: two real NGL factions fighting in front of the player.
+concommand.Add("ngl_bench_client", function(ply, _, args)
+	if not canRun(ply) then return end
+	if not IsValid(ply) then
+		say(ply, "ngl_bench_client measures your game's FPS: run it from a player's console.")
+		return
+	end
+	local count = math.floor(tonumber(args[1] or "") or 200)
+	local class = args[2] or "ngl_combine_soldier"
+	local class2 = args[3] or "ngl_rebel"
+	if count < 2 or count > 2000 then
+		say(ply, "Count must be between 2 and 2000.")
+		return
+	end
+	B.Queue[#B.Queue + 1] = { class = class, class2 = class2, count = count, ply = ply, clientMode = true }
 	kick(ply)
 end)
 

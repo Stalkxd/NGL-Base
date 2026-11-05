@@ -2,7 +2,7 @@
 -- Everything server-side lives under lua/ngl/server, client files under lua/ngl/client.
 
 NGL = NGL or {}
-NGL.Version = "0.23.0"
+NGL.Version = "0.24.0"
 -- Highest step NPCs walk up (the nav grid links steps up to this; their
 -- locomotion takes a little more). A player's is 18.
 NGL.StepHeight = 26
@@ -27,6 +27,8 @@ if SERVER then
 	include("ngl/server/sv_nav_climb.lua")
 	include("ngl/server/sv_nav_edit.lua")
 	include("ngl/server/sv_doors.lua")
+	include("ngl/server/sv_transmit.lua")
+	include("ngl/server/sv_fx.lua")
 	include("ngl/server/sv_tools.lua")
 	include("ngl/server/sv_spawn.lua")
 	include("ngl/server/sv_bench_ai.lua")
