@@ -92,7 +92,7 @@ local function serverFrameMs()
 end
 
 local function newBucket()
-	return { frame = {}, lua = {}, late = {}, spikes = {}, overruns = 0, ticks = 0, gcAlloc = 0, gcCycles = 0 }
+	return { frame = {}, lua = {}, late = {}, spikes = {}, overruns = 0, ticks = 0, gcAlloc = 0, gcCycles = 0, slotted = {}, waiting = {} }
 end
 
 local function stats(list)
@@ -333,6 +333,19 @@ local function sample(run, bucket)
 		bucket.spikes[#bucket.spikes + 1] = { tick = bucket.ticks, lua_ms = luaMs, heap_kb = math.floor(gc), gc_freed_kb = math.floor(dropped) }
 	end
 
+	-- Melee attack slots (sv_core.lua), every 10th tick: NPCs closing in on
+	-- a target with a slot, and ones waiting round it for one.
+	if bucket.ticks % 10 == 0 then
+		local slotted, waiting = 0, 0
+		local t = CurTime()
+		for _, npc in ipairs(NGL.Core.List) do
+			if npc.NGLSlotTarget then slotted = slotted + 1 end
+			if npc.NGLWaiting and t - npc.NGLWaiting < 0.5 then waiting = waiting + 1 end
+		end
+		bucket.slotted[#bucket.slotted + 1] = slotted
+		bucket.waiting[#bucket.waiting + 1] = waiting
+	end
+
 	-- A tick that arrives much later than the tick interval means the server
 	-- could not keep up (or, on a listen server, the client frame was slow).
 	if run.lastTick and (now - run.lastTick) > engine.TickInterval() * 1.5 then
@@ -398,6 +411,8 @@ local function finish(run)
 		lua_spikes = run.loaded.spikes,
 		gc_alloc_kb_per_s = run.loaded.gcAlloc / math.max(0.001, run.duration or cvDuration:GetFloat()),
 		gc_cycles = run.loaded.gcCycles,
+		melee_slotted = stats(run.loaded.slotted),
+		melee_waiting = stats(run.loaded.waiting),
 		overruns = run.loaded.overruns,
 		ticks = run.loaded.ticks,
 		baseline_overruns = run.baseline.overruns,
@@ -485,6 +500,11 @@ local function finish(run)
 			say(p, string.format("  Lua spike: tick %d, %.1f ms%s", sp.tick, sp.lua_ms,
 				sp.gc_freed_kb > 0 and string.format(" (a GC cycle ended on it, %d KB freed)", sp.gc_freed_kb) or ""))
 		end
+	end
+	local ms, mw = result.melee_slotted, result.melee_waiting
+	if ms and mw and (ms.max > 0 or mw.max > 0) then
+		say(p, string.format("  Melee slots:           %.0f NPCs closing in, %.0f waiting round their target (averages; ngl_ai_melee_slots %d)",
+			ms.avg, mw.avg, GetConVar("ngl_ai_melee_slots"):GetInt()))
 	end
 	say(p, string.format("  Late ticks, empty:     %d of %d", run.baseline.overruns, run.baseline.ticks))
 	say(p, string.format("  Late ticks, loaded:    %d of %d", run.loaded.overruns, run.loaded.ticks))

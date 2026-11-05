@@ -2,7 +2,7 @@
 -- Everything server-side lives under lua/ngl/server, client files under lua/ngl/client.
 
 NGL = NGL or {}
-NGL.Version = "0.26.5"
+NGL.Version = "0.27.0"
 -- Highest step NPCs walk up (the nav grid links steps up to this; their
 -- locomotion takes a little more). A player's is 18.
 NGL.StepHeight = 26
@@ -18,6 +18,7 @@ if SERVER then
 	AddCSLuaFile("ngl/client/cl_spawnmenu.lua")
 
 	include("ngl/server/sv_core.lua")
+	include("ngl/server/sv_alloc.lua")
 	include("ngl/server/sv_aimodes.lua")
 	include("ngl/server/sv_squad.lua")
 	include("ngl/server/sv_air.lua")

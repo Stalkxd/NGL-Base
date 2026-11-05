@@ -102,6 +102,9 @@ ENT.Weapon = {
 -- 	HitSound = nil, MissSound = nil, -- sound or list of sounds
 -- }
 ENT.Melee = nil
+-- How many melee NPCs (no gun) may close in on this one at a time (melee
+-- attack slots, sv_core.lua); nil = ngl_ai_melee_slots, more for big NPCs.
+ENT.MeleeSlots = nil
 
 -- Leap attack (headcrabs, fast zombies; sv_leap.lua); nil for none. An NPC
 -- with no Weapon leaps at an enemy it can see between MinDist and MaxDist

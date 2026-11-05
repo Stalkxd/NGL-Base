@@ -33,7 +33,7 @@ local I = NGL.Impostor
 
 local cvOn = CreateClientConVar("ngl_cl_impostor", "1", true, false,
 	"1 = NGL NPCs further than ngl_cl_impostor_range are drawn as flat pictures of themselves, made on the fly from their own model (much cheaper: no bones, no skinning). 0 = always the real model.", 0, 1)
-local cvRange = CreateClientConVar("ngl_cl_impostor_range", "1500", true, false,
+local cvRange = CreateClientConVar("ngl_cl_impostor_range", "3000", true, false,
 	"NGL NPCs further than this are drawn as flat pictures (ngl_cl_impostor). Lower = more FPS, but you see the pictures closer up.", 0, 50000)
 local cvAtlases = CreateClientConVar("ngl_cl_impostor_atlases", "2", true, false,
 	"Textures for NPC pictures, 16 MB of video memory each, 50 animations of one model each. 0 = no pictures.", 0, 8)

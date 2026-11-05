@@ -12,6 +12,7 @@ local EDGE_MOVE = 24      -- walked this far: look for a drop ahead again
 local EDGE_LOOK = 40      -- how far ahead
 local EDGE_DROP = 36      -- deeper than this (and no path jumping it) is a drop
 local edgeTrace = { mask = MASK_NPCSOLID_BRUSHONLY, output = {} }
+local edgeStart, edgeEnd = Vector(), Vector() -- refilled for each edge trace
 
 local BASE_ANIMS = ENT.Anims
 local ANIM_FALLBACK = { IdleAim = "Idle", Walk = "Run", WalkAim = "Walk", RunAim = "Run", CrouchAim = "CrouchIdle", CrouchIdle = "CrouchAim" }
@@ -209,10 +210,14 @@ function ENT:NGLUpdatePose()
 		local ay, ap = 0, 0
 		local enemy = self.NGLEnemy
 		if enemy and self.NGLEnemyVisible and IsValid(enemy) then
+			-- The angle to the target from plain numbers (what
+			-- (target - eye):Angle() gives, without two more objects).
 			local eye = self:GetPos()
-			eye.z = eye.z + (self.NGLCrouch and self.CrouchEyeHeight or self.EyeHeight)
-			local a = (enemy:WorldSpaceCenter() - eye):Angle()
-			ay, ap = AngleDiff(a.y, yaw), AngleDiff(a.p, 0)
+			local c = enemy:WorldSpaceCenter()
+			local dx, dy = c.x - eye.x, c.y - eye.y
+			local dz = c.z - (eye.z + (self.NGLCrouch and self.CrouchEyeHeight or self.EyeHeight))
+			ay = AngleDiff(deg(atan2(dy, dx)), yaw)
+			ap = -deg(atan2(dz, math.sqrt(dx * dx + dy * dy)))
 		end
 		if math.abs(ay - (self.NGLAimYaw or 0)) > 2 or math.abs(ap - (self.NGLAimPitch or 0)) > 2 then
 			self.NGLAimYaw, self.NGLAimPitch = ay, ap
@@ -355,8 +360,14 @@ function ENT:NGLUpdateMoveYaw()
 	if not self.NGLPoses.move then return end
 	local target = 0
 	if self.NGLMoving and self.NGLNear and self.NGLSeen ~= false then
-		local v = self.loco:GetVelocity()
-		local dx, dy = v.x, v.y
+		local dx, dy
+		local vt = self.NGLVelTick
+		if vt and engine.TickCount() - vt <= 1 then
+			dx, dy = self.NGLVelX, self.NGLVelY
+		else
+			local v = self.loco:GetVelocity()
+			dx, dy = v.x, v.y
+		end
 		if dx * dx + dy * dy < 400 then
 			-- Just starting (or pushing against something): the velocity is
 			-- too small to trust, use where we are heading instead.
@@ -501,6 +512,8 @@ function ENT:BehaveUpdate(interval)
 	local now = CurTime()
 	-- Walking into a wall or door frame (Core.SlideAlongWall): slide along it
 	-- for a moment.
+	-- The steered goal goes in a vector of the NPC's own, refilled each
+	-- tick (it's kept only as NGLSteer, which means "where it heads now").
 	local un = self.NGLUnstick
 	if un then
 		if now >= un.untilT then
@@ -509,10 +522,16 @@ function ENT:BehaveUpdate(interval)
 			local dx, dy = goal.x - pos.x, goal.y - pos.y
 			local l = math.sqrt(dx * dx + dy * dy)
 			if l > 1 then
-				goal = Vector(pos.x + dx / l * 24 + un.x * 48, pos.y + dy / l * 24 + un.y * 48, goal.z)
+				local v = self.NGLSteerVec or Vector()
+				self.NGLSteerVec = v
+				v:SetUnpacked(pos.x + dx / l * 24 + un.x * 48, pos.y + dy / l * 24 + un.y * 48, goal.z)
+				goal = v
 			end
 		else
-			goal = Vector(pos.x + un.x * 48, pos.y + un.y * 48, pos.z)
+			local v = self.NGLSteerVec or Vector()
+			self.NGLSteerVec = v
+			v:SetUnpacked(pos.x + un.x * 48, pos.y + un.y * 48, pos.z)
+			goal = v
 		end
 	end
 	-- Inside another NGL NPC (Core.OverlapCheck): steer away from it as well
@@ -526,7 +545,10 @@ function ENT:BehaveUpdate(interval)
 			local dx, dy = goal.x - pos.x, goal.y - pos.y
 			local l = math.sqrt(dx * dx + dy * dy)
 			if l > 1 then
-				goal = Vector(pos.x + dx / l * 32 + sep.x * 40, pos.y + dy / l * 32 + sep.y * 40, goal.z)
+				local v = self.NGLSteerVec or Vector()
+				self.NGLSteerVec = v
+				v:SetUnpacked(pos.x + dx / l * 32 + sep.x * 40, pos.y + dy / l * 32 + sep.y * 40, goal.z)
+				goal = v
 			end
 		end
 	end
@@ -543,13 +565,16 @@ function ENT:BehaveUpdate(interval)
 			if not E or now >= E.t or dx * E.x + dy * E.y < 0.7
 				or (pos.x - E.px) ^ 2 + (pos.y - E.py) ^ 2 > EDGE_MOVE * EDGE_MOVE then
 				local look = math.min(l, EDGE_LOOK)
-				edgeTrace.start = Vector(pos.x + dx * look, pos.y + dy * look, pos.z + 24)
-				edgeTrace.endpos = Vector(pos.x + dx * look, pos.y + dy * look, pos.z - EDGE_DROP)
+				edgeStart:SetUnpacked(pos.x + dx * look, pos.y + dy * look, pos.z + 24)
+				edgeEnd:SetUnpacked(pos.x + dx * look, pos.y + dy * look, pos.z - EDGE_DROP)
+				edgeTrace.start, edgeTrace.endpos = edgeStart, edgeEnd
 				edgeTrace.filter = self
 				local tr = util.TraceLine(edgeTrace)
 				-- Inside something (a wall ahead) isn't a drop: walking into a
 				-- wall is for the stuck check.
-				E = { t = now + 0.25, x = dx, y = dy, px = pos.x, py = pos.y, blocked = not tr.Hit and not tr.StartSolid }
+				E = E or {}
+				E.t, E.x, E.y, E.px, E.py = now + 0.25, dx, dy, pos.x, pos.y
+				E.blocked = not tr.Hit and not tr.StartSolid
 				self.NGLEdge = E
 			end
 			if E.blocked then
@@ -586,7 +611,11 @@ function ENT:BehaveUpdate(interval)
 		-- Pressing on but not getting anywhere (up against you, a wall or a
 		-- crowd): stand, don't walk on the spot.
 		local v = self.loco:GetVelocity()
-		local still = v.x * v.x + v.y * v.y < 15 * 15
+		-- Kept for the legs (NGLUpdateMoveYaw, the same tick or the next):
+		-- one velocity vector a tick instead of two.
+		local vx, vy = v.x, v.y
+		self.NGLVelX, self.NGLVelY, self.NGLVelTick = vx, vy, engine.TickCount()
+		local still = vx * vx + vy * vy < 15 * 15
 		if not still then
 			self.NGLStillSince = nil
 		elseif not self.NGLStillSince then

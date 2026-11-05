@@ -162,6 +162,7 @@ function Core.Remove(npc)
 	Index[npc] = nil
 	gridRemove(npc)
 	if npc.NGLSquad then npc.NGLSquad:Remove(npc) end
+	if npc.NGLSlotTarget then Core.ReleaseSlot(npc) end
 end
 
 function Core.Count() return #List end
@@ -397,8 +398,17 @@ end
 local function shove(e, x, y, speed, now)
 	if e.IsVehicleNPC or e.NGLTraverse or e.NGLDying then return end
 	local sh = e.NGLShove
-	if sh and now < sh.untilT and sh.speed > speed then return end -- a harder shove wins
-	e.NGLShove = { x = x, y = y, speed = speed, untilT = now + SHOVE_TIME }
+	if sh then
+		if now < sh.untilT and sh.speed > speed then return end -- a harder shove wins
+	else
+		-- One table per NPC, kept and refilled: in a crowd every think
+		-- shoves several neighbours, and a new table for each was a large
+		-- part of the garbage.
+		sh = e.NGLShoveT or {}
+		e.NGLShoveT = sh
+		e.NGLShove = sh
+	end
+	sh.x, sh.y, sh.speed, sh.untilT = x, y, speed, now + SHOVE_TIME
 end
 Core.Shove = shove
 
@@ -461,16 +471,33 @@ local OVERLAP_SPEED = 70
 local nudgeTrace = { mask = MASK_NPCSOLID, collisiongroup = COLLISION_GROUP_NPC_SCRIPTED, output = {} }
 local nudgeFilter = {}
 
+-- The hull, read once per NPC (it's set once, in ENT:Initialize). The
+-- engine hands back two new vectors on every call.
+local DEFAULT_MINS, DEFAULT_MAXS = Vector(-16, -16, 0), Vector(16, 16, 72)
 local function boundsOf(npc)
-	local mins, maxs
+	local mins = npc.NGLMins
+	if mins then return mins, npc.NGLMaxs end
+	local maxs
 	if npc.GetCollisionBounds then mins, maxs = npc:GetCollisionBounds() end
-	return mins or Vector(-16, -16, 0), maxs or Vector(16, 16, 72)
+	mins, maxs = mins or DEFAULT_MINS, maxs or DEFAULT_MAXS
+	npc.NGLMins, npc.NGLMaxs = mins, maxs
+	return mins, maxs
 end
+Core.BoundsOf = boundsOf
 
--- Moves npc from pos to `to` if its hull fits all the way (world only).
-local function slideTo(npc, pos, to)
+-- Scratch vectors for trace starts and ends: a trace reads them when it's
+-- called and keeps nothing, so a few shared ones do instead of new ones
+-- for every trace.
+local vA, vB, vC = Vector(), Vector(), Vector()
+
+-- Moves npc from pos to (x, y, z) if its hull fits all the way (world
+-- only). Its new position goes in a vector of its own, refilled each time
+-- (NGLGridPos while it lasts; nothing else keeps it).
+local function slideTo(npc, pos, x, y, z)
 	local t = nudgeTrace
-	t.start, t.endpos = pos + Vector(0, 0, 4), to + Vector(0, 0, 4)
+	vA:SetUnpacked(pos.x, pos.y, pos.z + 4)
+	vB:SetUnpacked(x, y, z + 4)
+	t.start, t.endpos = vA, vB
 	t.mins, t.maxs = boundsOf(npc)
 	local ig = npc.NGLShoveIgnore -- the player it is stepping out of
 	if ig and IsValid(ig) then
@@ -481,22 +508,29 @@ local function slideTo(npc, pos, to)
 	end
 	local tr = util.TraceHull(t)
 	nudgeFilter[1], nudgeFilter[2] = nil, nil
-	if tr.Hit or tr.StartSolid then return false end
+	if tr.Hit or tr.StartSolid then return nil end
+	local to = npc.NGLSlidPos
+	if not to then
+		to = Vector()
+		npc.NGLSlidPos = to
+	end
+	to:SetUnpacked(x, y, z)
 	npc:SetPos(to)
 	npc.NGLGridPos = to
-	return true
+	return to
 end
 
 -- One tick of a shove (BehaveUpdate): moved `interval` seconds' worth, if
 -- there's room. Returns the new position, or nil when it's over or blocked.
+-- The vector returned is refilled by the next shove: read it, don't keep it.
 function Core.ShoveStep(npc, pos, interval, now)
 	local sh = npc.NGLShove
 	if not sh then return nil end
 	if now >= sh.untilT or npc.IsVehicleNPC then npc.NGLShove, npc.NGLShoveIgnore = nil, nil return nil end
 	local step = sh.speed * math.min(interval or 0.015, 0.1)
 	if step < 0.5 then return nil end
-	local to = Vector(pos.x + sh.x * step, pos.y + sh.y * step, pos.z)
-	if slideTo(npc, pos, to) then return to end
+	local to = slideTo(npc, pos, pos.x + sh.x * step, pos.y + sh.y * step, pos.z)
+	if to then return to end
 	npc.NGLShove, npc.NGLShoveIgnore = nil, nil -- against a wall: stays where it is
 	return nil
 end
@@ -550,7 +584,10 @@ local function overlapCheck(npc, now, pos)
 	end
 	if sx ~= 0 or sy ~= 0 then
 		local l = math.sqrt(sx * sx + sy * sy)
-		npc.NGLSep = { x = sx / l, y = sy / l, untilT = now + SEP_TIME }
+		local S = npc.NGLSepT or {}
+		npc.NGLSepT = S
+		S.x, S.y, S.untilT = sx / l, sy / l, now + SEP_TIME
+		npc.NGLSep = S
 	end
 end
 
@@ -575,9 +612,12 @@ function Core.WalkClear(npc, from, to)
 	if len < 1 then return true end
 	if len > SHORTCUT_MAX or abs(to.z - from.z) > len + SHORT_STEP then return false end
 	local t = cutHull
-	t.start, t.endpos = Vector(from.x, from.y, from.z + SHORT_STEP), Vector(to.x, to.y, to.z + SHORT_STEP)
+	vA:SetUnpacked(from.x, from.y, from.z + SHORT_STEP)
+	vB:SetUnpacked(to.x, to.y, to.z + SHORT_STEP)
+	t.start, t.endpos = vA, vB
 	local mins, maxs = boundsOf(npc)
-	t.mins, t.maxs = mins, Vector(maxs.x, maxs.y, math.max(maxs.z - SHORT_STEP, 8))
+	vC:SetUnpacked(maxs.x, maxs.y, math.max(maxs.z - SHORT_STEP, 8))
+	t.mins, t.maxs = mins, vC
 	t.filter = npc
 	local tr = util.TraceHull(t)
 	if tr.Hit or tr.StartSolid then return false end
@@ -590,11 +630,13 @@ function Core.WalkClear(npc, from, to)
 	for k = 1, n - 1 do
 		local f = k / n
 		local x, y = from.x + dx * f, from.y + dy * f
-		d.start = Vector(x, y, pz + SHORT_STEP + seg + 8)
-		d.endpos = Vector(x, y, pz - SHORT_STEP - seg - 8)
+		vA:SetUnpacked(x, y, pz + SHORT_STEP + seg + 8)
+		vB:SetUnpacked(x, y, pz - SHORT_STEP - seg - 8)
+		d.start, d.endpos = vA, vB
 		local g = util.TraceLine(d)
 		if not g.Hit or g.StartSolid then return false end
-		if g.HitNormal and g.HitNormal.z and g.HitNormal.z < 0.7 then return false end
+		local hn = g.HitNormal
+		if hn and hn.z and hn.z < 0.7 then return false end
 		pz = g.HitPos.z
 	end
 	return abs(to.z - pz) <= SHORT_STEP + seg
@@ -645,7 +687,7 @@ function Core.PlaceFree(npc, pos)
 				d.start, d.endpos = to + Vector(0, 0, 24), to - Vector(0, 0, 48)
 				d.filter = npc
 				local g = util.TraceLine(d)
-				if g.Hit and not g.StartSolid and slideTo(npc, pos, Vector(to.x, to.y, g.HitPos.z)) then return end
+				if g.Hit and not g.StartSolid and slideTo(npc, pos, to.x, to.y, g.HitPos.z) then return end
 			end
 		end
 	end
@@ -665,22 +707,29 @@ function Core.SlideAlongWall(npc, now, pos)
 	if l < 1 then return false end
 	dx, dy = dx / l, dy / l
 	local t = wallTrace
-	t.start, t.endpos = pos + Vector(0, 0, 20), pos + Vector(dx * 32, dy * 32, 20)
+	vA:SetUnpacked(pos.x, pos.y, pos.z + 20)
+	vB:SetUnpacked(pos.x + dx * 32, pos.y + dy * 32, pos.z + 20)
+	t.start, t.endpos = vA, vB
 	local mins, maxs = boundsOf(npc)
-	t.mins, t.maxs = mins, Vector(maxs.x, maxs.y, math.max(maxs.z - 20, 8))
+	vC:SetUnpacked(maxs.x, maxs.y, math.max(maxs.z - 20, 8))
+	t.mins, t.maxs = mins, vC
 	t.filter = npc
 	local tr = util.TraceHull(t)
-	if not tr.Hit or tr.StartSolid or not tr.HitNormal then return false end
-	local nx, ny = tr.HitNormal.x, tr.HitNormal.y
+	local hn = tr.HitNormal
+	if not tr.Hit or tr.StartSolid or not hn then return false end
+	local nx, ny = hn.x, hn.y
 	local nl = math.sqrt(nx * nx + ny * ny)
 	if nl < 0.3 then return false end -- the floor or a slope, not a wall
-	local n = { x = nx / nl, y = ny / nl }
-	local tx, ty = -n.y, n.x
+	nx, ny = nx / nl, ny / nl
+	local tx, ty = -ny, nx
 	if tx * dx + ty * dy < 0 then tx, ty = -tx, -ty end
-	local sx, sy = tx * 0.8 + n.x * 0.6, ty * 0.8 + n.y * 0.6
+	local sx, sy = tx * 0.8 + nx * 0.6, ty * 0.8 + ny * 0.6
 	local sl = math.sqrt(sx * sx + sy * sy)
 	if sl < 0.01 then return false end
-	npc.NGLUnstick = { x = sx / sl, y = sy / sl, untilT = now + 0.7 }
+	local U = npc.NGLUnstickT or {}
+	npc.NGLUnstickT = U
+	U.x, U.y, U.untilT = sx / sl, sy / sl, now + 0.7
+	npc.NGLUnstick = U
 	return true
 end
 
@@ -708,6 +757,31 @@ function Core.FindInRadius(pos, radius, filter)
 end
 NGL.FindInRadius = Core.FindInRadius
 
+-- Is any NGL NPC other than `except` (and not a vehicle) within `radius`
+-- of (x, y, z)? The grid, positions from each NPC's last think, and no
+-- table made: for checks that only need a yes or no.
+function Core.AnyNear(x, y, z, radius, except)
+	local rSqr = radius * radius
+	local r = math.ceil(radius / CELL)
+	local cx, cy = floor(x / CELL) + OFFSET, floor(y / CELL) + OFFSET
+	for gx = cx - r, cx + r do
+		local base = gx * 4096
+		for gy = cy - r, cy + r do
+			local c = cells[base + gy]
+			if c then
+				for ent in pairs(c) do
+					if ent ~= except and not ent.NGLDying and not ent.IsVehicleNPC then
+						local p = ent.NGLGridPos or ent:GetPos()
+						local dx, dy, dz = p.x - x, p.y - y, p.z - z
+						if dx * dx + dy * dy + dz * dz <= rSqr then return true end
+					end
+				end
+			end
+		end
+	end
+	return false
+end
+
 -- Eye height, lower while crouched.
 local function eyeHeight(npc)
 	return npc.NGLCrouch and npc.CrouchEyeHeight or npc.EyeHeight
@@ -727,6 +801,7 @@ function Core.SetEnemy(npc, enemy)
 	local now = CurTime()
 	npc.NGLEnemy = enemy
 	npc.NGLFireAccum = 0
+	if npc.NGLSlotTarget and npc.NGLSlotTarget ~= enemy then Core.ReleaseSlot(npc) end
 	npc.NGLPath = nil
 	npc.NGLPathPending = false
 	npc.NGLPathReq = (npc.NGLPathReq or 0) + 1 -- a path to the old enemy is no use
@@ -787,11 +862,28 @@ end
 -- `enemy` may be nil when shooting at an area (`dst`, e.g. a fire_at order).
 -- ENT:NGLMuzzle() (optional) returns where shots start and the attachment
 -- for the muzzle flash, e.g. a vehicle's gun barrel.
+-- Shots are the most frequent thing NPCs do in a firefight, so they reuse
+-- their vectors and bullet table: FireBullets, effects and traces read them
+-- when called and keep nothing.
+local fireDir, fireEnd = Vector(), Vector()
+local bullet = {}
+local function spreadOf(w)
+	local v = w.NGLSpreadVec
+	if not v or w.NGLSpreadOf ~= w.Spread then
+		v = Vector(w.Spread, w.Spread, 0)
+		w.NGLSpreadVec, w.NGLSpreadOf = v, w.Spread
+	end
+	return v
+end
+
 local function fire(npc, enemy, shots, visual, dst)
 	local w = npc.Weapon
 	local src, att
 	if visual and npc.NGLMuzzle then src, att = npc:NGLMuzzle() end
-	src = src or npc:GetPos() + Vector(0, 0, eyeHeight(npc))
+	if not src then
+		src = npc:GetPos()
+		src.z = src.z + eyeHeight(npc)
+	end
 	dst = dst or enemy:WorldSpaceCenter()
 
 	-- Projectile weapon (rockets, grenades...): see sv_projectile.lua.
@@ -806,20 +898,16 @@ local function fire(npc, enemy, shots, visual, dst)
 
 	if visual then
 		npc:NGLGesture("Fire")
-		local dir = dst - src
+		local dir = fireDir
+		dir:Set(dst)
+		dir:Sub(src)
 		dir:Normalize()
 		-- Tracers and impacts thinned out away from players (sv_fx.lua).
-		npc:FireBullets(NGL.FX.Bullet(npc, {
-			Src = src,
-			Dir = dir,
-			Spread = Vector(w.Spread, w.Spread, 0),
-			Num = shots,
-			Damage = w.Damage,
-			Tracer = 1,
-			TracerName = w.Tracer,
-			Attacker = npc,
-			IgnoreEntity = npc,
-		}, src))
+		local b = bullet
+		b.Src, b.Dir, b.Spread, b.Num, b.Damage = src, dir, spreadOf(w), shots, w.Damage
+		b.Tracer, b.TracerName, b.Attacker, b.IgnoreEntity, b.Callback = 1, w.Tracer, npc, npc, nil
+		npc:FireBullets(NGL.FX.Bullet(npc, b, src))
+		b.Attacker, b.IgnoreEntity, b.Callback = nil, nil, nil
 		if w.MuzzleEffect then
 			local ed = EffectData()
 			ed:SetEntity(npc)
@@ -839,11 +927,16 @@ local function fire(npc, enemy, shots, visual, dst)
 	-- zombies), whose hitboxes don't reach their box's centre, so they
 	-- never took damage in battles away from players. Reaching the aim
 	-- point with nothing in the way counts as a hit too.
-	local dir = dst - src
+	local dir = fireDir
+	dir:Set(dst)
+	dir:Sub(src)
 	local len = dir:Length()
 	if len > 1 then dir:Mul(1 / len) end
+	fireEnd:Set(dir)
+	fireEnd:Mul(SHOT_PAST)
+	fireEnd:Add(dst)
 	shotTrace.start = src
-	shotTrace.endpos = dst + dir * SHOT_PAST
+	shotTrace.endpos = fireEnd
 	shotTrace.filter = npc
 	util.TraceLine(shotTrace)
 	local hit = shotResult.Entity
@@ -1184,7 +1277,8 @@ local function lookAround(npc, now, pos)
 	end
 	local L = npc.NGLLook
 	if not L or now >= L.untilT or (L.from and pos:DistToSqr(L.from) > 64 * 64) then
-		L = { untilT = now + Rand(3, 7), from = pos }
+		L = L or {}
+		L.untilT, L.from, L.pos = now + Rand(3, 7), pos, nil
 		if random() < 0.6 then
 			local a = Rand(0, 2 * math.pi)
 			L.pos = Vector(pos.x + math.cos(a) * 200, pos.y + math.sin(a) * 200, pos.z)
@@ -1288,24 +1382,27 @@ local strafeDown = { mask = MASK_NPCSOLID_BRUSHONLY, output = {} }
 local function strafeOk(npc, pos, goal, home, leash)
 	if home and leash and goal:DistToSqr(home) > leash * leash then return false end
 	-- Someone standing there, or halfway (the spatial grid, no traces).
-	local mid = (pos + goal) * 0.5
-	for _, p in ipairs({ goal, mid }) do
-		for _, e in ipairs(Core.FindInRadius(p, STRAFE_ROOM)) do
-			if e ~= npc and not e.IsVehicleNPC then return false end
-		end
+	local AnyNear = Core.AnyNear
+	if AnyNear(goal.x, goal.y, goal.z, STRAFE_ROOM, npc)
+		or AnyNear((pos.x + goal.x) * 0.5, (pos.y + goal.y) * 0.5, (pos.z + goal.z) * 0.5, STRAFE_ROOM, npc) then
+		return false
 	end
 	-- Room to walk there (a hull trace above step height) and ground at the
 	-- end (no drop): two traces, every few seconds per fighting NPC.
 	local t = strafeHull
-	t.start, t.endpos = Vector(pos.x, pos.y, pos.z + 18), Vector(goal.x, goal.y, pos.z + 18)
-	if npc.GetCollisionBounds then t.mins, t.maxs = npc:GetCollisionBounds() end
-	t.mins, t.maxs = t.mins or Vector(-16, -16, 0), t.maxs or Vector(16, 16, 72)
-	t.maxs = Vector(t.maxs.x, t.maxs.y, math.max(t.maxs.z - 18, 8))
+	vA:SetUnpacked(pos.x, pos.y, pos.z + 18)
+	vB:SetUnpacked(goal.x, goal.y, pos.z + 18)
+	t.start, t.endpos = vA, vB
+	local mins, maxs = boundsOf(npc)
+	vC:SetUnpacked(maxs.x, maxs.y, math.max(maxs.z - 18, 8))
+	t.mins, t.maxs = mins, vC
 	t.filter = npc
 	local tr = util.TraceHull(t)
 	if tr.Hit or tr.StartSolid then return false end
 	local d = strafeDown
-	d.start, d.endpos = Vector(goal.x, goal.y, pos.z + 24), Vector(goal.x, goal.y, pos.z - 48)
+	vA:SetUnpacked(goal.x, goal.y, pos.z + 24)
+	vB:SetUnpacked(goal.x, goal.y, pos.z - 48)
+	d.start, d.endpos = vA, vB
 	d.filter = npc
 	tr = util.TraceLine(d)
 	return tr.Hit and not tr.StartSolid
@@ -1732,8 +1829,9 @@ local function railStep(npc, pos, dt)
 	-- A straight line between two path points can cut into a hill: the
 	-- ground under the new spot, from a little above.
 	local t = railDown
-	t.start = Vector(x, y, z + 48)
-	t.endpos = Vector(x, y, z - 96)
+	vA:SetUnpacked(x, y, z + 48)
+	vB:SetUnpacked(x, y, z - 96)
+	t.start, t.endpos = vA, vB
 	t.filter = npc
 	local tr = util.TraceLine(t)
 	if tr.Hit and not tr.StartSolid then z = tr.HitPos.z end
@@ -1748,6 +1846,178 @@ local function railStep(npc, pos, dt)
 	npc.NGLGridPos = to
 	if not npc.NGLPath then npc.NGLRail = nil end
 	return to
+end
+
+----------------------------------------------------------------------------
+-- Melee attack slots
+----------------------------------------------------------------------------
+
+-- Like HL2's squad slots: only a few melee NPCs at a time close in on one
+-- target (ngl_ai_melee_slots, more round a big one). The others wait in a
+-- loose ring a little further out, facing it, and take a free slot as soon
+-- as one comes up, or go for another target nearby that has room. Without
+-- this a horde of 100 zombies on one rebel ended up as one heap: every one
+-- of them pushing and pushed, swinging and making noise, and a heap looks
+-- wrong. A slot lasts while it's renewed (each think of its holder) and is
+-- dropped when the holder dies, changes target or moves off.
+local cvSlots = CreateConVar("ngl_ai_melee_slots", "5", FCVAR_ARCHIVE,
+	"How many NGL melee NPCs (zombies, headcrabs) close in on one target at a time; the rest wait round it a little further out. More round big targets. 0 = no limit.", 0, 64)
+local SLOT_HOLD = 2       -- s a slot lasts without being renewed
+local SLOT_ASK = 150      -- asks for a slot this far outside the waiting ring
+local WAIT_RING = 170     -- waiting distance from the target's edge, first band
+local WAIT_BAND = 60      -- each further band (three bands)
+local WAIT_OK_SQR = 40 * 40
+local OTHER_EVERY = 1     -- s between looks for another target with room
+local OTHER_RANGE = 700
+local KEEP_OTHER = 4      -- s it stays on a target it picked for its room
+
+local function slotMax(target)
+	local n = target.MeleeSlots
+	if n then return n end
+	n = cvSlots:GetInt()
+	if n <= 0 then return 0 end
+	-- Bigger than a man (a vehicle, an antlion guard): room for more.
+	local r = target:IsPlayer() and PLAYER_R or radiusOf(target)
+	return math.Round(n * math.Clamp(r / 16, 1, 4))
+end
+
+-- Holders of `target`'s slots, the stale ones cleared out on the way.
+local function slotCount(target, now)
+	local S = target.NGLMeleeSlots
+	if not S then return 0, nil end
+	local n = 0
+	for e, untilT in pairs(S) do
+		if untilT < now or not IsValid(e) or e.NGLDying or e.NGLEnemy ~= target then
+			S[e] = nil
+		else
+			n = n + 1
+		end
+	end
+	return n, S
+end
+
+local function releaseSlot(npc)
+	local t = npc.NGLSlotTarget
+	if not t then return end
+	npc.NGLSlotTarget = nil
+	local S = IsValid(t) and t.NGLMeleeSlots
+	if S then S[npc] = nil end
+end
+Core.ReleaseSlot = releaseSlot
+
+-- May `npc` close in on `target` now? Takes (or renews) a slot when so.
+function Core.MeleeSlot(npc, target, now)
+	local cap = slotMax(target)
+	if cap <= 0 then return true end
+	local S = target.NGLMeleeSlots
+	if S and S[npc] and npc.NGLSlotTarget == target then
+		S[npc] = now + SLOT_HOLD
+		return true
+	end
+	local n
+	n, S = slotCount(target, now)
+	if n >= cap then return false end
+	if npc.NGLSlotTarget ~= target then releaseSlot(npc) end
+	if not S then
+		S = {}
+		target.NGLMeleeSlots = S
+	end
+	S[npc] = now + SLOT_HOLD
+	npc.NGLSlotTarget = target
+	return true
+end
+
+function Core.SlotFree(target, now)
+	local cap = slotMax(target)
+	return cap <= 0 or slotCount(target, now) < cap
+end
+
+-- Another hostile within OTHER_RANGE with a free slot, nearest first, and
+-- in sight (one trace, for the nearest only). Players, then the grid.
+local function otherTarget(npc, pos, now, current)
+	local best, bestD
+	local rSqr = OTHER_RANGE * OTHER_RANGE
+	for i = 1, #players do
+		local ply = players[i]
+		if ply ~= current and Core.IsHostile(npc, ply) then
+			local d = pos:DistToSqr(plyPos[i])
+			if d < rSqr and (not bestD or d < bestD) and Core.SlotFree(ply, now) then best, bestD = ply, d end
+		end
+	end
+	local r = math.ceil(OTHER_RANGE / CELL)
+	local cx, cy = floor(pos.x / CELL) + OFFSET, floor(pos.y / CELL) + OFFSET
+	local faction = npc.Faction
+	for gx = cx - r, cx + r do
+		local base = gx * 4096
+		for gy = cy - r, cy + r do
+			local c = cells[base + gy]
+			if c then
+				for e in pairs(c) do
+					local p = e.NGLGridPos
+					if p and e ~= current and e ~= npc and e.Faction ~= faction and Core.IsHostile(npc, e) then
+						local d = pos:DistToSqr(p)
+						if d < rSqr and (not bestD or d < bestD) and Core.SlotFree(e, now) then best, bestD = e, d end
+					end
+				end
+			end
+		end
+	end
+	if not best then return nil end
+	eyeVec:SetUnpacked(pos.x, pos.y, pos.z + npc.EyeHeight)
+	if not canSee(npc, eyeVec, best) then return nil end
+	return best
+end
+
+-- No slot: wait on the ring round the target, on our side of it, facing
+-- it. Each NPC has its band (from its entity number), so waiters stand in
+-- three loose rows rather than one tight circle, and moves a little now
+-- and then. Straight there: the target is in sight and the spot near it.
+local function meleeWait(npc, now, pos, enemy, tPos)
+	if now >= (npc.NGLNextOther or 0) then
+		npc.NGLNextOther = now + OTHER_EVERY * Rand(0.8, 1.2)
+		local other = otherTarget(npc, pos, now, enemy)
+		if other then
+			Core.SetEnemy(npc, other)
+			npc.NGLKeepEnemyUntil = now + KEEP_OTHER
+			return
+		end
+	end
+	local W = npc.NGLWait
+	if not W or W.target ~= enemy or now >= W.untilT or (tPos.x - W.ax) ^ 2 + (tPos.y - W.ay) ^ 2 > 80 * 80 then
+		W = W or {}
+		local gap = enemy:IsPlayer() and PLAYER_R or radiusOf(enemy)
+		local r = gap + radiusOf(npc) + WAIT_RING + (idOf(npc) % 3) * WAIT_BAND
+		local a = math.atan2(pos.y - tPos.y, pos.x - tPos.x) + Rand(-0.3, 0.3)
+		W.target, W.untilT, W.ax, W.ay = enemy, now + Rand(2, 4), tPos.x, tPos.y
+		W.x, W.y, W.z = tPos.x + math.cos(a) * r, tPos.y + math.sin(a) * r, pos.z
+		npc.NGLWait = W
+	end
+	npc.NGLWaiting = now
+	npc.NGLFace = tPos
+	npc.NGLCrouch = false
+	npc.NGLPath = nil
+	local dx, dy = W.x - pos.x, W.y - pos.y
+	local d2 = dx * dx + dy * dy
+	if d2 < WAIT_OK_SQR then
+		npc.NGLGoal = nil
+		return
+	end
+	local v = npc.NGLWaitVec
+	if not v then
+		v = Vector()
+		npc.NGLWaitVec = v
+	end
+	v:SetUnpacked(W.x, W.y, W.z)
+	npc:NGLSetMoveMode(d2 > 150 * 150 and "run" or "walk")
+	npc.NGLGoal = v
+	npc.NGLDirect = true
+end
+
+-- Pushing, standing inside each other, and shortcuts on the path.
+local function crowdCheck(npc, now, pos)
+	pushCheck(npc, now, pos)
+	overlapCheck(npc, now, pos)
+	if npc.NGLPath then Core.Shortcut(npc, now, pos) end
 end
 
 local function think(npc, now, dt, nearestPlayerSqr, seen, pos)
@@ -1781,9 +2051,12 @@ local function think(npc, now, dt, nearestPlayerSqr, seen, pos)
 	end
 	if not npc.NGLTraverse then
 		if not npc.NGLRail then
-			pushCheck(npc, now, pos)
-			overlapCheck(npc, now, pos)
-			if npc.NGLPath then Core.Shortcut(npc, now, pos) end
+			local AL = NGL.Alloc
+			if AL and AL.On() then
+				AL.Measure("think: crowd checks and shortcuts", crowdCheck, npc, now, pos)
+			else
+				crowdCheck(npc, now, pos)
+			end
 		end
 		-- A closed door in the way: open it or kick it in (sv_doors.lua).
 		local D = NGL.Doors
@@ -1820,8 +2093,17 @@ local function think(npc, now, dt, nearestPlayerSqr, seen, pos)
 
 	if not enemyOk or now >= npc.NGLNextRetarget then
 		npc.NGLNextRetarget = now + Rand(0.8, 1.2)
-		local found = findEnemy(npc, pos)
-		if found then
+		local AL = NGL.Alloc
+		local found
+		if AL and AL.On() then
+			found = AL.Measure("think: enemy search", findEnemy, npc, pos)
+		else
+			found = findEnemy(npc, pos)
+		end
+		if found and found ~= enemy and enemyOk and now < (npc.NGLKeepEnemyUntil or 0) then
+			-- On a target it went for because it had room (melee slots):
+			-- stays on it a while, rather than back to the crowded one.
+		elseif found then
 			Core.SetEnemy(npc, found)
 			npc.NGLLastSeenPos, npc.NGLLastSeenT = found:GetPos(), now
 		elseif not enemyOk or now - (npc.NGLLastSeenT or 0) > npc.EnemyMemory then
@@ -1890,6 +2172,17 @@ local function think(npc, now, dt, nearestPlayerSqr, seen, pos)
 		-- No gun: the AI mode first (the ambusher hides and waits), then a
 		-- leap when it has one (ENT.LeapAttack, sv_leap.lua).
 		if fight and fight(npc, enemy, dist, true, now, dt) == true then return end
+		-- Close to it: only with a slot (leaping at it is closing in too).
+		local gap = radiusOf(npc) + (enemy:IsPlayer() and PLAYER_R or radiusOf(enemy))
+		local ask = gap + WAIT_RING + 2 * WAIT_BAND + SLOT_ASK
+		if distSqr < ask * ask then
+			if not Core.MeleeSlot(npc, enemy, now) then
+				meleeWait(npc, now, pos, enemy, tPos)
+				return
+			end
+		elseif npc.NGLSlotTarget then
+			releaseSlot(npc)
+		end
 		local lp = npc.LeapAttack
 		if lp and NGL.Leap and NGL.Leap.Can(npc, enemy, dist, now, lp) then
 			if npc:OnAttack(enemy, "leap") ~= true then NGL.Leap.Start(npc, enemy, lp, now) end
@@ -1907,11 +2200,18 @@ local function think(npc, now, dt, nearestPlayerSqr, seen, pos)
 			-- (between thinks the NPC keeps walking to where it aimed).
 			local g = npc.NGLGoal
 			if npc.NGLDirect and g == tPos then
-				local gap = radiusOf(npc) + (enemy:IsPlayer() and PLAYER_R or radiusOf(enemy)) + 4
+				local stop = gap + 4
 				local ddx, ddy = tPos.x - pos.x, tPos.y - pos.y
 				local dl = math.sqrt(ddx * ddx + ddy * ddy)
-				if dl > gap then
-					npc.NGLGoal = Vector(tPos.x - ddx / dl * gap, tPos.y - ddy / dl * gap, tPos.z)
+				if dl > stop then
+					-- A vector of its own, refilled each think.
+					local v = npc.NGLCloseVec
+					if not v then
+						v = Vector()
+						npc.NGLCloseVec = v
+					end
+					v:SetUnpacked(tPos.x - ddx / dl * stop, tPos.y - ddy / dl * stop, tPos.z)
+					npc.NGLGoal = v
 				else
 					npc.NGLGoal = nil
 				end
@@ -2030,7 +2330,12 @@ hook.Add("Tick", "NGL.Core.Scheduler", function()
 				npc.NGLLastThink = now
 				npc.NGLNextThink = now + interval * Rand(0.9, 1.1)
 
-				think(npc, now, dt, best, seen, pos)
+				local AL = NGL.Alloc
+				if AL and AL.On() then
+					AL.Measure("think: decisions and fighting (the rest)", think, npc, now, dt, best, seen, pos)
+				else
+					think(npc, now, dt, best, seen, pos)
+				end
 				if npc.NGLDying then -- nothing
 				elseif npc.NGLDetail then npc:NGLUpdatePose()
 				elseif npc.NGLPosed then npc:NGLResetPose() end
