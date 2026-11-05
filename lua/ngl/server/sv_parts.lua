@@ -17,10 +17,9 @@
 --   sounds   every sound from these NPCs blocked on the server
 --   send     these NPCs not sent to any player (what clients spend on them)
 --
--- Frames are timed on the server, from one Think to the next: in
--- singleplayer (or on a listen server) that is the whole game frame, your
--- FPS, client included. On a dedicated server it's the tick length until
--- the server can't keep up, so use singleplayer for this.
+-- Frames are timed on your client (frame time and the server frame time
+-- net_graph shows), late ticks on the server. Singleplayer or a local
+-- dedicated server you're connected to both work.
 
 NGL.Off = NGL.Off or {}
 local Off = NGL.Off
@@ -66,16 +65,6 @@ local function apply(part)
 	if part then Off[part] = true end
 end
 
-local function stats(list)
-	local n = #list
-	if n == 0 then return nil end
-	local s = 0
-	local sorted = {}
-	for i = 1, n do s = s + list[i]; sorted[i] = list[i] end
-	table.sort(sorted)
-	return { avg = s / n, p95 = sorted[math.max(1, math.floor(n * 0.95))], n = n }
-end
-
 local function count()
 	local n = 0
 	for _, npc in ipairs(NGL.Core.List) do
@@ -84,44 +73,82 @@ local function count()
 	return n
 end
 
+-- Frames are timed on the client of the player who ran it (the server's
+-- Think in singleplayer runs once a tick, catching up several ticks in one
+-- frame, so it only ever saw the tick length): its frame time and the
+-- server frame time net_graph shows, for each window. The server counts
+-- late ticks per window itself (the only honest number on a dedicated
+-- server).
+util.AddNetworkString("ngl_parts")
+local MSG_START, MSG_END, MSG_DONE = 1, 2, 3
+
+local function send(p, kind, i)
+	if not IsValid(p.ply) then return end
+	net.Start("ngl_parts")
+	net.WriteUInt(kind, 2)
+	net.WriteUInt(i or 0, 8)
+	net.Send(p.ply)
+end
+
 local function report(p)
-	local base = {}
-	for _, w in ipairs(p.windows) do
-		if w.part == nil then
-			for _, v in ipairs(w.frames) do base[#base + 1] = v end
-		end
-	end
-	local b = stats(base)
+	local c = p.client or {}
 	say(p.ply, "------------------------------------------------------------")
 	say(p.ply, string.format("Parts of the fight, %d NGL NPCs%s, %s, %.0f s each:",
 		#NGL.Core.List, p.class and (" (switched off for " .. p.class .. " only)") or "",
-		game.SinglePlayer() and "singleplayer" or (game.IsDedicated() and "dedicated: frames are the tick length, use singleplayer" or "listen server"), p.secs))
-	if not b then say(p.ply, "No frames timed.") return end
-	say(p.ply, string.format("  everything on:  %6.2f ms a frame (%.0f FPS), p95 %.2f", b.avg, 1000 / b.avg, b.p95))
-	for _, w in ipairs(p.windows) do
-		local s = stats(w.frames)
-		if w.part and s then
-			say(p.ply, string.format("  %-8s off:   %6.2f ms (%.0f FPS)  saves %6.2f ms a frame  [%d NPCs]",
-				w.part, s.avg, 1000 / s.avg, b.avg - s.avg, w.n or 0))
+		game.SinglePlayer() and "singleplayer" or (game.IsDedicated() and "dedicated" or "listen server"), p.secs))
+	if not p.client then say(p.ply, "  (no client report: only late ticks below)") end
+	-- Everything on: both "on" windows together.
+	local fs, ss, fn, lt, tk = 0, 0, 0, 0, 0
+	for i, w in ipairs(p.windows) do
+		local r = c[i]
+		if not w.part then
+			if r and r.n > 0 then fs, ss, fn = fs + r.frame * r.n, ss + r.sv * r.n, fn + r.n end
+			lt, tk = lt + w.late, tk + w.ticks
 		end
 	end
-	local first, last = p.windows[1], p.windows[#p.windows]
-	local s1, s2 = stats(first.frames), stats(last.frames)
-	if s1 and s2 then
-		say(p.ply, string.format("  (everything on at the start %.2f ms, at the end %.2f ms: the further apart, the more the fight changed while testing)", s1.avg, s2.avg))
+	local bf, bs = fn > 0 and fs / fn or nil, fn > 0 and ss / fn or nil
+	local function line(label, r, w, saves)
+		local late = w.ticks > 0 and w.late / w.ticks * 100 or 0
+		if r and r.n > 0 then
+			say(p.ply, string.format("  %-14s frame %6.2f ms (%3.0f FPS)  server %6.2f ms  late ticks %4.1f%%%s",
+				label, r.frame, 1000 / r.frame, r.sv, late,
+				saves and bf and string.format("  saves %6.2f ms frame, %6.2f ms server", bf - r.frame, bs - r.sv) or ""))
+		else
+			say(p.ply, string.format("  %-14s late ticks %4.1f%%", label, late))
+		end
 	end
-	say(p.ply, "  A part that saves more than the start/end difference is worth looking at.")
+	for i, w in ipairs(p.windows) do
+		line(w.part and (w.part .. " off:") or (i == 1 and "on, start:" or "on, end:"), c[i], w, w.part ~= nil)
+	end
+	say(p.ply, "  The start and end lines show how much the fight itself changed while testing; a part that saves more than that is worth looking at.")
+	say(p.ply, "  'server' is the server's own frame time (net_graph's sv): in singleplayer it's most of the frame.")
 end
+
+net.Receive("ngl_parts", function(_, ply)
+	local p = P
+	if not p or not p.waiting or ply ~= p.ply then return end
+	local n = net.ReadUInt(8)
+	local c = {}
+	for i = 1, n do
+		c[i] = { frame = net.ReadFloat(), sv = net.ReadFloat(), n = net.ReadUInt(16) }
+	end
+	p.client = c
+	p.reportAt = 0
+end)
 
 local function stop(aborted)
 	local p = P
 	if not p then return end
 	P = nil
 	hook.Remove("Think", "NGLPartsTest")
+	hook.Remove("Tick", "NGLPartsTest")
 	if Off.send then setSend(true) end
 	apply(nil)
 	Off.class = nil
-	if aborted then say(p.ply, "ngl_debug_parts stopped.") end
+	if aborted then
+		send(p, MSG_END)
+		say(p.ply, "ngl_debug_parts stopped.")
+	end
 	return p
 end
 
@@ -145,41 +172,59 @@ concommand.Add("ngl_debug_parts", function(ply, _, args)
 		#PARTS, secs, math.ceil(#plan * (secs + SETTLE))))
 
 	local function nextWindow(now)
+		if p.cur and p.timing then send(p, MSG_END) end
+		p.timing = false
 		if Off.send then setSend(true) end
 		p.idx = p.idx + 1
 		local part = plan[p.idx]
 		if part == nil then
-			stop(false)
-			report(p)
+			-- All done: switch everything back on, then wait for the client.
+			if Off.send then setSend(true) end
+			apply(nil)
+			p.waiting = true
+			p.reportAt = now + 3
+			send(p, MSG_DONE, #p.windows)
 			return
 		end
 		part = part or nil
 		apply(part)
 		if part == "send" then setSend(false) end
-		local w = { part = part, frames = {} }
+		local w = { part = part, late = 0, ticks = 0 }
 		p.windows[#p.windows + 1] = w
 		p.cur = w
 		p.from = now + SETTLE
 		p.to = p.from + secs
-		p.last = nil
 	end
 	nextWindow(SysTime())
 
 	hook.Add("Think", "NGLPartsTest", function()
 		if P ~= p then return end
 		local now = SysTime()
+		if p.waiting then
+			if now >= p.reportAt then
+				stop(false)
+				report(p)
+			end
+			return
+		end
 		if now >= p.to then
 			p.cur.n = count()
 			nextWindow(now)
-			return
+		elseif not p.timing and now >= p.from then
+			p.timing = true
+			p.lastTick = nil
+			send(p, MSG_START, #p.windows)
 		end
-		if now >= p.from then
-			-- Unfocused, the game sleeps between frames: those don't count.
-			local hasFocus = system and system.HasFocus
-			if p.last and (not hasFocus or hasFocus()) then
-				p.cur.frames[#p.cur.frames + 1] = (now - p.last) * 1000
-			end
-			p.last = now
+	end)
+	local interval = engine.TickInterval()
+	hook.Add("Tick", "NGLPartsTest", function()
+		if P ~= p or not p.timing then return end
+		local now = SysTime()
+		local w = p.cur
+		if p.lastTick then
+			w.ticks = w.ticks + 1
+			if now - p.lastTick > interval * 1.5 then w.late = w.late + 1 end
 		end
+		p.lastTick = now
 	end)
 end)
