@@ -57,7 +57,8 @@ ENT.ClimbRate = 250             -- units per second up or down a climb
 --                                 (ngl_nav_generate puts climb links at walls too high to jump,
 --                                 up to ngl_nav_max_climb: only there, not on open ledges)
 ENT.OpenDoors = true            -- opens closed doors in its way
-ENT.DoorBreach = false          -- kicks doors in instead, locked ones too (Combine, rebels); see ngl_door_breach
+ENT.DoorBreach = false          -- kicks doors in instead, locked ones too (Combine, rebels); "always": beats them down, fight or not (zombies); see ngl_door_breach
+ENT.DoorHits = 1                -- blows a door takes before it gives way
 ENT.Squad = nil                 -- set to lead a squad on its own, see sv_squad.lua:
 --                                 { Max = 10, Recruit = { "ngl_combine_soldier" }, RecruitRadius = 1500,
 --                                   Scouts = 3, ScoutRadius = 400, ScoutTime = 20, LostDelay = 2 }
