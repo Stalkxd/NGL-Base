@@ -893,6 +893,7 @@ shotTrace.output = shotResult
 
 -- Deals damage from an NGL NPC (melee hits, custom attacks).
 function Core.Damage(attacker, target, amount, dmgType, pos, force)
+	if NGL.Off.damage and NGL.IsOff(attacker, "damage") then return end -- ngl_debug_parts
 	local dmg = DamageInfo()
 	dmg:SetDamage(amount)
 	dmg:SetDamageType(dmgType or DMG_GENERIC)
@@ -2206,7 +2207,8 @@ local function think(npc, now, dt, nearestPlayerSqr, seen, pos)
 	-- Melee: in reach -> swing (also for NPCs that have a gun).
 	local m = npc.Melee
 	local reach = m and (m.Range or 70)
-	if m and distSqr < reach * reach and abs(tPos.z - pos.z) < 72 and now >= (npc.NGLNextMelee or 0) then
+	if m and distSqr < reach * reach and abs(tPos.z - pos.z) < 72 and now >= (npc.NGLNextMelee or 0)
+		and not (NGL.Off.melee and NGL.IsOff(npc, "melee")) then
 		if npc:OnAttack(enemy, "melee") ~= true then Core.StartMelee(npc, enemy, now) end
 		return
 	end
@@ -2228,7 +2230,7 @@ local function think(npc, now, dt, nearestPlayerSqr, seen, pos)
 			releaseSlot(npc)
 		end
 		local lp = npc.LeapAttack
-		if lp and NGL.Leap and NGL.Leap.Can(npc, enemy, dist, now, lp) then
+		if lp and NGL.Leap and not (NGL.Off.leap and NGL.IsOff(npc, "leap")) and NGL.Leap.Can(npc, enemy, dist, now, lp) then
 			if npc:OnAttack(enemy, "leap") ~= true then NGL.Leap.Start(npc, enemy, lp, now) end
 			return
 		end
@@ -2375,7 +2377,9 @@ hook.Add("Tick", "NGL.Core.Scheduler", function()
 				npc.NGLNextThink = now + interval * Rand(0.9, 1.1)
 
 				local AL = NGL.Alloc
-				if AL and AL.On() then
+				if NGL.Off.think and NGL.IsOff(npc, "think") then
+					-- ngl_debug_parts: no thinking
+				elseif AL and AL.On() then
 					AL.Measure("think: decisions and fighting (the rest)", think, npc, now, dt, best, seen, pos)
 				else
 					think(npc, now, dt, best, seen, pos)

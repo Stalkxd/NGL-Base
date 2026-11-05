@@ -136,6 +136,7 @@ local debugUntil, debugCounts = 0, nil
 hook.Add("EntityEmitSound", "NGL.SoundBudget", function(data)
 	local e = data.Entity
 	if not (e and e.IsNGLNPC and IsValid(e)) then return end
+	if NGL.Off.sounds and NGL.IsOff(e, "sounds") then return false end -- ngl_debug_parts
 	local own = NGL.OwnSound == true
 	Count.sounds = Count.sounds + 1
 	if not own then Count.animSounds = (Count.animSounds or 0) + 1 end

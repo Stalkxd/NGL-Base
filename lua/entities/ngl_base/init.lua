@@ -328,6 +328,7 @@ end
 -- clients less often. One-off animations (swings, throws, leaps, climbs)
 -- always advance every tick, so their events and ends come on time.
 function ENT:BodyUpdate()
+	if NGL.Off.anim and NGL.IsOff(self, "anim") then return end -- ngl_debug_parts
 	local t0 = SysTime()
 	self:NGLUpdateMoveYaw()
 	if self.NGLMoving and self.NGLDetail and not self.NGLStandStill then
@@ -410,6 +411,7 @@ function ENT:RunBehaviour() end
 
 function ENT:BehaveUpdate(interval)
 	if self.NGLDying then return end
+	if NGL.Off.move and NGL.IsOff(self, "move") then return end -- ngl_debug_parts
 	-- Moved along its path at each think instead (sv_core.lua, railStep).
 	if self.NGLRail then return end
 	local t0 = SysTime()
