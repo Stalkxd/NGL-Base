@@ -31,7 +31,10 @@ function NGL.IsOff(ent, key)
 	return c == nil or ent:GetClass() == c
 end
 
-local PARTS = { "melee", "leap", "damage", "anim", "move", "think", "sounds", "send" }
+local PARTS = { "melee", "leap", "damage", "anim", "move", "think", "sounds", "send", "draw", "lowlod" }
+-- Switched on the client of whoever ran it, not here:
+--   draw     these NPCs not drawn (still sent and animated on the client)
+--   lowlod   drawn with the model's lowest detail and no shadow
 local SETTLE = 1.5 -- s after each switch before timing (the fight adjusts)
 
 local P -- running test, or nil
@@ -87,6 +90,11 @@ local function send(p, kind, i)
 	net.Start("ngl_parts")
 	net.WriteUInt(kind, 2)
 	net.WriteUInt(i or 0, 8)
+	if kind == MSG_START then
+		local w = p.windows[i]
+		net.WriteString(w and w.part or "")
+		net.WriteString(p.class or "")
+	end
 	net.Send(p.ply)
 end
 
