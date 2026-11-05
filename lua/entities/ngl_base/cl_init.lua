@@ -7,9 +7,9 @@ local cvWeaponRange = CreateClientConVar("ngl_cl_weapon_range", "2500", true, fa
 -- beyond this range (ngl_net_cull, sv_transmit.lua).
 local cvDrawRange = CreateClientConVar("ngl_cl_draw_range", "6000", true, true,
 	"NGL NPCs further than this aren't drawn at all (vehicles twice as far). In map fog they also stop where the fog is solid. The server also stops sending you NPCs a bit beyond it. 0 = always drawn.", 0, 50000)
-local cvLodRange = CreateClientConVar("ngl_cl_lod_range", "2500", true, false,
+local cvLodRange = CreateClientConVar("ngl_cl_lod_range", "1200", true, false,
 	"NGL NPCs further than this are drawn with their model's lowest level of detail (fewest polygons). 0 = the engine picks as usual.", 0, 50000)
-local cvShadowRange = CreateClientConVar("ngl_cl_shadow_range", "2000", true, false,
+local cvShadowRange = CreateClientConVar("ngl_cl_shadow_range", "1500", true, false,
 	"NGL NPCs further than this cast no shadow (each shadow is drawn again into a texture every frame). 0 = always.", 0, 50000)
 local cvFlexRange = CreateClientConVar("ngl_cl_flex_range", "1000", true, false,
 	"NGL NPCs further than this get no facial animation (flexes: faces, mouths, eyes of rebels and citizens). 0 = always.", 0, 50000)
@@ -21,6 +21,34 @@ local cvEventRange = CreateClientConVar("ngl_cl_event_range", "1500", true, fals
 	"NGL NPCs further than this skip their animations' client events (footstep sounds, dust, shells): each one is a sound or an effect made on this client. 0 = always.", 0, 50000)
 local cvReflectRange = CreateClientConVar("ngl_cl_reflection_range", "1500", true, false,
 	"NGL NPCs further than this from you aren't drawn in water reflections and other extra views (cameras, mirrors), which draw everything again. 0 = always.", 0, 50000)
+
+-- Saved settings from older versions. Client settings are kept in the
+-- player's config, so a player who never touched one keeps its old default
+-- after we change it. Once per change of defaults: a setting still at the
+-- old default moves to the new one; one the player set themselves stays.
+--   2: 0.26.0, weapon range 4000 -> 2500
+--   3: 0.26.5, now that far pictures work: pictures from 3000 -> 1500,
+--      lowest model detail 2500 -> 1200, shadows 2000 -> 1500
+local DEFAULTS_VERSION = 3
+local MOVED = {
+	{ 2, "ngl_cl_weapon_range", 4000, 2500 },
+	{ 3, "ngl_cl_impostor_range", 3000, 1500 },
+	{ 3, "ngl_cl_lod_range", 2500, 1200 },
+	{ 3, "ngl_cl_shadow_range", 2000, 1500 },
+}
+local cvDefaults = CreateClientConVar("ngl_cl_defaults_version", "0", true, false,
+	"Which NGL client default settings this config has been moved to (set by NGL itself).")
+local function moveDefaults()
+	local have = cvDefaults:GetInt()
+	if have >= DEFAULTS_VERSION then return end
+	for _, m in ipairs(MOVED) do
+		local cv = GetConVar(m[2])
+		if m[1] > have and cv and cv:GetFloat() == m[3] then RunConsoleCommand(m[2], tostring(m[4])) end
+	end
+	RunConsoleCommand("ngl_cl_defaults_version", tostring(DEFAULTS_VERSION))
+end
+-- After every client file has made its settings (cl_impostor.lua's too).
+hook.Add("InitPostEntity", "NGL.MoveDefaults", moveDefaults)
 
 -- Where the main view is drawn from this frame. Water reflections, cameras
 -- and mirrors draw the world again from somewhere else in the same frame;

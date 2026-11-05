@@ -406,7 +406,21 @@ local function finish(run)
 		server_fx = run.fx,
 	}
 
-	if base and loaded then
+	-- On srcds the frame time the engine reports is wall time per frame,
+	-- idle sleep included: it sits at the tick interval until the server
+	-- overloads, so "added by NPCs" and "share of the tick" would be made up.
+	-- What we can measure there: our Lua's share of the tick, and late ticks.
+	if game.IsDedicated() then
+		result.server_frame_measured = false
+		result.frame_ms, result.baseline_frame_ms = nil, nil
+		if lua then result.lua_tick_pct = lua.avg / tickMs * 100 end
+		result.late_tick_pct = run.loaded.ticks > 0 and run.loaded.overruns / run.loaded.ticks * 100 or 0
+		if client then
+			for _, ph in pairs(client) do
+				if type(ph) == "table" and ph.sv_ms then ph.sv_ms = nil end
+			end
+		end
+	elseif base and loaded then
 		result.added_ms = loaded.avg - base.avg
 		result.added_us_per_npc = result.added_ms * 1000 / math.max(1, run.count)
 		result.tick_budget_pct = loaded.avg / tickMs * 100
@@ -416,7 +430,9 @@ local function finish(run)
 	say(p, "------------------------------------------------------------")
 	say(p, string.format("Result: %s x%d on %s (%d tick, %s)", run.class, run.count, result.map,
 		result.tickrate, result.dedicated and "dedicated" or (result.singleplayer and "singleplayer" or "listen")))
-	if not (base and loaded) then
+	if result.server_frame_measured == false then
+		say(p, "  Server frame time:     can't be measured from Lua on a dedicated server (it reads as the tick length); see Lua share and late ticks")
+	elseif not (base and loaded) then
 		say(p, "  No server frame time available (no client report); only Lua time is reported.")
 	else
 		say(p, "  Frame time source:     " .. frameSource)
@@ -427,28 +443,37 @@ local function finish(run)
 	if not game.IsDedicated() then
 		warnings[#warnings + 1] = "Not a dedicated server: the frame time includes the host's rendering. Trust only the Lua line, or rerun on a local srcds."
 	end
-	-- On a dedicated server late ticks are measured on the server, so the
-	-- client's focus doesn't matter for them.
-	if client and not game.IsDedicated() then
-		for _, phase in ipairs({ "baseline", "loaded" }) do
+	-- The client's FPS is ruined by an unfocused window on any server; on a
+	-- listen server or singleplayer the server's numbers are too.
+	if client then
+		for _, phase in ipairs({ "baseline", "loaded", "away" }) do
 			local c = client[phase]
 			if c and (c.unfocused_pct or 0) > 1 then
-				warnings[#warnings + 1] = string.format("Game window was unfocused for %.0f%% of the %s phase (engine sleeps in the background). Frame numbers are invalid; keep the window focused or set engine_no_focus_sleep 0.", c.unfocused_pct, phase)
+				warnings[#warnings + 1] = string.format("Game window was unfocused for %.0f%% of the %s phase (the engine sleeps in the background). %s numbers for that phase are invalid; keep the window focused or set engine_no_focus_sleep 0.",
+					c.unfocused_pct, phase, game.IsDedicated() and "Client FPS" or "Frame")
 			end
 		end
+	end
+	-- NPCs waiting for their turn to think: they react late (ngl_ai_budget is
+	-- milliseconds per tick, so a 30-tick server gives the AI less than half
+	-- the time a second that a 66-tick one does).
+	local late = stats(run.loaded.late)
+	if late and late.avg > 250 then
+		warnings[#warnings + 1] = string.format("NGL thinks ran %.0f ms late on average: the AI budget (ngl_ai_budget %.1f ms a tick, %d tick) is full and NPCs react slowly. Raise ngl_ai_budget if the server has room (few late ticks).",
+			late.avg, GetConVar("ngl_ai_budget"):GetFloat(), math.Round(1 / engine.TickInterval()))
 	end
 	result.warnings = warnings
 	for _, w in ipairs(warnings) do
 		say(p, "  WARNING: " .. w)
 	end
-	say(p, "  Server frame, empty:   " .. fmt(base))
-	say(p, "  Server frame, loaded:  " .. fmt(loaded))
 	if result.dedicated then
-		-- On srcds the networked frame time is wall time per frame including the
-		-- idle sleep, so it sits at the tick interval until the server overloads.
-		-- Late ticks (and ngl_bench_limit) are the real signal there.
-		say(p, string.format("  Note: on a dedicated server the frame time stays at ~%.2f ms (the tick interval) until it overloads. Use late ticks, or ngl_bench_limit.", tickMs))
-	elseif result.added_ms then
+		say(p, string.format("  NGL Lua share of tick:  %.1f%% of the %.2f ms tick; late ticks %.1f%%. For the most NPCs this server holds, run ngl_bench_limit.",
+			result.lua_tick_pct or 0, tickMs, result.late_tick_pct or 0))
+	else
+		say(p, "  Server frame, empty:   " .. fmt(base))
+		say(p, "  Server frame, loaded:  " .. fmt(loaded))
+	end
+	if result.added_ms then
 		say(p, string.format("  Added by NPCs:         %.3f ms/tick  (%.1f us per NPC, %.1f%% of the %.2f ms tick)",
 			result.added_ms, result.added_us_per_npc, result.tick_budget_pct, tickMs))
 	end
