@@ -30,7 +30,7 @@ local cvSounds = CreateConVar("ngl_fx_sounds", "40", FCVAR_ARCHIVE,
 
 -- What NPCs played, for the benchmark (sv_bench.lua): totals since the map
 -- started.
-FX.Count = FX.Count or { sounds = 0, soundsCut = 0, events = 0 }
+FX.Count = FX.Count or { sounds = 0, soundsCut = 0, events = 0, animSounds = 0, animCut = 0 }
 local Count = FX.Count
 
 local eyes, ne, eyesTick = {}, 0, -1
@@ -124,15 +124,64 @@ local function takeSound(rate)
 	return false
 end
 
+-- Sounds the model's animations make by themselves (the engine plays the
+-- sound events in the sequences: a fast zombie's gallop is four footsteps a
+-- second): only for NPCs within ngl_fx_step_range of a player. Our own
+-- sounds go through ENT:EmitSound (init.lua), which sets NGL.OwnSound.
+local cvStep = CreateConVar("ngl_fx_step_range", "700", FCVAR_ARCHIVE,
+	"Sounds from NGL NPCs' animations (footsteps and the like, played by the engine) are only played within this distance of a player. 0 = everywhere.", 0, 50000)
+
+local debugUntil, debugCounts = 0, nil
+
 hook.Add("EntityEmitSound", "NGL.SoundBudget", function(data)
 	local e = data.Entity
 	if not (e and e.IsNGLNPC and IsValid(e)) then return end
+	local own = NGL.OwnSound == true
 	Count.sounds = Count.sounds + 1
+	if not own then Count.animSounds = (Count.animSounds or 0) + 1 end
+	if debugCounts then
+		local key = string.format("%-22s %-5s %s", e:GetClass(), own and "code" or "anim", data.OriginalSoundName or data.SoundName or "?")
+		debugCounts[key] = (debugCounts[key] or 0) + 1
+	end
+	players()
+	local pos = data.Pos or e:GetPos()
+	if not own then
+		local r = cvStep:GetFloat()
+		if r > 0 and not nearAPlayer(pos, r * r) then
+			Count.animCut = (Count.animCut or 0) + 1
+			return false
+		end
+	end
 	local rate = cvSounds:GetFloat()
 	if rate <= 0 then return end
-	players()
 	local near = cvNear:GetFloat()
-	if nearAPlayer(data.Pos or e:GetPos(), near * near) or takeSound(rate) then return end
+	if nearAPlayer(pos, near * near) or takeSound(rate) then return end
 	Count.soundsCut = Count.soundsCut + 1
 	return false
+end)
+
+-- ngl_debug_sounds [seconds]: counts every NGL NPC sound for a few seconds
+-- (5) and prints the most played ones a second: class, who made it (our
+-- code, or the model's animation), and the sound.
+concommand.Add("ngl_debug_sounds", function(ply, _, args)
+	if IsValid(ply) and not ply:IsSuperAdmin() then return end
+	local secs = math.Clamp(tonumber(args[1] or "") or 5, 1, 60)
+	local function say(msg)
+		print(msg)
+		if IsValid(ply) then ply:PrintMessage(HUD_PRINTCONSOLE, msg) end
+	end
+	debugCounts = {}
+	say(string.format("[NGL] Counting NPC sounds for %d s...", secs))
+	timer.Create("NGL.DebugSounds", secs, 1, function()
+		local counts = debugCounts or {}
+		debugCounts = nil
+		local list = {}
+		for k, n in pairs(counts) do list[#list + 1] = { k = k, n = n } end
+		table.sort(list, function(a, b) return a.n > b.n end)
+		say("[NGL] NPC sounds a second (class, made by, sound):")
+		for i = 1, math.min(#list, 15) do
+			say(string.format("  %7.1f  %s", list[i].n / secs, list[i].k))
+		end
+		if #list == 0 then say("  none") end
+	end)
 end)

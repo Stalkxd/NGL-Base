@@ -25,6 +25,15 @@ local cvAnimFar = CreateConVar("ngl_anim_rate_far", "0.05", FCVAR_ARCHIVE,
 local cvAnimHidden = CreateConVar("ngl_anim_rate_hidden", "0.15", FCVAR_ARCHIVE,
 	"Seconds between animation updates on the server for NPCs no player can see (0 = every tick). The engine caps one update at 0.2 s of animation.", 0, 0.19)
 
+-- Sounds from our own code go through here, so the sound budget (sv_fx.lua)
+-- can tell them from the ones the engine plays for the model's animations.
+local EntityEmitSound = FindMetaTable("Entity").EmitSound
+function ENT:EmitSound(...)
+	NGL.OwnSound = true
+	EntityEmitSound(self, ...)
+	NGL.OwnSound = false
+end
+
 -- Empty default hooks.
 function ENT:OnSpawned() end
 function ENT:OnSeeEnemy(enemy) end

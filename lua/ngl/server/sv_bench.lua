@@ -349,12 +349,15 @@ end
 local function finish(run)
 	-- NPC sounds and animation events a second on the server while sampling.
 	local f0 = run.fx0
-	if f0 and f0.endSounds then
+	if f0 and f0.stop then
 		local dt = math.max(0.001, run.fxEnd - f0.t)
+		local function rate(k) return ((f0.stop[k] or 0) - (f0.start[k] or 0)) / dt end
 		run.fx = {
-			sounds_per_s = (f0.endSounds - f0.sounds) / dt,
-			sounds_cut_per_s = (f0.endCut - f0.soundsCut) / dt,
-			anim_events_per_s = (f0.endEvents - f0.events) / dt,
+			sounds_per_s = rate("sounds"),
+			sounds_cut_per_s = rate("soundsCut"),
+			anim_sounds_per_s = rate("animSounds"),
+			anim_sounds_cut_per_s = rate("animCut"),
+			anim_events_per_s = rate("events"),
 		}
 	end
 	local base = stats(run.baseline.frame)
@@ -484,8 +487,8 @@ local function finish(run)
 		end
 	end
 	if run.fx then
-		say(p, string.format("  Server NPC sounds:     %.0f/s (%.0f cut by ngl_fx_sounds), animation events %.0f/s",
-			run.fx.sounds_per_s, run.fx.sounds_cut_per_s, run.fx.anim_events_per_s))
+		say(p, string.format("  Server NPC sounds:     %.0f/s, %.0f of them from animations (%.0f of those cut by ngl_fx_step_range), %.0f cut by ngl_fx_sounds",
+			run.fx.sounds_per_s, run.fx.anim_sounds_per_s, run.fx.anim_sounds_cut_per_s, run.fx.sounds_cut_per_s))
 	end
 	say(p, string.format("  Alive at end:          %d / %d", alive, run.count))
 
@@ -592,7 +595,7 @@ hook.Add("Tick", "NGL.Bench.Harness", function()
 			run.phaseEnd = now + dur
 			run.lastTick = nil
 			local C = NGL.FX and NGL.FX.Count
-			if C then run.fx0 = { sounds = C.sounds, soundsCut = C.soundsCut, events = C.events, t = SysTime() } end
+			if C then run.fx0 = { start = table.Copy(C), t = SysTime() } end
 			sendPhase(run, "loaded")
 			say(run.ply, string.format("Sampling for %ds...", dur))
 			if run.clientMode then
@@ -612,7 +615,7 @@ hook.Add("Tick", "NGL.Bench.Harness", function()
 		if now >= run.phaseEnd then
 			run.fxEnd = SysTime()
 			local C = NGL.FX and NGL.FX.Count
-			if C and run.fx0 then run.fx0.endSounds, run.fx0.endCut, run.fx0.endEvents = C.sounds, C.soundsCut, C.events end
+			if C and run.fx0 then run.fx0.stop = table.Copy(C) end
 			if IsValid(run.reporter) then
 				run.phase = "collecting"
 				run.phaseEnd = now + CLIENT_REPORT_TIMEOUT
