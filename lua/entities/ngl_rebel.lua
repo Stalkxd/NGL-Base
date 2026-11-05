@@ -55,6 +55,8 @@ list.Set("NPC", "ngl_rebel", {
 	Name = "Rebel (NGL)",
 	Class = "ngl_rebel",
 	Category = "NGL Base",
+	NGLGroup = "Resistance", -- its group in the NGL Base spawn menu tab (cl_spawnmenu.lua)
+	IconOverride = "entities/Rebel.png",
 })
 
 if SERVER then

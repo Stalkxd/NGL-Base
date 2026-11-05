@@ -341,6 +341,7 @@ end
 -- forward looks wrong. Further out the legs are put straight, and those NPCs
 -- face where they walk (BehaveUpdate), so straight legs are right there.
 local MOVE_YAW_RATE = 720 -- degrees per second the legs can swing
+local MOVE_YAW_FAR = 10   -- degrees: smallest leg turn sent past ngl_anim_detail_range
 function ENT:NGLUpdateMoveYaw()
 	if not self.NGLPoses.move then return end
 	local target = 0
@@ -363,7 +364,18 @@ function ENT:NGLUpdateMoveYaw()
 	local cur = self.NGLMoveYaw or 0
 	local diff = AngleDiff(target, cur)
 	if diff == 0 then return end
-	local step = MOVE_YAW_RATE * engine.TickInterval()
+	local now = CurTime()
+	local dt = engine.TickInterval()
+	if not self.NGLDetail then
+		-- Past full detail the legs only turn in steps of MOVE_YAW_FAR or
+		-- more (or back to straight): each change is sent to every client,
+		-- which animates the NPC again for it, and at that distance a few
+		-- degrees don't show. The client smooths each step out.
+		if target ~= 0 and math.abs(diff) < MOVE_YAW_FAR then return end
+		dt = math.min(now - (self.NGLMoveYawT or 0), 0.25)
+	end
+	self.NGLMoveYawT = now
+	local step = MOVE_YAW_RATE * dt
 	if diff > step then diff = step elseif diff < -step then diff = -step end
 	cur = math.NormalizeAngle(cur + diff)
 	self.NGLMoveYaw = cur

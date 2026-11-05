@@ -180,4 +180,6 @@ list.Set("NPC", "ngl_zombie_poison", {
 	Name = "Poison Zombie (NGL)",
 	Class = "ngl_zombie_poison",
 	Category = "NGL Base",
+	NGLGroup = "Zombies", -- its group in the NGL Base spawn menu tab (cl_spawnmenu.lua)
+	IconOverride = "entities/npc_poisonzombie.png",
 })

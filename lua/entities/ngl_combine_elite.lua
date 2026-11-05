@@ -76,4 +76,6 @@ list.Set("NPC", "ngl_combine_elite", {
 	Name = "Combine Elite (NGL)",
 	Class = "ngl_combine_elite",
 	Category = "NGL Base",
+	NGLGroup = "Combine", -- its group in the NGL Base spawn menu tab (cl_spawnmenu.lua)
+	IconOverride = "entities/CombineElite.png",
 })

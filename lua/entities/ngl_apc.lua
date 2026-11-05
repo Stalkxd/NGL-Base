@@ -120,6 +120,7 @@ list.Set("NPC", "ngl_apc", {
 	Name = "Combine APC (NGL)",
 	Class = "ngl_apc",
 	Category = "NGL Base",
+	NGLGroup = "Combine", -- its group in the NGL Base spawn menu tab (cl_spawnmenu.lua)
 })
 
 local AngleDiff, deg, rad, atan2 = math.AngleDifference, math.deg, math.rad, math.atan2
