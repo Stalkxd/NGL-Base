@@ -59,4 +59,6 @@ list.Set("NPC", "ngl_zombie", {
 	Name = "Zombie (NGL)",
 	Class = "ngl_zombie",
 	Category = "NGL Base",
+	NGLGroup = "Zombies", -- its group in the NGL Base spawn menu tab (cl_spawnmenu.lua)
+	IconOverride = "entities/npc_zombie.png",
 })

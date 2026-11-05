@@ -75,4 +75,6 @@ list.Set("NPC", "ngl_headcrab", {
 	Name = "Headcrab (NGL)",
 	Class = "ngl_headcrab",
 	Category = "NGL Base",
+	NGLGroup = "Headcrabs", -- its group in the NGL Base spawn menu tab (cl_spawnmenu.lua)
+	IconOverride = "entities/npc_headcrab.png",
 })

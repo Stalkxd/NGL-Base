@@ -1,7 +1,10 @@
--- NGL fast zombie. Never just runs at you: when it sees you it gets out of
--- your sight and lies low a few seconds (the "tricky" AI mode,
--- sv_aimodes.lua), then rushes and leaps at you (ENT.LeapAttack) and claws
--- when you don't expect it. Climbs walls too high to jump: the
+-- NGL fast zombie. Runs straight at you (the "assault" AI mode), leaps at
+-- you from 200 to 300 units (ENT.LeapAttack) and claws. The "tricky" mode
+-- (sv_aimodes.lua) is still there: it gets out of your sight first, lies
+-- low a few seconds and then comes at you when you don't expect it, but its
+-- hiding-spot searches cost a lot in big hordes, so it's no longer the
+-- default. ENT.AIMode = "tricky" in your own class, or ngl_ai_mode tricky
+-- all, brings it back. Climbs walls too high to jump: the
 -- climb links ngl_nav_generate puts at high walls (sv_nav_climb.lua).
 -- Fields only, no code.
 AddCSLuaFile()
@@ -20,7 +23,7 @@ ENT.EyeHeight = 50
 ENT.CrouchChance = 0
 ENT.WanderRadius = 400
 ENT.EnemyMemory = 15            -- keeps track of you while it hides
-ENT.AIMode = "tricky"         -- hides when it sees you, then a surprise attack (sv_aimodes.lua)
+ENT.AIMode = "assault"         -- runs at you; "tricky" hides first, then a surprise attack (sv_aimodes.lua)
 ENT.Group = false
 ENT.JumpDown = 400              -- drops off roofs to get at you
 ENT.JumpUp = 72
@@ -100,4 +103,6 @@ list.Set("NPC", "ngl_zombie_fast", {
 	Name = "Fast Zombie (NGL)",
 	Class = "ngl_zombie_fast",
 	Category = "NGL Base",
+	NGLGroup = "Zombies", -- its group in the NGL Base spawn menu tab (cl_spawnmenu.lua)
+	IconOverride = "entities/npc_fastzombie.png",
 })

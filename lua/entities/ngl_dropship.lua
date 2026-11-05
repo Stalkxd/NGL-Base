@@ -13,6 +13,10 @@ AddCSLuaFile()
 
 ENT.Type = "anim"
 ENT.Base = "base_anim"
+-- Drawn once a frame. Without a render group the engine drew the whole ship
+-- twice, in the opaque and again in the translucent pass (as NGL NPCs were
+-- before 0.24.1).
+ENT.RenderGroup = RENDERGROUP_OPAQUE
 ENT.PrintName = "Combine Dropship (NGL)"
 ENT.Spawnable = false
 ENT.AutomaticFrameAdvance = true

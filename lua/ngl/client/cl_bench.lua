@@ -106,6 +106,10 @@ net.Receive("ngl_bench_phase", function()
 			impostor = GetConVar("ngl_cl_impostor") and GetConVar("ngl_cl_impostor"):GetInt(),
 			impostor_range = GetConVar("ngl_cl_impostor_range") and GetConVar("ngl_cl_impostor_range"):GetFloat(),
 			draw_range = GetConVar("ngl_cl_draw_range") and GetConVar("ngl_cl_draw_range"):GetFloat(),
+			lod_range = GetConVar("ngl_cl_lod_range") and GetConVar("ngl_cl_lod_range"):GetFloat(),
+			weapon_range = GetConVar("ngl_cl_weapon_range") and GetConVar("ngl_cl_weapon_range"):GetFloat(),
+			flex_range = GetConVar("ngl_cl_flex_range") and GetConVar("ngl_cl_flex_range"):GetFloat(),
+			ragdoll_max = GetConVar("ngl_cl_ragdoll_max") and GetConVar("ngl_cl_ragdoll_max"):GetInt(),
 			fps_max = GetConVar("fps_max") and GetConVar("fps_max"):GetFloat(),
 			resolution = ScrW() .. "x" .. ScrH(),
 		}

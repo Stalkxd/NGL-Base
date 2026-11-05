@@ -50,4 +50,6 @@ list.Set("NPC", "ngl_combine_soldier", {
 	Name = "Combine Soldier (NGL)",
 	Class = "ngl_combine_soldier",
 	Category = "NGL Base",
+	NGLGroup = "Combine", -- its group in the NGL Base spawn menu tab (cl_spawnmenu.lua)
+	IconOverride = "entities/npc_combine_s.png",
 })
