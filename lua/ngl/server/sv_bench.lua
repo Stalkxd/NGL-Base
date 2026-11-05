@@ -347,6 +347,16 @@ local function fmt(s)
 end
 
 local function finish(run)
+	-- NPC sounds and animation events a second on the server while sampling.
+	local f0 = run.fx0
+	if f0 and f0.endSounds then
+		local dt = math.max(0.001, run.fxEnd - f0.t)
+		run.fx = {
+			sounds_per_s = (f0.endSounds - f0.sounds) / dt,
+			sounds_cut_per_s = (f0.endCut - f0.soundsCut) / dt,
+			anim_events_per_s = (f0.endEvents - f0.events) / dt,
+		}
+	end
 	local base = stats(run.baseline.frame)
 	local loaded = stats(run.loaded.frame)
 	local frameSource = "server"
@@ -390,6 +400,7 @@ local function finish(run)
 		baseline_overruns = run.baseline.overruns,
 		baseline_ticks = run.baseline.ticks,
 		client = client,
+		server_fx = run.fx,
 	}
 
 	if base and loaded then
@@ -459,6 +470,10 @@ local function finish(run)
 				if run.clientMode and ph[1] ~= "baseline" then
 					say(p, string.format("    NPCs on the client %.0f, drawn %.0f, as pictures %.0f, hidden behind walls %.0f, too far or in fog %.0f (averages a frame)",
 						avg(c.npcs_on_client), avg(c.npcs_drawn), avg(c.npcs_impostor), avg(c.npcs_occluded), avg(c.npcs_too_far)))
+					if c.anim_events_per_s then
+						say(p, string.format("    Client animation events %.0f/s (%.0f skipped as far), client-made NPC sounds %.0f/s",
+							c.anim_events_per_s, c.anim_events_cut_per_s or 0, c.client_sounds_per_s or 0))
+					end
 				end
 			end
 		end
@@ -467,6 +482,10 @@ local function finish(run)
 			say(p, string.format("  Client settings: ngl_cl_occlusion %s, ngl_cl_impostor %s (range %s), ngl_cl_draw_range %s, %s; server ngl_net_cull %d",
 				tostring(st.occlusion), tostring(st.impostor), tostring(st.impostor_range), tostring(st.draw_range), tostring(st.resolution), GetConVar("ngl_net_cull"):GetInt()))
 		end
+	end
+	if run.fx then
+		say(p, string.format("  Server NPC sounds:     %.0f/s (%.0f cut by ngl_fx_sounds), animation events %.0f/s",
+			run.fx.sounds_per_s, run.fx.sounds_cut_per_s, run.fx.anim_events_per_s))
 	end
 	say(p, string.format("  Alive at end:          %d / %d", alive, run.count))
 
@@ -572,6 +591,8 @@ hook.Add("Tick", "NGL.Bench.Harness", function()
 			local dur = run.duration or cvDuration:GetFloat()
 			run.phaseEnd = now + dur
 			run.lastTick = nil
+			local C = NGL.FX and NGL.FX.Count
+			if C then run.fx0 = { sounds = C.sounds, soundsCut = C.soundsCut, events = C.events, t = SysTime() } end
 			sendPhase(run, "loaded")
 			say(run.ply, string.format("Sampling for %ds...", dur))
 			if run.clientMode then
@@ -589,6 +610,9 @@ hook.Add("Tick", "NGL.Bench.Harness", function()
 			sendPhase(run, "away")
 		end
 		if now >= run.phaseEnd then
+			run.fxEnd = SysTime()
+			local C = NGL.FX and NGL.FX.Count
+			if C and run.fx0 then run.fx0.endSounds, run.fx0.endCut, run.fx0.endEvents = C.sounds, C.soundsCut, C.events end
 			if IsValid(run.reporter) then
 				run.phase = "collecting"
 				run.phaseEnd = now + CLIENT_REPORT_TIMEOUT

@@ -9,6 +9,9 @@
 --   impacts        at most ngl_fx_impacts a second over the whole server
 --                  (damage is never skipped, only the effect)
 --   muzzle flashes only sent to players within ngl_fx_muzzle_range
+--   sounds         NPC sounds (guns, voices, claws, footsteps from the
+--                  animations) further than ngl_fx_near from every player:
+--                  at most ngl_fx_sounds a second over the whole server
 
 NGL.FX = NGL.FX or {}
 local FX = NGL.FX
@@ -21,6 +24,14 @@ local cvImpacts = CreateConVar("ngl_fx_impacts", "60", FCVAR_ARCHIVE,
 	"Most NGL bullet impact effects (sparks, dust, blood, decals) a second further than ngl_fx_near from every player. 0 = no cap.", 0, 10000)
 local cvMuzzle = CreateConVar("ngl_fx_muzzle_range", "4000", FCVAR_ARCHIVE,
 	"NGL muzzle flash effects are only sent to players this close. 0 = everyone who can see it.", 0, 50000)
+
+local cvSounds = CreateConVar("ngl_fx_sounds", "40", FCVAR_ARCHIVE,
+	"Most NGL NPC sounds a second further than ngl_fx_near from every player (each one goes to every client in earshot). 0 = no cap.", 0, 10000)
+
+-- What NPCs played, for the benchmark (sv_bench.lua): totals since the map
+-- started.
+FX.Count = FX.Count or { sounds = 0, soundsCut = 0, events = 0 }
+local Count = FX.Count
 
 local eyes, ne, eyesTick = {}, 0, -1
 
@@ -99,3 +110,29 @@ function FX.Muzzle(name, ed, pos)
 	end
 	if filter:GetCount() > 0 then util.Effect(name, ed, true, filter) end
 end
+
+-- Sound tokens, like the impact ones.
+local sTokens, sLastFill = 0, 0
+local function takeSound(rate)
+	local now = CurTime()
+	sTokens = math.min(rate, sTokens + (now - sLastFill) * rate)
+	sLastFill = now
+	if sTokens >= 1 then
+		sTokens = sTokens - 1
+		return true
+	end
+	return false
+end
+
+hook.Add("EntityEmitSound", "NGL.SoundBudget", function(data)
+	local e = data.Entity
+	if not (e and e.IsNGLNPC and IsValid(e)) then return end
+	Count.sounds = Count.sounds + 1
+	local rate = cvSounds:GetFloat()
+	if rate <= 0 then return end
+	players()
+	local near = cvNear:GetFloat()
+	if nearAPlayer(data.Pos or e:GetPos(), near * near) or takeSound(rate) then return end
+	Count.soundsCut = Count.soundsCut + 1
+	return false
+end)
