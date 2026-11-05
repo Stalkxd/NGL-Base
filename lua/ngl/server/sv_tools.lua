@@ -225,3 +225,47 @@ function T.Move(ply, trace, button, opts)
 	say(ply, string.format("Sent %d NPC%s there", n, n == 1 and "" or "s"))
 	return true
 end
+
+-- ngl_debug_target: what's going on with the NGL NPC closest to where you
+-- aim (within 150 units of the line), even one bullets don't hit: health,
+-- solidity, collision box and group, hitboxes, lag compensation, whether it
+-- is still in the AI list, and what a bullet from your eyes to its middle
+-- hits instead of it. For "it can't be killed" reports.
+concommand.Add("ngl_debug_target", function(ply)
+	if not IsValid(ply) or not ply:IsSuperAdmin() then return end
+	local function say(msg)
+		print(msg)
+		ply:PrintMessage(HUD_PRINTCONSOLE, msg)
+	end
+	local eye, dir = ply:EyePos(), ply:GetAimVector()
+	local best, bestD
+	for _, e in ipairs(ents.GetAll()) do
+		if e.IsNGLNPC and IsValid(e) then
+			local c = e:WorldSpaceCenter()
+			local along = (c - eye):Dot(dir)
+			if along > 0 then
+				local off = (eye + dir * along):Distance(c)
+				if off < 150 and (not bestD or off < bestD) then best, bestD = e, off end
+			end
+		end
+	end
+	if not best then say("[NGL] No NGL NPC near where you aim.") return end
+	local e = best
+	local mins, maxs = e:GetCollisionBounds()
+	local Core = NGL.Core
+	say(string.format("[NGL] %s #%d at %s, %.0f units away", e:GetClass(), e:EntIndex(), tostring(e:GetPos()), eye:Distance(e:GetPos())))
+	say(string.format("  health %d / %d, dying %s, in AI list %s, faction %s",
+		e:Health(), e:GetMaxHealth(), tostring(e.NGLDying or false), tostring(Core and Core.Index and Core.Index[e] ~= nil), tostring(e.Faction)))
+	say(string.format("  solid %d, solid flags %d, collision group %d, box %s .. %s, hitboxes %d",
+		e:GetSolid(), e:GetSolidFlags(), e:GetCollisionGroup(), tostring(mins), tostring(maxs), e:GetHitBoxCount(0) or -1))
+	say(string.format("  lag compensated %s, leaping %s, traversing %s, on ground %s",
+		tostring(e.IsLagCompensated and e:IsLagCompensated()), tostring(e.NGLLeapState ~= nil), tostring(e.NGLTraverse ~= nil),
+		tostring(e.loco and e.loco:IsOnGround())))
+	local tr = util.TraceLine({ start = eye, endpos = e:WorldSpaceCenter(), mask = MASK_SHOT, filter = ply })
+	local hit = tr.Entity
+	say(string.format("  a shot at its middle hits: %s%s (hitgroup %d)",
+		IsValid(hit) and hit:GetClass() or (tr.HitWorld and "the world" or "nothing"),
+		hit == e and " (it)" or "", tr.HitGroup or 0))
+	local inSolid = util.TraceHull({ start = e:GetPos(), endpos = e:GetPos(), mins = mins, maxs = maxs, mask = MASK_NPCSOLID_BRUSHONLY, filter = e })
+	say("  stuck in the world: " .. tostring(inSolid.StartSolid))
+end)
