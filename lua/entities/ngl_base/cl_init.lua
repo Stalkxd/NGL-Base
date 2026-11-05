@@ -109,15 +109,22 @@ Stats.decalClears = Stats.decalClears or 0
 -- an NPC that isn't drawn can still shoot you and be shot.
 local LOWEST_LOD = 7 -- clamped by the engine to the model's own last LOD
 
+-- ngl_debug_parts' client-side parts (cl_parts.lua): nil unless testing.
+local function clOff(self, key)
+	local O = NGL.ClOff
+	return O ~= nil and O[key] == true and (O.class == nil or self:GetClass() == O.class)
+end
+
 function ENT:NGLDrawLevel(d, S)
+	local forceLow = NGL.ClOff ~= nil and clOff(self, "lowlod")
 	-- Shadow
-	local noShadow = self.NGLImp == true or beyond(d, S.shadow, self.NGLNoShadow)
+	local noShadow = forceLow or self.NGLImp == true or beyond(d, S.shadow, self.NGLNoShadow)
 	if noShadow ~= (self.NGLNoShadow or false) then
 		self.NGLNoShadow = noShadow
 		if noShadow then self:DestroyShadow() else self:CreateShadow() end
 	end
 	-- Model LOD
-	local low = beyond(d, S.lod, self.NGLLowLod)
+	local low = forceLow or beyond(d, S.lod, self.NGLLowLod)
 	if low ~= (self.NGLLowLod or false) then
 		self.NGLLowLod = low
 		self:SetLOD(low and LOWEST_LOD or -1)
@@ -250,6 +257,7 @@ function ENT:Draw(flags)
 		return
 	end
 
+	if NGL.ClOff ~= nil and clOff(self, "draw") then return end -- ngl_debug_parts
 	local shadow = shadowPass(flags)
 	if shadow then
 		-- Into its shadow texture: only for NPCs that cast one and show.

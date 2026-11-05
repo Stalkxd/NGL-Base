@@ -22,14 +22,19 @@ end)
 net.Receive("ngl_parts", function()
 	local kind, i = net.ReadUInt(2), net.ReadUInt(8)
 	if kind == MSG_START then
+		-- Parts switched off here, on the client (cl_init.lua reads it).
+		local part, class = net.ReadString(), net.ReadString()
+		NGL.ClOff = (part == "draw" or part == "lowlod") and { [part] = true, class = class ~= "" and class or nil } or nil
 		if i == 1 then windows = {} end
 		cur = { frame = 0, sv = 0, n = 0 }
 		windows[i] = cur
 		last = nil
 	elseif kind == MSG_END then
 		cur, last = nil, nil
+		NGL.ClOff = nil
 	elseif kind == MSG_DONE then
 		cur, last = nil, nil
+		NGL.ClOff = nil
 		net.Start("ngl_parts")
 		net.WriteUInt(i, 8)
 		for k = 1, i do
