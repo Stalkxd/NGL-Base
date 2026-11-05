@@ -31,6 +31,8 @@ ENT.JumpGap = true
 ENT.Climb = 400                 -- climbs walls up to this high (climb links)
 ENT.ClimbRate = 320
 ENT.OpenDoors = false
+ENT.DoorBreach = "always"       -- beats doors down (any door), fight or not
+ENT.DoorHits = 4                -- blows a door takes (light claws)
 ENT.Headcrab = "ngl_headcrab_fast"
 ENT.HeadcrabBodygroup = 1
 

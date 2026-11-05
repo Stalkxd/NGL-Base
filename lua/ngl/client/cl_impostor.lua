@@ -51,6 +51,7 @@ local BLOCK_W, BLOCK_H = DIRS * TILE, FRAMES * TILE -- one animation of one mode
 local BCOLS, BROWS = math.floor(ATLAS / BLOCK_W), math.floor(ATLAS / BLOCK_H)
 local PER_ATLAS = BCOLS * BROWS    -- 5 x 10 = 50 animations a texture
 local FOV = 8                      -- narrow lens from far away: nearly flat, like the picture
+local STRIDE = 13                  -- numbers kept per picture drawn (see I.Draw)
 local ELEV = 6                     -- degrees the baking camera looks down
 local LEAVE = 0.92                 -- back to the real model this much closer than the range
 local EVICT_AFTER = 5              -- seconds unused before an animation's pictures may be replaced
@@ -504,19 +505,27 @@ function I.Draw(npc, d)
 
 	local l = sqrt(dx * dx + dy * dy)
 	if l < 1 then return false end
+	-- The picture faces you up and down too: its up is square to the line
+	-- from your eye, so from above or below it isn't seen edge on (a thin
+	-- sliver from a roof). It leans back from the feet, so they stay on
+	-- the ground.
+	local dz = pos.z + r.cz - eye.z
+	local L = sqrt(l * l + dz * dz)
+	local ux, uy, uz = -dx * dz / (l * L), -dy * dz / (l * L), l / L
 	local q = quads[b.atlas]
 	if not q then
 		q = {}
 		quads[b.atlas] = q
 	end
 	local n = (nQuads[b.atlas] or 0)
-	local o = n * 11
-	q[o + 1], q[o + 2], q[o + 3] = pos.x, pos.y, pos.z + r.cz
-	q[o + 4], q[o + 5] = dy / l * r.half, -dx / l * r.half -- to the right of the view, half a picture
-	q[o + 6] = r.half
-	q[o + 7] = (b.x + di * TILE + 0.5) / ATLAS
-	q[o + 8] = (b.y + fi * TILE + 0.5) / ATLAS
-	q[o + 9], q[o + 10], q[o + 11] = npc.NGLImpR or 255, npc.NGLImpG or 255, npc.NGLImpB or 255
+	local o = n * STRIDE
+	local cz, h = r.cz, r.half
+	q[o + 1], q[o + 2], q[o + 3] = pos.x + ux * cz, pos.y + uy * cz, pos.z + uz * cz
+	q[o + 4], q[o + 5] = dy / l * h, -dx / l * h -- to the right of the view, half a picture
+	q[o + 6] = (b.x + di * TILE + 0.5) / ATLAS
+	q[o + 7] = (b.y + fi * TILE + 0.5) / ATLAS
+	q[o + 8], q[o + 9], q[o + 10] = npc.NGLImpR or 255, npc.NGLImpG or 255, npc.NGLImpB or 255
+	q[o + 11], q[o + 12], q[o + 13] = ux * h, uy * h, uz * h -- up the picture, half of it
 	nQuads[b.atlas] = n + 1
 	return true
 end
@@ -545,15 +554,16 @@ hook.Add("PostDrawOpaqueRenderables", "NGL.Impostor.Draw", function(depth, sky)
 				local batch = min(MAX_QUADS, n - i)
 				mesh.Begin(MATERIAL_QUADS, batch)
 				for k = i, i + batch - 1 do
-					local o = k * 11
-					local cx, cy, cz, rx, ry, h = q[o + 1], q[o + 2], q[o + 3], q[o + 4], q[o + 5], q[o + 6]
-					local u0, v0 = q[o + 7], q[o + 8]
+					local o = k * STRIDE
+					local cx, cy, cz, rx, ry = q[o + 1], q[o + 2], q[o + 3], q[o + 4], q[o + 5]
+					local u0, v0 = q[o + 6], q[o + 7]
 					local u1, v1 = u0 + UV, v0 + UV
-					local cr, cg, cb = q[o + 9], q[o + 10], q[o + 11]
-					corner(cx - rx, cy - ry, cz + h, u0, v0, cr, cg, cb)
-					corner(cx + rx, cy + ry, cz + h, u1, v0, cr, cg, cb)
-					corner(cx + rx, cy + ry, cz - h, u1, v1, cr, cg, cb)
-					corner(cx - rx, cy - ry, cz - h, u0, v1, cr, cg, cb)
+					local cr, cg, cb = q[o + 8], q[o + 9], q[o + 10]
+					local hx, hy, hz = q[o + 11], q[o + 12], q[o + 13]
+					corner(cx - rx + hx, cy - ry + hy, cz + hz, u0, v0, cr, cg, cb)
+					corner(cx + rx + hx, cy + ry + hy, cz + hz, u1, v0, cr, cg, cb)
+					corner(cx + rx - hx, cy + ry - hy, cz - hz, u1, v1, cr, cg, cb)
+					corner(cx - rx - hx, cy - ry - hy, cz - hz, u0, v1, cr, cg, cb)
 				end
 				mesh.End()
 				i = i + batch

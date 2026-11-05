@@ -23,6 +23,8 @@ ENT.JumpDown = 120
 ENT.JumpGap = false
 ENT.JumpUp = 0
 ENT.OpenDoors = false
+ENT.DoorBreach = "always"       -- beats doors down (any door), fight or not
+ENT.DoorHits = 2                -- blows a door takes (it hits hard)
 ENT.Headcrab = "ngl_headcrab_poison"
 ENT.HeadcrabBodygroup = 1
 

@@ -639,18 +639,30 @@ function ENT:BehaveUpdate(interval)
 		end
 		-- Pressing on but not getting anywhere (up against you, a wall or a
 		-- crowd): stand, don't walk on the spot.
-		local v = self.loco:GetVelocity()
-		-- Kept for the legs (NGLUpdateMoveYaw, the same tick or the next):
-		-- one velocity vector a tick instead of two.
-		local vx, vy = v.x, v.y
+		-- How fast we really go: the ground covered since the last tick. The
+		-- locomotion's own velocity is the speed it's trying for, and pushing
+		-- into a player or the crowd it stayed near full speed while the NPC
+		-- didn't move, so it ran on the spot (the fast zombie at your feet).
+		local vx, vy
+		local lt = self.NGLLastPosT
+		local dt = lt and now - lt
+		if dt and dt > 0 and dt < 0.2 then
+			vx, vy = (pos.x - self.NGLLastX) / dt, (pos.y - self.NGLLastY) / dt
+		else
+			local v = self.loco:GetVelocity()
+			vx, vy = v.x, v.y
+		end
+		if not dt or dt > 0 then self.NGLLastX, self.NGLLastY, self.NGLLastPosT = pos.x, pos.y, now end
+		-- Kept for the legs and the cycle speed (NGLUpdateMoveYaw and
+		-- BodyUpdate, the same tick or the next).
 		self.NGLVelX, self.NGLVelY, self.NGLVelTick = vx, vy, engine.TickCount()
-		local still = vx * vx + vy * vy < 15 * 15
+		local still = vx * vx + vy * vy < 20 * 20
 		if not still then
 			self.NGLStillSince = nil
 		elseif not self.NGLStillSince then
 			self.NGLStillSince = now
 		end
-		self.NGLStandStill = still and now - self.NGLStillSince > 0.3 or nil
+		self.NGLStandStill = still and now - self.NGLStillSince > 0.15 or nil
 		if self.NGLStandStill then
 			if self:GetPlaybackRate() ~= 1 then self:SetPlaybackRate(1) end
 			self:NGLSetAct(crouch and A.CrouchIdle and (fighting and A.CrouchAim or A.CrouchIdle) or (fighting and A.IdleAim or A.Idle))

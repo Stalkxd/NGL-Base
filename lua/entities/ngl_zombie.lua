@@ -19,6 +19,8 @@ ENT.JumpDown = 250              -- drops off ledges, but doesn't jump gaps or op
 ENT.JumpGap = false
 ENT.JumpUp = 0                  -- too clumsy to jump up
 ENT.OpenDoors = false
+ENT.DoorBreach = "always"       -- beats doors down (any door), fight or not
+ENT.DoorHits = 3                -- blows a door takes
 ENT.Headcrab = "ngl_headcrab"   -- the crab comes off when it dies (not after a head shot)
 ENT.HeadcrabBodygroup = 1
 
