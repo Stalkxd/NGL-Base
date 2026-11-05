@@ -371,6 +371,8 @@ local function finish(run)
 			anim_sounds_per_s = rate("animSounds"),
 			anim_sounds_cut_per_s = rate("animCut"),
 			anim_events_per_s = rate("events"),
+			los_traces_per_s = rate("losTraces"),
+			los_shared_per_s = rate("losShared"),
 		}
 	end
 	local base = stats(run.baseline.frame)
@@ -519,8 +521,8 @@ local function finish(run)
 					say(p, string.format("    NPCs on the client %.0f, drawn %.0f, as pictures %.0f, hidden behind walls %.0f, too far or in fog %.0f (averages a frame)",
 						avg(c.npcs_on_client), avg(c.npcs_drawn), avg(c.npcs_impostor), avg(c.npcs_occluded), avg(c.npcs_too_far)))
 					if c.anim_events_per_s then
-						say(p, string.format("    Client animation events %.0f/s (%.0f skipped as far), client-made NPC sounds %.0f/s",
-							c.anim_events_per_s, c.anim_events_cut_per_s or 0, c.client_sounds_per_s or 0))
+						say(p, string.format("    Client animation events %.0f/s (%.0f skipped as far), client-made NPC sounds %.0f/s, NPC decals cleared %.1f/s",
+							c.anim_events_per_s, c.anim_events_cut_per_s or 0, c.client_sounds_per_s or 0, c.decal_clears_per_s or 0))
 					end
 				end
 			end
@@ -534,6 +536,11 @@ local function finish(run)
 	if run.fx then
 		say(p, string.format("  Server NPC sounds:     %.0f/s, %.0f of them from animations (%.0f of those cut by ngl_fx_step_range), %.0f cut by ngl_fx_sounds",
 			run.fx.sounds_per_s, run.fx.anim_sounds_per_s, run.fx.anim_sounds_cut_per_s, run.fx.sounds_cut_per_s))
+		local lt, ls = run.fx.los_traces_per_s, run.fx.los_shared_per_s
+		if lt + ls > 0 then
+			say(p, string.format("  NPC sight checks:      %.0f/s traced, %.0f/s shared from a neighbour's (%.0f%% saved, ngl_ai_share_los)",
+				lt, ls, ls / (lt + ls) * 100))
+		end
 	end
 	say(p, string.format("  Alive at end:          %d / %d", alive, run.count))
 

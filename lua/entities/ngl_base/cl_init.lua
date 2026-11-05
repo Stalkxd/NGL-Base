@@ -19,6 +19,8 @@ local cvOcclusionNear = CreateClientConVar("ngl_cl_occlusion_near", "600", true,
 	"NGL NPCs closer than this are always drawn, even when they seem hidden (no popping right next to you).", 0, 50000)
 local cvEventRange = CreateClientConVar("ngl_cl_event_range", "1500", true, false,
 	"NGL NPCs further than this skip their animations' client events (footstep sounds, dust, shells): each one is a sound or an effect made on this client. 0 = always.", 0, 50000)
+local cvDecalRange = CreateClientConVar("ngl_cl_decal_range", "1000", true, false,
+	"Blood and bullet decals on NGL NPCs further than this, or out of your sight, are cleared (each decal on a model draws the model again). 0 = never cleared.", 0, 50000)
 local cvReflectRange = CreateClientConVar("ngl_cl_reflection_range", "1500", true, false,
 	"NGL NPCs further than this from you aren't drawn in water reflections and other extra views (cameras, mirrors), which draw everything again. 0 = always.", 0, 50000)
 
@@ -53,6 +55,8 @@ local function settings()
 	Set.flex = sq(cvFlexRange)
 	Set.reflect = sq(cvReflectRange)
 	Set.event = sq(cvEventRange)
+	local dr = cvDecalRange:GetFloat()
+	Set.decal = dr > 0 and dr * dr or nil
 	Set.occlusion = cvOcclusion:GetBool()
 	local near = cvOcclusionNear:GetFloat()
 	Set.occlusionNear = near * near
@@ -84,6 +88,7 @@ end
 NGL.ClStats = NGL.ClStats or { drawn = 0, occluded = 0, far = 0, impostor = 0 }
 local Stats = NGL.ClStats
 Stats.events, Stats.eventsCut, Stats.sounds = Stats.events or 0, Stats.eventsCut or 0, Stats.sounds or 0
+Stats.decalClears = Stats.decalClears or 0
 
 -- Level of detail on this client, from near to far:
 --   full     the model as the engine picks it, with weapon and shadow
@@ -200,6 +205,35 @@ function ENT:NGLOccluded(d, S)
 	return self.NGLHidden
 end
 
+-- Decals on the model: every bullet that hits an NPC leaves blood on it,
+-- and each decal draws the model once more, so after a long fight an NPC
+-- near you was drawn dozens of times a frame. They are cleared where
+-- nobody sees them go: further than ngl_cl_decal_range, hidden behind a
+-- wall, drawn as a picture, or when it comes back into view after being
+-- out of it (behind you) for a moment. At most every DECAL_EVERY seconds an
+-- NPC. Close and in view they stay.
+local DECAL_EVERY = 2
+local DECAL_AWAY = 0.5 -- s out of view before the decals go when it's back
+-- Cleared in the next Think, not in the middle of drawing.
+local decalQueue = {}
+local function clearDecals(self, S, now)
+	if not S.decal or now < (self.NGLDecalT or 0) then return end
+	self.NGLDecalT = now + DECAL_EVERY
+	decalQueue[#decalQueue + 1] = self
+end
+hook.Add("Think", "NGL.ClearDecals", function()
+	local n = #decalQueue
+	if n == 0 then return end
+	for i = 1, n do
+		local e = decalQueue[i]
+		decalQueue[i] = nil
+		if IsValid(e) then
+			e:RemoveAllDecals()
+			Stats.decalClears = Stats.decalClears + 1
+		end
+	end
+end)
+
 function ENT:Draw(flags)
 	if self:GetNGLDead() then
 		if not self.NGLRagdolled then
@@ -234,25 +268,32 @@ function ENT:Draw(flags)
 	end
 
 	local d = EyePos():DistToSqr(self:GetPos())
+	local now = RealTime()
+	local away = now - (self.NGLViewT or 0) > DECAL_AWAY
+	self.NGLViewT = now
 	self.NGLFar = not self:NGLDrawLevel(d, S)
 	if self.NGLFar then
 		if self.NGLWeaponEnt then self:NGLRemoveWeaponModel() end
 		Stats.far = Stats.far + 1
+		clearDecals(self, S, now)
 		return
 	end
 	-- Hidden behind a wall: skip the model and the weapon, keep the weapon
 	-- model for when it comes out.
 	if self:NGLOccluded(d, S) then
 		Stats.occluded = Stats.occluded + 1
+		clearDecals(self, S, now)
 		return
 	end
 	-- Far: a flat picture of it instead (cl_impostor.lua), once one is made.
 	local Imp = NGL.Impostor
 	if Imp and Imp.Draw(self, d) then
 		Stats.impostor = Stats.impostor + 1
+		clearDecals(self, S, now)
 		return
 	end
 
+	if away or (S.decal and d > S.decal) then clearDecals(self, S, now) end
 	self:DrawModel()
 	Stats.drawn = Stats.drawn + 1
 
