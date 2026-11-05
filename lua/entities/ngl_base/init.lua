@@ -23,6 +23,8 @@ local Core -- NGL.Core, set on first use (entities load after the autorun files)
 
 local cvAnimFar = CreateConVar("ngl_anim_rate_far", "0.05", FCVAR_ARCHIVE,
 	"Seconds between animation updates on the server for NPCs players can see but that are beyond ngl_anim_detail_range (0 = every tick).", 0, 0.15)
+local cvAnimNear = CreateConVar("ngl_anim_rate_near", "0.03", FCVAR_ARCHIVE,
+	"Seconds between animation updates on the server for NPCs in full detail (0 = every tick). Each update changes the animation's frame, which is sent to every client; clients play it smoothly in between.", 0, 0.1)
 local cvAnimHidden = CreateConVar("ngl_anim_rate_hidden", "0.15", FCVAR_ARCHIVE,
 	"Seconds between animation updates on the server for NPCs no player can see (0 = every tick). The engine caps one update at 0.2 s of animation.", 0, 0.19)
 
@@ -331,19 +333,37 @@ function ENT:BodyUpdate()
 	if NGL.Off.anim and NGL.IsOff(self, "anim") then return end -- ngl_debug_parts
 	local t0 = SysTime()
 	self:NGLUpdateMoveYaw()
-	if self.NGLMoving and self.NGLDetail and not self.NGLStandStill then
-		self:BodyMoveXY() -- also advances the frame
-	else
-		local gap = 0
-		if not (self.NGLAnimUntil or self.NGLLeapState or self.NGLTraverse or self.NGLDying) then
-			if self.NGLSeen == false then gap = cvAnimHidden:GetFloat()
-			elseif not self.NGLDetail then gap = cvAnimFar:GetFloat() end
+	local oneOff = self.NGLAnimUntil or self.NGLLeapState or self.NGLTraverse or self.NGLDying
+	local gap = 0
+	if not oneOff then
+		if self.NGLSeen == false then gap = cvAnimHidden:GetFloat()
+		elseif not self.NGLDetail then gap = cvAnimFar:GetFloat()
+		else gap = cvAnimNear:GetFloat() end
+	end
+	local now = CurTime()
+	if gap <= 0 or now >= (self.NGLNextAnim or 0) then
+		self.NGLNextAnim = now + gap
+		-- Moving in full detail: the cycle plays at the speed we really move
+		-- (what BodyMoveXY does), but the rate is only changed when it's 5%
+		-- off. BodyMoveXY set it on every tick, and every change is sent to
+		-- every client: in a running crowd that was every NPC, every tick.
+		if self.NGLMoving and self.NGLDetail and not self.NGLStandStill and not oneOff then
+			local vt = self.NGLVelTick
+			local vx, vy
+			if vt and engine.TickCount() - vt <= 1 then
+				vx, vy = self.NGLVelX, self.NGLVelY
+			else
+				local v = self.loco:GetVelocity()
+				vx, vy = v.x, v.y
+			end
+			local gs = self:GetSequenceGroundSpeed(self:GetSequence())
+			if gs and gs > 1 then
+				local rate = math.Clamp(math.sqrt(vx * vx + vy * vy) / gs, 0.1, 4)
+				local cur = self:GetPlaybackRate()
+				if math.abs(rate - cur) > 0.05 * cur then self:SetPlaybackRate(rate) end
+			end
 		end
-		local now = CurTime()
-		if gap <= 0 or now >= (self.NGLNextAnim or 0) then
-			self.NGLNextAnim = now + gap
-			self:FrameAdvance()
-		end
+		self:FrameAdvance()
 	end
 	local B = NGL.Bench
 	if B then B.LuaTime = B.LuaTime + (SysTime() - t0) end
@@ -357,10 +377,13 @@ end
 -- face where they walk (BehaveUpdate), so straight legs are right there.
 local MOVE_YAW_RATE = 720 -- degrees per second the legs can swing
 local MOVE_YAW_FAR = 10   -- degrees: smallest leg turn sent past ngl_anim_detail_range
+local MOVE_YAW_NEAR = 3   -- degrees: smallest leg turn sent in full detail
 function ENT:NGLUpdateMoveYaw()
 	if not self.NGLPoses.move then return end
 	local target = 0
-	if self.NGLMoving and self.NGLNear and self.NGLSeen ~= false then
+	-- Running NPCs face where they go (BehaveUpdate), so their legs are
+	-- straight; only walking (strafing) swings them.
+	if self.NGLMoving and self.NGLNear and self.NGLSeen ~= false and self.NGLMoveMode == "walk" then
 		local dx, dy
 		local vt = self.NGLVelTick
 		if vt and engine.TickCount() - vt <= 1 then
@@ -394,6 +417,10 @@ function ENT:NGLUpdateMoveYaw()
 		-- degrees don't show. The client smooths each step out.
 		if target ~= 0 and math.abs(diff) < MOVE_YAW_FAR then return end
 		dt = math.min(now - (self.NGLMoveYawT or 0), 0.25)
+	elseif target ~= 0 and math.abs(diff) < MOVE_YAW_NEAR then
+		return -- a degree or two isn't worth sending to every client
+	else
+		dt = math.min(now - (self.NGLMoveYawT or now - dt), 0.25)
 	end
 	self.NGLMoveYawT = now
 	local step = MOVE_YAW_RATE * dt
