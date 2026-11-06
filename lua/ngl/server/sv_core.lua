@@ -28,6 +28,8 @@ local cvDetail = CreateConVar("ngl_anim_detail_range", "1500", FCVAR_ARCHIVE, "N
 local DETAIL_LEAVE = 1.15 * 1.15 -- leave full detail a bit further out than we enter it, so it doesn't flicker at the edge
 local cvPVS = CreateConVar("ngl_ai_pvs", "1", FCVAR_ARCHIVE, "1 = NPCs no player can see (outside every player's PVS, e.g. behind walls) are treated like far ones even when close: no animation detail, silent shots, the medium think rate. 0 = by distance only.", 0, 1)
 local cvRail = CreateConVar("ngl_ai_rail_range", "4000", FCVAR_ARCHIVE, "NPCs further than this from every player, that no player can see, follow their path by moving straight along it at each think instead of walking with the NextBot locomotion every tick. 0 = never.", 0, 50000)
+local cvStepRange = CreateConVar("ngl_move_step_range", "3000", FCVAR_ARCHIVE, "NPCs further than this from every player, even ones players can see, follow their path in steps (ngl_move_step) instead of walking with the NextBot locomotion every tick: their position changes, and is sent to clients, only once a step. Clients smooth it. 0 = never.", 0, 50000)
+local cvStep = CreateConVar("ngl_move_step", "0.1", FCVAR_ARCHIVE, "Seconds between steps for NPCs past ngl_move_step_range. Keep it at most cl_interp (0.1), or they stutter.", 0.03, 0.5)
 local cvRateSleep = CreateConVar("ngl_ai_rate_sleep", "3", FCVAR_ARCHIVE, "Seconds between AI thinks for idle NPCs (no enemy, no order, standing still) far from every player. Damage, an ally's alert or an order wakes them at once.", 0, 30)
 local cvLagRange = CreateConVar("ngl_lagcomp_range", "3000", FCVAR_ARCHIVE, "NPCs further than this from every player are not lag compensated (when the engine compensates them at all). 0 = leave lag compensation alone.", 0, 50000)
 local cvShare = CreateConVar("ngl_ai_share_sight", "1", FCVAR_ARCHIVE, "1 = squad and group members near their leader pick enemies from the leader's search instead of searching the grid themselves.", 0, 1)
@@ -1839,12 +1841,24 @@ end
 -- normally again from where it is on the same path.
 local railDown = { mask = MASK_NPCSOLID_BRUSHONLY, output = {} }
 local RAIL_MAX_DT = 2
+-- Far but seen (ngl_move_step_range): the same rails, but moved in short
+-- steps every ngl_move_step seconds from BehaveUpdate (Core.RailTick), not
+-- at each think, so a player watching from far away sees it walk. Its
+-- position, and so what's sent to clients, changes only once a step
+-- instead of every tick, and clients interpolate between steps (cl_interp
+-- is 0.1 s), so it looks the same. Returns "think" (unseen, stepped at each
+-- think), "step" (seen, stepped every ngl_move_step) or false.
 local function railOk(npc, nearestPlayerSqr, seen)
-	if seen or not npc.NGLPath then return false end
-	local r = cvRail:GetFloat()
-	if r <= 0 or nearestPlayerSqr < r * r then return false end
-	return not (npc.NGLTraverse or npc.NGLLeapState or npc.IsVehicleNPC or npc.NGLDrive
-		or npc.NGLAnimUntil or npc.NGLMeleeHitAt or npc.Flying or npc.NGLFly)
+	if not npc.NGLPath then return false end
+	if npc.NGLTraverse or npc.NGLLeapState or npc.IsVehicleNPC or npc.NGLDrive
+		or npc.NGLAnimUntil or npc.NGLMeleeHitAt or npc.Flying or npc.NGLFly then return false end
+	if not seen then
+		local r = cvRail:GetFloat()
+		if r > 0 and nearestPlayerSqr >= r * r then return "think" end
+	end
+	local s = cvStepRange:GetFloat()
+	if s > 0 and nearestPlayerSqr >= s * s then return "step" end
+	return false
 end
 
 local function railStep(npc, pos, dt)
@@ -1891,6 +1905,19 @@ local function railStep(npc, pos, dt)
 	npc.NGLGridPos = to
 	if not npc.NGLPath then npc.NGLRail = nil end
 	return to
+end
+
+-- A seen NPC on rails, from BehaveUpdate every tick: one step every
+-- ngl_move_step seconds, by as far as it walks in that time.
+function Core.RailTick(npc, now)
+	local last = npc.NGLRailLast or now
+	if now - last < cvStep:GetFloat() then return end
+	npc.NGLRailLast = now
+	if not npc.NGLPath then
+		npc.NGLRail, npc.NGLRailSeen = nil, nil
+		return
+	end
+	railStep(npc, npc:GetPos(), now - last)
 end
 
 ----------------------------------------------------------------------------
@@ -2088,11 +2115,16 @@ local function think(npc, now, dt, nearestPlayerSqr, seen, pos)
 		gridUpdate(npc, pos)
 		npc.NGLGridPos = pos
 	end
-	if railOk(npc, nearestPlayerSqr, seen) then
-		npc.NGLRail = true
+	local rail = railOk(npc, nearestPlayerSqr, seen)
+	if rail == "think" then
+		npc.NGLRail, npc.NGLRailSeen = true, nil
 		pos = railStep(npc, pos, dt)
+	elseif rail == "step" then
+		-- Stepped from BehaveUpdate (Core.RailTick) from now on.
+		if not npc.NGLRailSeen then npc.NGLRailLast = now end
+		npc.NGLRail, npc.NGLRailSeen = true, true
 	elseif npc.NGLRail then
-		npc.NGLRail = nil
+		npc.NGLRail, npc.NGLRailSeen = nil, nil
 	end
 	if not npc.NGLTraverse then
 		if not npc.NGLRail then

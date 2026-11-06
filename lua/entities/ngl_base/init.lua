@@ -446,8 +446,12 @@ function ENT:RunBehaviour() end
 function ENT:BehaveUpdate(interval)
 	if self.NGLDying then return end
 	if NGL.Off.move and NGL.IsOff(self, "move") then return end -- ngl_debug_parts
-	-- Moved along its path at each think instead (sv_core.lua, railStep).
-	if self.NGLRail then return end
+	-- Moved along its path at each think instead (sv_core.lua, railStep),
+	-- or in steps when players can see it from far away (Core.RailTick).
+	if self.NGLRail then
+		if self.NGLRailSeen then NGL.Core.RailTick(self, CurTime()) end
+		return
+	end
 	local t0 = SysTime()
 	-- A melee blow lands on its tick, not on the next AI think (up to a
 	-- tenth of a second later, more in a big fight), so it matches the swing.
