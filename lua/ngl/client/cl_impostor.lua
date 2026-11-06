@@ -24,6 +24,10 @@
 -- pictures start 4 times further away, and the NPCs in between are the
 -- real model.
 --
+-- In a big crowd, at most ngl_cl_full_max NPCs in view (40) are full
+-- models, the nearest ones: the rest are pictures even inside the range,
+-- though never closer than ngl_cl_full_min (600).
+--
 -- An NPC whose picture isn't baked yet is drawn normally until it is
 -- (ngl_cl_impostor_bake pictures a frame). Vehicles and NPCs with
 -- ENT.NoImpostor = true are always drawn normally.
@@ -51,6 +55,12 @@ local cvLight = CreateClientConVar("ngl_cl_impostor_light", "2", true, false,
 	"How strongly the map's light at each NPC darkens or tints its picture. Higher = brighter pictures.", 0, 20)
 local cvShow = CreateClientConVar("ngl_cl_impostor_show", "0", false, false,
 	"Shows NPC picture texture N on screen (1 = the first). 0 = off.", 0, 8)
+-- Full-model budget: past ngl_cl_full_max NPCs in view, the furthest ones
+-- are pictures even inside ngl_cl_impostor_range (see "Full-model budget").
+local cvFullMax = CreateClientConVar("ngl_cl_full_max", "40", true, false,
+	"Most NGL NPCs drawn as full models at once. With more in view, the furthest ones are drawn as pictures even inside ngl_cl_impostor_range (never closer than ngl_cl_full_min). 0 = no limit.", 0, 1000)
+local cvFullMin = CreateClientConVar("ngl_cl_full_min", "600", true, false,
+	"NGL NPCs closer than this are always full models, whatever ngl_cl_full_max says.", 0, 50000)
 
 local QUALITY = cvQuality:GetInt() >= 2 and 2 or 1 -- read once: the textures are made at this size
 local ATLAS = QUALITY == 2 and 4096 or 2048 -- texture size, pixels
@@ -411,8 +421,40 @@ end
 -- How much the view is zoomed in this frame: 1 at your normal field of
 -- view, 0.25 through a 4x scope (an NPC looks as big as one 4 times closer).
 local zoom, ZOOM_DEFAULT = 1, 75
+
+-- Full-model budget. Distance alone decides picture or model, so a horde
+-- of 150 zombies between 600 and 3000 units was 150 full models, each with
+-- its bones worked out and skinned every frame. Instead at most
+-- ngl_cl_full_max NPCs in view are full models: the nearest (as they look,
+-- zoom counted). Each frame the NPCs that got as far as the picture check
+-- (in view, not hidden behind a wall, not too far) leave how far they look;
+-- the next frame, the distance of the Nth nearest is where pictures start,
+-- if that's nearer than ngl_cl_impostor_range. Never nearer than
+-- ngl_cl_full_min. The steady FPS setting (cl_quality.lua) lowers N with
+-- the ranges.
+local cand, nCand, lastCand = {}, 0, 0 -- apparent distances squared, last frame
+local budgetD = math.huge              -- squared: further than this, a picture
+local function updateBudget()
+	for i = nCand + 1, lastCand do cand[i] = nil end
+	lastCand = nCand
+	local n = nCand
+	nCand = 0
+	local maxN = cvFullMax:GetInt()
+	if maxN > 0 then maxN = max(4, floor(maxN * (NGL.ClScale or 1) + 0.5)) end
+	if maxN <= 0 or n <= maxN then
+		budgetD = math.huge
+		return
+	end
+	table.sort(cand)
+	local m = cvFullMin:GetFloat()
+	budgetD = max(cand[maxN], m * m)
+end
+I._updateBudget = updateBudget
+I.BudgetD = function() return budgetD end
+
 hook.Add("PreRender", "NGL.Impostor.Frame", function()
 	for i in pairs(nQuads) do nQuads[i] = 0 end
+	updateBudget()
 	local v = render.GetViewSetup and render.GetViewSetup()
 	local fov = v and (v.fov_unscaled or v.fov)
 	local cv = GetConVar("fov_desired")
@@ -488,9 +530,13 @@ function I.Draw(npc, d)
 		npc.NGLImp = false
 		return false
 	end
+	range = range * (NGL.ClScale or 1) -- steady FPS (cl_quality.lua)
 	local want
 	d = d * zoom * zoom -- as far as it looks (zoomed in: nearer)
-	if npc.NGLImp then want = d > (range * LEAVE) ^ 2 else want = d > range * range end
+	nCand = nCand + 1
+	cand[nCand] = d
+	local lim = min(range * range, budgetD)
+	if npc.NGLImp then want = d > lim * LEAVE * LEAVE else want = d > lim end
 	npc.NGLImp = want
 	if not want then return false end
 
@@ -549,6 +595,11 @@ function I.Draw(npc, d)
 	q[o + 8], q[o + 9], q[o + 10] = npc.NGLImpR or 255, npc.NGLImpG or 255, npc.NGLImpB or 255
 	q[o + 11], q[o + 12], q[o + 13] = ux * h, uy * h, uz * h -- up the picture, half of it
 	nQuads[b.atlas] = n + 1
+	-- A picture only because of the budget (it's inside the picture range).
+	if d <= range * range then
+		local St = NGL.ClStats
+		if St then St.budget = (St.budget or 0) + 1 end
+	end
 	return true
 end
 

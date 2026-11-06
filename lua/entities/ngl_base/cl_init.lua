@@ -48,15 +48,19 @@ local function settings()
 	local f = FrameNumber()
 	if Set.frame == f then return Set end
 	Set.frame = f
-	Set.weapon = sq(cvWeaponRange)
+	-- Steady FPS (cl_quality.lua): detail ranges shrink by this when the
+	-- frame rate is below ngl_cl_fps_target. 1 = as set.
+	local q = NGL.ClScale or 1
+	local q2 = q * q
+	Set.weapon = sq(cvWeaponRange) * q2
 	Set.draw = sq(cvDrawRange)
-	Set.lod = sq(cvLodRange)
-	Set.shadow = sq(cvShadowRange)
-	Set.flex = sq(cvFlexRange)
+	Set.lod = sq(cvLodRange) * q2
+	Set.shadow = sq(cvShadowRange) * q2
+	Set.flex = sq(cvFlexRange) * q2
 	Set.reflect = sq(cvReflectRange)
 	Set.event = sq(cvEventRange)
 	local dr = cvDecalRange:GetFloat()
-	Set.decal = dr > 0 and dr * dr or nil
+	Set.decal = dr > 0 and dr * dr * q2 or nil
 	Set.occlusion = cvOcclusion:GetBool()
 	local near = cvOcclusionNear:GetFloat()
 	Set.occlusionNear = near * near
@@ -85,7 +89,7 @@ local function beyond(d, rSqr, was)
 end
 
 -- Counters for the client benchmark (cl_bench.lua): what Draw did this frame.
-NGL.ClStats = NGL.ClStats or { drawn = 0, occluded = 0, far = 0, impostor = 0 }
+NGL.ClStats = NGL.ClStats or { drawn = 0, occluded = 0, far = 0, impostor = 0, budget = 0 }
 local Stats = NGL.ClStats
 Stats.events, Stats.eventsCut, Stats.sounds = Stats.events or 0, Stats.eventsCut or 0, Stats.sounds or 0
 Stats.decalClears = Stats.decalClears or 0

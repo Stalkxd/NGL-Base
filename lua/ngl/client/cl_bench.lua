@@ -28,7 +28,7 @@ end
 hook.Add("Think", "NGL.Bench.ClientSample", function()
 	if not bucket then
 		local S = NGL.ClStats
-		if S then S.drawn, S.occluded, S.far, S.impostor, S.events, S.eventsCut, S.sounds, S.decalClears = 0, 0, 0, 0, 0, 0, 0, 0 end
+		if S then S.drawn, S.occluded, S.far, S.impostor, S.events, S.eventsCut, S.sounds, S.decalClears, S.budget = 0, 0, 0, 0, 0, 0, 0, 0, 0 end
 		return
 	end
 
@@ -53,6 +53,8 @@ hook.Add("Think", "NGL.Bench.ClientSample", function()
 		bucket.occluded[#bucket.occluded + 1] = S.occluded
 		bucket.far[#bucket.far + 1] = S.far
 		bucket.impostor[#bucket.impostor + 1] = S.impostor or 0
+		bucket.budget[#bucket.budget + 1] = S.budget or 0
+		bucket.scale[#bucket.scale + 1] = NGL.ClScale or 1
 		bucket.events = bucket.events + (S.events or 0)
 		bucket.eventsCut = bucket.eventsCut + (S.eventsCut or 0)
 		bucket.decals = bucket.decals + (S.decalClears or 0)
@@ -70,7 +72,7 @@ hook.Add("Think", "NGL.Bench.ClientSample", function()
 		-- Unfocused, the engine sleeps (engine_no_focus_sleep), which ruins the numbers.
 		bucket.unfocused = bucket.unfocused + 1
 	end
-	if S then S.drawn, S.occluded, S.far, S.impostor, S.events, S.eventsCut, S.sounds, S.decalClears = 0, 0, 0, 0, 0, 0, 0, 0 end
+	if S then S.drawn, S.occluded, S.far, S.impostor, S.events, S.eventsCut, S.sounds, S.decalClears, S.budget = 0, 0, 0, 0, 0, 0, 0, 0, 0 end
 end)
 
 net.Receive("ngl_bench_phase", function()
@@ -79,7 +81,7 @@ net.Receive("ngl_bench_phase", function()
 	-- "away": the client benchmark's second half, the player turned away
 	-- from the fight.
 	if phase == "baseline" or phase == "loaded" or phase == "away" then
-		bucket = { sv = {}, fps = {}, frames = 0, unfocused = 0, drawn = {}, occluded = {}, far = {}, impostor = {}, known = {}, events = 0, eventsCut = 0, sounds = 0, decals = 0, time = 0 }
+		bucket = { sv = {}, fps = {}, frames = 0, unfocused = 0, drawn = {}, occluded = {}, far = {}, impostor = {}, budget = {}, scale = {}, known = {}, events = 0, eventsCut = 0, sounds = 0, decals = 0, time = 0 }
 		buckets[phase] = bucket
 		return
 	end
@@ -102,6 +104,10 @@ net.Receive("ngl_bench_phase", function()
 				npcs_occluded = stats(b.occluded),
 				npcs_too_far = stats(b.far),
 				npcs_impostor = stats(b.impostor),
+				-- pictures only because of ngl_cl_full_max, and the steady
+				-- FPS scale of the detail ranges (1 = as set)
+				npcs_budget_pictures = stats(b.budget),
+				detail_scale = stats(b.scale),
 				npcs_on_client = stats(b.known),
 				-- a second: client animation events of NGL NPCs, the ones
 				-- skipped as too far, and sounds the client made for them
@@ -123,6 +129,9 @@ net.Receive("ngl_bench_phase", function()
 			decal_range = GetConVar("ngl_cl_decal_range") and GetConVar("ngl_cl_decal_range"):GetFloat(),
 			ragdoll_max = GetConVar("ngl_cl_ragdoll_max") and GetConVar("ngl_cl_ragdoll_max"):GetInt(),
 			event_range = GetConVar("ngl_cl_event_range") and GetConVar("ngl_cl_event_range"):GetFloat(),
+			full_max = GetConVar("ngl_cl_full_max") and GetConVar("ngl_cl_full_max"):GetInt(),
+			full_min = GetConVar("ngl_cl_full_min") and GetConVar("ngl_cl_full_min"):GetFloat(),
+			fps_target = GetConVar("ngl_cl_fps_target") and GetConVar("ngl_cl_fps_target"):GetFloat(),
 			fps_max = GetConVar("fps_max") and GetConVar("fps_max"):GetFloat(),
 			resolution = ScrW() .. "x" .. ScrH(),
 		}
