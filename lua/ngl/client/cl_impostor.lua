@@ -93,7 +93,11 @@ local atlases = {}  -- [i] = { rt, mat, dbg }
 local blocks = {}   -- texture slots, one animation of one model each
 local byId = {}     -- "<key>#<sequence>" -> block
 local rigs = {}     -- key -> hidden models used for baking
-local queue, qHead, queued = {}, 1, {}
+-- Pictures waiting to be made: `queue` for NPCs that need them now, `low`
+-- for the ones made ahead (only when nothing is needed now). Head and tail
+-- are counted, not read with #: a list emptied from the front has holes.
+local queue, qHead, qTail, queued = {}, 1, 0, {}
+local low, lHead, lTail = {}, 1, 0
 local quads = {}    -- [atlas] = flat list of numbers for this frame's pictures
 local nQuads = {}
 
@@ -257,11 +261,18 @@ local function removeRig(r)
 	if IsValid(r.ent) then r.ent:Remove() end
 end
 
-local function request(b, d, f, t)
+local function request(b, d, f, t, ahead)
 	local qk = b.id .. ":" .. t
 	if queued[qk] then return end
 	queued[qk] = true
-	queue[#queue + 1] = { b = b, id = b.id, d = d, f = f, t = t, qk = qk }
+	local job = { b = b, id = b.id, d = d, f = f, t = t, qk = qk }
+	if ahead then
+		lTail = lTail + 1
+		low[lTail] = job
+	else
+		qTail = qTail + 1
+		queue[qTail] = job
+	end
 end
 
 -- Paints the silhouette's alpha: the model again, white, alpha only.
@@ -478,7 +489,10 @@ end)
 -- and run (and what it's playing) are put on a list. When nothing else is
 -- waiting to be baked, the next animation on the list gets its slot and
 -- all its pictures requested, so a horde coming into view later finds
--- them made. Only into free slots: never pushes out pictures in use.
+-- them made. Only into free slots, at most half of them, and baked only
+-- when no picture is needed right now (0.31.1: they were queued in front of
+-- the ones needed now, so in a big fight NPCs waited many seconds for
+-- their pictures).
 local ahead, aHead, aheadSeen = {}, 1, {}
 local AHEAD_ACTS = { ACT_IDLE, ACT_WALK, ACT_RUN }
 function I.Ahead(npc)
@@ -504,8 +518,10 @@ local function aheadStep(now)
 	while aHead <= #ahead do
 		local a = ahead[aHead]
 		aHead = aHead + 1
+		-- Half the slots at most: the rest stay free for what's needed now
+		-- (a slot in use is only given up after EVICT_AFTER seconds unused).
 		local cap = cvAtlases:GetInt() * PER_ATLAS
-		if #blocks >= cap then break end -- full: only what's needed from now on
+		if #blocks >= cap * 0.5 then break end
 		if IsValid(a.npc) and not byId[a.key .. "#" .. a.seq] then
 			local r = getRig(a.key, a.npc, now)
 			local b = r and getBlock(a.key, a.seq, now)
@@ -513,7 +529,7 @@ local function aheadStep(now)
 				for di = 0, DIRS - 1 do
 					for fi = 0, FRAMES - 1 do
 						local t = di * FRAMES + fi + 1
-						if not b.ready[t] then request(b, di, fi, t) end
+						if not b.ready[t] then request(b, di, fi, t, true) end
 					end
 				end
 				break -- one animation at a time
@@ -540,15 +556,23 @@ local function bakeQueued()
 		end
 	end
 
-	if qHead > #queue then aheadStep(now) end
-	if qHead > #queue or I.Broken then return end
+	if qHead > qTail and lHead > lTail then aheadStep(now) end
+	if (qHead > qTail and lHead > lTail) or I.Broken then return end
 	local fog = render.GetFogMode()
 	render.FogMode(MATERIAL_FOG_NONE)
 	local left = cvBake:GetInt()
-	while left > 0 and qHead <= #queue and not I.Broken do
-		local job = queue[qHead]
-		queue[qHead] = nil
-		qHead = qHead + 1
+	while left > 0 and (qHead <= qTail or lHead <= lTail) and not I.Broken do
+		-- Needed now first, then the ones made ahead.
+		local job
+		if qHead <= qTail then
+			job = queue[qHead]
+			queue[qHead] = nil
+			qHead = qHead + 1
+		else
+			job = low[lHead]
+			low[lHead] = nil
+			lHead = lHead + 1
+		end
 		queued[job.qk] = nil
 		local ok, err = pcall(bake, job)
 		if not ok then
@@ -567,7 +591,8 @@ local function bakeQueued()
 		left = left - 1
 	end
 	render.FogMode(fog)
-	if qHead > #queue then queue, qHead = {}, 1 end
+	if qHead > qTail then queue, qHead, qTail = {}, 1, 0 end
+	if lHead > lTail then low, lHead, lTail = {}, 1, 0 end
 end
 hook.Add("PostRender", "NGL.Impostor.Bake", bakeQueued)
 
@@ -726,7 +751,8 @@ end)
 -- changes.
 function I.Reset()
 	blocks, byId = {}, {}
-	queue, qHead, queued = {}, 1, {}
+	queue, qHead, qTail, queued = {}, 1, 0, {}
+	low, lHead, lTail = {}, 1, 0
 	ahead, aHead, aheadSeen = {}, 1, {}
 end
 
