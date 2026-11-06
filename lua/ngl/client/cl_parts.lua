@@ -24,7 +24,7 @@ net.Receive("ngl_parts", function()
 	if kind == MSG_START then
 		-- Parts switched off here, on the client (cl_init.lua reads it).
 		local part, class = net.ReadString(), net.ReadString()
-		NGL.ClOff = (part == "draw" or part == "lowlod") and { [part] = true, class = class ~= "" and class or nil } or nil
+		NGL.ClOff = (part == "draw" or part == "lowlod" or part == "clanim") and { [part] = true, class = class ~= "" and class or nil } or nil
 		if i == 1 then windows = {} end
 		cur = { frame = 0, sv = 0, n = 0 }
 		windows[i] = cur

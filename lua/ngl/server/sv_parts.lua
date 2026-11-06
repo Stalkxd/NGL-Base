@@ -12,6 +12,12 @@
 --   leap     no leap attacks
 --   damage   melee and leap blows deal no damage (no pain, flinches, blood)
 --   anim     no animation update on the server (no frame advance, no legs)
+--   clanim   the server stops advancing the animation (legs and playback
+--            rate still sent), and your client plays it on its own from
+--            when it started: what moving animation to the client would
+--            save (the "client animation" idea). Hitboxes on the server
+--            stay in one pose meanwhile. Compare with "anim off": what
+--            clanim doesn't save is the cost of the client doing it.
 --   move     no walking (BehaveUpdate does nothing)
 --   think    no AI thinks (they keep going where they were going)
 --   sounds   every sound from these NPCs blocked on the server
@@ -31,7 +37,7 @@ function NGL.IsOff(ent, key)
 	return c == nil or ent:GetClass() == c
 end
 
-local PARTS = { "melee", "leap", "damage", "anim", "move", "think", "sounds", "send", "draw", "lowlod" }
+local PARTS = { "melee", "leap", "damage", "anim", "clanim", "move", "think", "sounds", "send", "draw", "lowlod" }
 -- Switched on the client of whoever ran it, not here:
 --   draw     these NPCs not drawn (still sent and animated on the client)
 --   lowlod   drawn with the model's lowest detail and no shadow
@@ -130,6 +136,7 @@ local function report(p)
 	end
 	say(p.ply, "  The start and end lines show how much the fight itself changed while testing; a part that saves more than that is worth looking at.")
 	say(p.ply, "  'server' is the server's own frame time (net_graph's sv): in singleplayer it's most of the frame.")
+	say(p.ply, "  clanim: the server's animation frozen and your client playing it itself. Close to 'anim off' = moving animation to clients is worth it; watch that NPCs still animate normally during it.")
 end
 
 net.Receive("ngl_parts", function(_, ply)

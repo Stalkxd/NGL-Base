@@ -245,6 +245,45 @@ hook.Add("Think", "NGL.ClearDecals", function()
 	end
 end)
 
+-- ngl_debug_parts "clanim": the server has stopped advancing this NPC's
+-- animation, so this client plays it itself, once a frame before it's
+-- drawn: from the cycle it had when its animation started, at the
+-- playback rate the server sends, looping or stopping at the end as the
+-- animation says. Set after the engine's interpolation, so it's what's
+-- drawn (and what the picture of a far NPC is picked by).
+local loops = {} -- [model .. sequence] = true when it loops
+local function seqLoops(self, seq)
+	local k = self:GetModel() .. "#" .. seq
+	local l = loops[k]
+	if l == nil then
+		local info = self:GetSequenceInfo(seq)
+		l = info ~= nil and info.flags ~= nil and bit.band(info.flags, 1) ~= 0
+		loops[k] = l
+	end
+	return l
+end
+function ENT:NGLClientCycle()
+	local f = FrameNumber()
+	if self.NGLClFrame == f then return end
+	self.NGLClFrame = f
+	local seq = self:GetSequence()
+	local now = CurTime()
+	if self.NGLClSeq ~= seq or not self.NGLClT then
+		self.NGLClSeq, self.NGLClCycle, self.NGLClT = seq, self:GetCycle(), now
+		return
+	end
+	local dur = self:SequenceDuration(seq)
+	local dt = now - self.NGLClT
+	self.NGLClT = now
+	if dur and dur > 0 and dt > 0 then
+		local c = self.NGLClCycle + dt * self:GetPlaybackRate() / dur
+		if seqLoops(self, seq) then c = c % 1 elseif c > 1 then c = 1 end
+		self.NGLClCycle = c
+	end
+	self:SetCycle(self.NGLClCycle)
+	self:InvalidateBoneCache()
+end
+
 function ENT:Draw(flags)
 	if self:GetNGLDead() then
 		if not self.NGLRagdolled then
@@ -261,7 +300,10 @@ function ENT:Draw(flags)
 		return
 	end
 
-	if NGL.ClOff ~= nil and clOff(self, "draw") then return end -- ngl_debug_parts
+	if NGL.ClOff ~= nil then -- ngl_debug_parts
+		if clOff(self, "draw") then return end
+		if clOff(self, "clanim") then self:NGLClientCycle() else self.NGLClT = nil end
+	end
 	local shadow = shadowPass(flags)
 	if shadow then
 		-- Into its shadow texture: only for NPCs that cast one and show.
