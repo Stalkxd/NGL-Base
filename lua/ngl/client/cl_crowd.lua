@@ -35,8 +35,11 @@ local cvLod = CreateClientConVar("ngl_cl_crowd_lod", "1", true, false,
 local cvLight = CreateClientConVar("ngl_cl_crowd_light", "1.5", true, false,
 	"How strongly the map's light at each shared-pose NPC lights it.", 0, 20)
 
+local cvBase = CreateClientConVar("ngl_cl_crowd_bone_base", "1", true, false,
+	"Shared poses: how vertices name their bones. 1 = as in the wiki's DrawSkinned example (bone n is the table's entry n). 0 = counted from 0. Only for testing; takes effect after ngl_cl_crowd_reset.", 0, 1)
+
 local CROWD_FRAMES = 16  -- poses per animation
-local MAX_BONES = 52     -- matrices one DrawSkinned call takes
+local MAX_BONES = 51     -- matrices one DrawSkinned call takes (52, one kept spare)
 local MAX_POSES = 6000   -- poses kept before they're all made again
 local LIGHT_REFRESH = 1  -- s between samples of the light at an NPC
 local POSES = { move_yaw = 0, move_x = 1, move_y = 0, aim_yaw = 0, aim_pitch = 0 }
@@ -90,6 +93,11 @@ end
 -- MAX_BONES bones (by whole triangles).
 local function buildParts(model, mask, skin)
 	local lod = cvLod:GetInt()
+	-- Each vertex names its bones by their place in the matrices table given
+	-- to DrawSkinned. The wiki's example names them as the table's keys
+	-- (1, 2, ...); naming them from 0 put every vertex on its neighbour's
+	-- bone: heads floating, guns on the ground (0.31.1).
+	local off = cvBase:GetInt() == 1 and 0 or -1
 	local meshes, bind = util.GetModelMeshes(model, lod, mask, skin)
 	if (not meshes or #meshes == 0) and lod > 0 then meshes, bind = util.GetModelMeshes(model, 0, mask, skin) end
 	if not meshes or #meshes == 0 or not bind then return nil end
@@ -125,7 +133,7 @@ local function buildParts(model, mask, skin)
 							curIdx[b] = #curBones
 						end
 					end
-					curTris[#curTris + 1] = { v = tri[k], s1 = curIdx[ws[1]] - 1, w1 = ws[2], s2 = curIdx[ws[3]] - 1, w2 = ws[4] }
+					curTris[#curTris + 1] = { v = tri[k], s1 = curIdx[ws[1]] + off, w1 = ws[2], s2 = curIdx[ws[3]] + off, w2 = ws[4] }
 				end
 			end
 			flush()
@@ -153,7 +161,7 @@ local function buildParts(model, mask, skin)
 		if not ok then error(err) end
 		p.imesh = im
 		p.tris = nil
-		p.slots = {} -- reused table of matrices for one draw
+		p.slots = { [0] = Matrix() } -- reused table of matrices for one draw
 	end
 	if #parts == 0 then return nil end
 	return parts, bind
@@ -321,6 +329,7 @@ function C.Draw(npc, d, pos)
 		world:SetAngles(angBuf)
 		render.SuppressEngineLighting(true)
 		render.SetLightingOrigin(pos)
+		render.SetLocalModelLights()
 		render.ResetModelLighting(lr * 0.6, lg * 0.6, lb * 0.6)
 		render.SetModelLighting(BOX_TOP, lr, lg, lb)
 		cam.PushModelMatrix(world)

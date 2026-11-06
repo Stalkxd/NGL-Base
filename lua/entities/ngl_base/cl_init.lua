@@ -179,7 +179,9 @@ local function shadowPass(flags)
 end
 
 function ENT:NGLOccluded(d, S, pos)
-	if not S.occlusion then
+	-- Vehicles are never hidden this way: there are only a few, and the
+	-- APC's big body covered its own test sprite, so it could vanish.
+	if not S.occlusion or self.IsVehicleNPC then
 		self.NGLHidden = false
 		return false
 	end
@@ -203,13 +205,16 @@ function ENT:NGLOccluded(d, S, pos)
 	-- vector is garbage the collector has to clear): the middle is the
 	-- position plus the box's middle height, read once, and the lead is
 	-- worked out in numbers into a vector kept on the NPC.
+	-- The size is read again every few seconds: read once, a size taken
+	-- before the box was set (0) stayed for good.
 	local r = self.NGLVisR
 	local cz = self.NGLVisCZ
-	if not r then
+	if not r or now > self.NGLVisSizeT then
 		r = math.max(16, self:BoundingRadius() * 0.8)
 		local mn, mx = self:OBBMins(), self:OBBMaxs()
 		cz = (mn.z + mx.z) * 0.5
 		self.NGLVisR, self.NGLVisCZ = r, cz
+		self.NGLVisSizeT = now + (r > 16 and 3 or 0.2)
 	end
 	local x, y, z = pos.x, pos.y, pos.z + cz
 	local lx, ly, lz, lastT = self.NGLVisLX, self.NGLVisLY, self.NGLVisLZ, self.NGLVisLastT
