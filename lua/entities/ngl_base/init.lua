@@ -341,6 +341,13 @@ function ENT:BodyUpdate()
 		else gap = cvAnimNear:GetFloat() end
 	end
 	local now = CurTime()
+	-- ngl_debug_parts "clanim": the client plays the animation itself
+	-- (cl_init.lua); the server only keeps legs and playback rate.
+	local clAnim = not oneOff and NGL.Off.clanim and NGL.IsOff(self, "clanim")
+	if clAnim then
+		self.NGLNextAnim = now
+		gap = -1
+	end
 	if gap <= 0 or now >= (self.NGLNextAnim or 0) then
 		self.NGLNextAnim = now + gap
 		-- Moving in full detail: the cycle plays at the speed we really move
@@ -363,7 +370,7 @@ function ENT:BodyUpdate()
 				if math.abs(rate - cur) > 0.05 * cur then self:SetPlaybackRate(rate) end
 			end
 		end
-		self:FrameAdvance()
+		if not clAnim then self:FrameAdvance() end
 	end
 	local B = NGL.Bench
 	if B then B.LuaTime = B.LuaTime + (SysTime() - t0) end
