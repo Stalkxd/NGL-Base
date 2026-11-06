@@ -11,7 +11,8 @@
 -- The pictures are made on this client, from the NPC's own model, the
 -- first time they are needed ("baked"): for each model (with its skin,
 -- bodygroups and weapon) and each animation it plays far away, 8 views
--- round it (front, front-left, left, ...) times 4 moments of the animation.
+-- round it (front, front-left, left, ...) times 8 moments of the animation
+-- (ngl_cl_impostor_frames; 4 before 0.31.0, which made running stutter).
 -- The picture shown is the view nearest to where you look at it from and
 -- the moment nearest to where its animation is, so it still walks, runs
 -- and turns. Pictures are kept in a few big textures (ngl_cl_impostor_atlases,
@@ -45,10 +46,14 @@ local cvOn = CreateClientConVar("ngl_cl_impostor", "1", true, false,
 	"1 = NGL NPCs further than ngl_cl_impostor_range are drawn as flat pictures of themselves, made on the fly from their own model (much cheaper: no bones, no skinning). 0 = always the real model.", 0, 1)
 local cvRange = CreateClientConVar("ngl_cl_impostor_range", "3000", true, false,
 	"NGL NPCs further than this are drawn as flat pictures (ngl_cl_impostor). Lower = more FPS, but you see the pictures closer up.", 0, 50000)
-local cvAtlases = CreateClientConVar("ngl_cl_impostor_atlases", "2", true, false,
-	"Textures for NPC pictures, 50 animations of one model each (64 MB of video memory each at ngl_cl_impostor_quality 2, 16 MB at 1). 0 = no pictures.", 0, 8)
+local cvAtlases = CreateClientConVar("ngl_cl_impostor_atlases", "4", true, false,
+	"Most textures for NPC pictures, made only as they fill up (64 MB of video memory each at ngl_cl_impostor_quality 2, 16 MB at 1; 25 animations of one model each at 8 moments, 50 at 4). 0 = no pictures.", 0, 8)
 local cvQuality = CreateClientConVar("ngl_cl_impostor_quality", "2", true, false,
 	"Sharpness of NPC pictures: 2 = 96 pixels a picture (sharp through scopes), 1 = 48 (a quarter of the video memory). Takes effect on the next map.", 1, 2)
+local cvFrames = CreateClientConVar("ngl_cl_impostor_frames", "8", true, false,
+	"Moments of each animation NPC pictures are made at: 8 = smoother walking and running, 4 = twice as many animations fit in a texture. Takes effect on the next map.", 4, 8)
+local cvAhead = CreateClientConVar("ngl_cl_impostor_ahead", "1", true, false,
+	"1 = pictures of an NPC's idle, walk and run are made as soon as it first shows up, a few a frame, so a horde coming into view doesn't make them all at once. 0 = only when needed.", 0, 1)
 local cvBake = CreateClientConVar("ngl_cl_impostor_bake", "24", true, false,
 	"Most NPC pictures made a frame. NPCs whose picture isn't made yet are drawn normally.", 1, 512)
 local cvLight = CreateClientConVar("ngl_cl_impostor_light", "2", true, false,
@@ -65,14 +70,17 @@ local cvFullMin = CreateClientConVar("ngl_cl_full_min", "600", true, false,
 local QUALITY = cvQuality:GetInt() >= 2 and 2 or 1 -- read once: the textures are made at this size
 local ATLAS = QUALITY == 2 and 4096 or 2048 -- texture size, pixels
 local TILE = QUALITY == 2 and 96 or 48 -- one picture, pixels (a far NPC is 10 to 25 tall, more zoomed in)
-local DIRS, FRAMES = 8, 4          -- views round the model, moments of the animation
-local BLOCK_W, BLOCK_H = DIRS * TILE, FRAMES * TILE -- one animation of one model: 768 x 384 (quality 1: 384 x 192)
+local DIRS = 8                     -- views round the model
+local FRAMES = cvFrames:GetInt() >= 8 and 8 or 4 -- moments of the animation (read once, like the size)
+local BLOCK_W, BLOCK_H = DIRS * TILE, FRAMES * TILE -- one animation of one model: 768 x 768 at 8 moments (quality 1: 384 x 384)
 local BCOLS, BROWS = math.floor(ATLAS / BLOCK_W), math.floor(ATLAS / BLOCK_H)
-local PER_ATLAS = BCOLS * BROWS    -- 5 x 10 = 50 animations a texture
+local PER_ATLAS = BCOLS * BROWS    -- 5 x 5 = 25 animations a texture at 8 moments, 5 x 10 = 50 at 4
 local FOV = 8                      -- narrow lens from far away: nearly flat, like the picture
 local STRIDE = 13                  -- numbers kept per picture drawn (see I.Draw)
 local ELEV = 6                     -- degrees the baking camera looks down
 local LEAVE = 0.92                 -- back to the real model this much closer than the range
+local JITTER = 0.08                -- each NPC switches up to this much nearer or further than the range,
+                                   -- so a crowd doesn't change in one visible ring
 local EVICT_AFTER = 5              -- seconds unused before an animation's pictures may be replaced
 local KEY_REFRESH = 2              -- seconds between checks of an NPC's skin and bodygroups
 local LIGHT_REFRESH = 1            -- seconds between samples of the light at an NPC
@@ -100,7 +108,7 @@ local floor, sqrt, deg, atan2, min, max = math.floor, math.sqrt, math.deg, math.
 local function dirIndex(rel)
 	return floor(((rel % 360) + 180 / DIRS) / (360 / DIRS)) % DIRS
 end
--- Which of the 4 moments of its animation.
+-- Which of the FRAMES moments of its animation.
 local function frameIndex(cycle)
 	return floor((cycle % 1) * FRAMES) % FRAMES
 end
@@ -466,6 +474,55 @@ hook.Add("PreRender", "NGL.Impostor.Frame", function()
 	end
 end)
 
+-- Baking ahead: when an NPC first shows up on this client, its idle, walk
+-- and run (and what it's playing) are put on a list. When nothing else is
+-- waiting to be baked, the next animation on the list gets its slot and
+-- all its pictures requested, so a horde coming into view later finds
+-- them made. Only into free slots: never pushes out pictures in use.
+local ahead, aHead, aheadSeen = {}, 1, {}
+local AHEAD_ACTS = { ACT_IDLE, ACT_WALK, ACT_RUN }
+function I.Ahead(npc)
+	if not cvAhead:GetBool() or not cvOn:GetBool() or I.Broken or npc.IsVehicleNPC or npc.NoImpostor then return end
+	if cvRange:GetFloat() <= 0 or cvAtlases:GetInt() <= 0 then return end
+	local now = RealTime()
+	local key = keyOf(npc, now)
+	local seqs = { npc:GetSequence() }
+	for _, act in ipairs(AHEAD_ACTS) do
+		local s = act and npc:SelectWeightedSequence(act)
+		if s and s > 0 then seqs[#seqs + 1] = s end
+	end
+	for _, seq in ipairs(seqs) do
+		local id = key .. "#" .. seq
+		if seq and seq >= 0 and not aheadSeen[id] then
+			aheadSeen[id] = true
+			ahead[#ahead + 1] = { npc = npc, key = key, seq = seq }
+		end
+	end
+end
+
+local function aheadStep(now)
+	while aHead <= #ahead do
+		local a = ahead[aHead]
+		aHead = aHead + 1
+		local cap = cvAtlases:GetInt() * PER_ATLAS
+		if #blocks >= cap then break end -- full: only what's needed from now on
+		if IsValid(a.npc) and not byId[a.key .. "#" .. a.seq] then
+			local r = getRig(a.key, a.npc, now)
+			local b = r and getBlock(a.key, a.seq, now)
+			if b then
+				for di = 0, DIRS - 1 do
+					for fi = 0, FRAMES - 1 do
+						local t = di * FRAMES + fi + 1
+						if not b.ready[t] then request(b, di, fi, t) end
+					end
+				end
+				break -- one animation at a time
+			end
+		end
+	end
+	if aHead > #ahead then ahead, aHead = {}, 1 end
+end
+
 -- Baking runs after the frame is drawn; the new pictures are used from the
 -- next frame on. A Lua error while baking turns pictures off instead of
 -- leaving the render target pushed (which would break the whole screen).
@@ -483,6 +540,7 @@ local function bakeQueued()
 		end
 	end
 
+	if qHead > #queue then aheadStep(now) end
 	if qHead > #queue or I.Broken then return end
 	local fog = render.GetFogMode()
 	render.FogMode(MATERIAL_FOG_NONE)
@@ -517,10 +575,12 @@ hook.Add("PostRender", "NGL.Impostor.Bake", bakeQueued)
 -- Drawing
 ----------------------------------------------------------------------------
 
+local lightAt = Vector()
+
 -- Called from the NPC's Draw (main view only, cl_init.lua) with its
--- distance squared. true = it's drawn as a picture this frame, so the
+-- distance squared (and its position and the eye, already read there). true = it's drawn as a picture this frame, so the
 -- caller draws nothing.
-function I.Draw(npc, d)
+function I.Draw(npc, d, pos, eye)
 	if not cvOn:GetBool() or npc.IsVehicleNPC or npc.NoImpostor then
 		npc.NGLImp = false
 		return false
@@ -531,6 +591,13 @@ function I.Draw(npc, d)
 		return false
 	end
 	range = range * (NGL.ClScale or 1) -- steady FPS (cl_quality.lua)
+	local j = npc.NGLImpJit
+	if not j then
+		-- Fixed per NPC, from its index: some switch a little sooner, some later.
+		j = 1 + ((npc:EntIndex() * 0.6180339) % 1 - 0.5) * 2 * JITTER
+		npc.NGLImpJit = j
+	end
+	range = range * j
 	local want
 	d = d * zoom * zoom -- as far as it looks (zoomed in: nearer)
 	nCand = nCand + 1
@@ -548,8 +615,8 @@ function I.Draw(npc, d)
 	local b = getBlock(key, seq, now)
 	if not b then return false end
 
-	local pos = npc:GetPos()
-	local eye = EyePos()
+	pos = pos or npc:GetPos()
+	eye = eye or EyePos()
 	local dx, dy = pos.x - eye.x, pos.y - eye.y
 	local rel = deg(atan2(-dy, -dx)) - npc:GetAngles().y
 	local di = dirIndex(rel)
@@ -565,10 +632,12 @@ function I.Draw(npc, d)
 	-- The map's light where it stands, now and then.
 	if now >= (npc.NGLImpLightAt or 0) then
 		npc.NGLImpLightAt = now + LIGHT_REFRESH * math.Rand(0.8, 1.2)
-		local l = render.GetLightColor(pos + Vector(0, 0, r.cz)) * cvLight:GetFloat()
-		npc.NGLImpR = floor(min(1, max(0.08, l.x)) * 255)
-		npc.NGLImpG = floor(min(1, max(0.08, l.y)) * 255)
-		npc.NGLImpB = floor(min(1, max(0.08, l.z)) * 255)
+		lightAt:SetUnpacked(pos.x, pos.y, pos.z + r.cz)
+		local l = render.GetLightColor(lightAt)
+		local k = cvLight:GetFloat()
+		npc.NGLImpR = floor(min(1, max(0.08, l.x * k)) * 255)
+		npc.NGLImpG = floor(min(1, max(0.08, l.y * k)) * 255)
+		npc.NGLImpB = floor(min(1, max(0.08, l.z * k)) * 255)
 	end
 
 	local l = sqrt(dx * dx + dy * dy)
@@ -658,6 +727,7 @@ end)
 function I.Reset()
 	blocks, byId = {}, {}
 	queue, qHead, queued = {}, 1, {}
+	ahead, aHead, aheadSeen = {}, 1, {}
 end
 
 -- ngl_cl_impostor_reset also starts the self-check again from the first way.

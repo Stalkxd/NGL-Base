@@ -84,3 +84,19 @@ concommand.Add("ngl_cl_fps_status", function()
 		target, lastFps, math.floor((NGL.ClScale or 1) * 100 + 0.5),
 		bd < math.huge and tostring(math.floor(math.sqrt(bd))) or "the picture range"))
 end)
+
+-- ngl_cl_debug_alloc [seconds]: how much new Lua memory this client makes
+-- a second (garbage the collector has to clear later, in pauses). The
+-- collector is paused while it measures, so the number is exact.
+concommand.Add("ngl_cl_debug_alloc", function(_, _, args)
+	local secs = math.Clamp(tonumber(args[1]) or 5, 1, 60)
+	collectgarbage("collect")
+	collectgarbage("stop")
+	local k0, t0 = collectgarbage("count"), SysTime()
+	print(string.format("[NGL] Measuring this client's Lua allocations for %d s...", secs))
+	timer.Simple(secs, function()
+		local kb, dt = collectgarbage("count") - k0, SysTime() - t0
+		collectgarbage("restart")
+		print(string.format("[NGL] Client Lua: %.0f KB of new memory a second (%.1f MB in %.1f s).", kb / dt, kb / 1024, dt))
+	end)
+end)

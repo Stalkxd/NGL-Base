@@ -93,6 +93,8 @@ NGL.ClStats = NGL.ClStats or { drawn = 0, occluded = 0, far = 0, impostor = 0, b
 local Stats = NGL.ClStats
 Stats.events, Stats.eventsCut, Stats.sounds = Stats.events or 0, Stats.eventsCut or 0, Stats.sounds or 0
 Stats.decalClears = Stats.decalClears or 0
+Stats.drawLua = Stats.drawLua or 0     -- seconds of our Lua in NPC Draw this frame (main view)
+Stats.drawModel = Stats.drawModel or 0 -- seconds in DrawModel for full models and weapons (the engine's part)
 
 -- Level of detail on this client, from near to far:
 --   full     the model as the engine picks it, with weapon and shadow
@@ -122,7 +124,7 @@ end
 function ENT:NGLDrawLevel(d, S)
 	local forceLow = NGL.ClOff ~= nil and clOff(self, "lowlod")
 	-- Shadow
-	local noShadow = forceLow or self.NGLImp == true or beyond(d, S.shadow, self.NGLNoShadow)
+	local noShadow = forceLow or self.NGLImp == true or self.NGLShared == true or beyond(d, S.shadow, self.NGLNoShadow)
 	if noShadow ~= (self.NGLNoShadow or false) then
 		self.NGLNoShadow = noShadow
 		if noShadow then self:DestroyShadow() else self:CreateShadow() end
@@ -176,7 +178,7 @@ local function shadowPass(flags)
 	return flags ~= nil and SHADOW_FLAGS ~= 0 and bit.band(flags, SHADOW_FLAGS) ~= 0
 end
 
-function ENT:NGLOccluded(d, S)
+function ENT:NGLOccluded(d, S, pos)
 	if not S.occlusion then
 		self.NGLHidden = false
 		return false
@@ -197,16 +199,38 @@ function ENT:NGLOccluded(d, S)
 		self.NGLVisHandle = h
 		self.NGLSeenAt = now
 	end
-	local r = math.max(16, self:BoundingRadius() * 0.8)
-	local at = self:WorldSpaceCenter()
-	local last, lastT = self.NGLVisLast, self.NGLVisLastT
-	self.NGLVisLast, self.NGLVisLastT = at, now
-	if last and now > lastT and now - lastT < 0.25 then
-		local lead = (at - last) * (LEAD / (now - lastT))
-		local len = lead:Length()
-		if len > LEAD_MAX then lead:Mul(LEAD_MAX / len) end
-		at = at + lead
+	-- No new vectors here (it runs for every NPC every frame, and each new
+	-- vector is garbage the collector has to clear): the middle is the
+	-- position plus the box's middle height, read once, and the lead is
+	-- worked out in numbers into a vector kept on the NPC.
+	local r = self.NGLVisR
+	local cz = self.NGLVisCZ
+	if not r then
+		r = math.max(16, self:BoundingRadius() * 0.8)
+		local mn, mx = self:OBBMins(), self:OBBMaxs()
+		cz = (mn.z + mx.z) * 0.5
+		self.NGLVisR, self.NGLVisCZ = r, cz
 	end
+	local x, y, z = pos.x, pos.y, pos.z + cz
+	local lx, ly, lz, lastT = self.NGLVisLX, self.NGLVisLY, self.NGLVisLZ, self.NGLVisLastT
+	self.NGLVisLX, self.NGLVisLY, self.NGLVisLZ, self.NGLVisLastT = x, y, z, now
+	local ax, ay, az = x, y, z
+	if lx and now > lastT and now - lastT < 0.25 then
+		local k = LEAD / (now - lastT)
+		local dx, dy, dz = (x - lx) * k, (y - ly) * k, (z - lz) * k
+		local len = math.sqrt(dx * dx + dy * dy + dz * dz)
+		if len > LEAD_MAX then
+			local f = LEAD_MAX / len
+			dx, dy, dz = dx * f, dy * f, dz * f
+		end
+		ax, ay, az = x + dx, y + dy, z + dz
+	end
+	local at = self.NGLVisAt
+	if not at then
+		at = Vector()
+		self.NGLVisAt = at
+	end
+	at:SetUnpacked(ax, ay, az)
 	if util.PixelVisible(at, r, h) > 0 then
 		self.NGLSeenAt = now
 		self.NGLHidden = false
@@ -307,7 +331,7 @@ function ENT:Draw(flags)
 	local shadow = shadowPass(flags)
 	if shadow then
 		-- Into its shadow texture: only for NPCs that cast one and show.
-		if self.NGLNoShadow or self.NGLHidden or self.NGLFar or self.NGLImp then return end
+		if self.NGLNoShadow or self.NGLHidden or self.NGLFar or self.NGLImp or self.NGLShared then return end
 		self:DrawModel()
 		return
 	end
@@ -321,7 +345,11 @@ function ENT:Draw(flags)
 		return
 	end
 
-	local d = EyePos():DistToSqr(self:GetPos())
+	local t0 = SysTime() -- Lua time of NPC drawing, for the benchmark
+	-- The main view's eye, read once a frame (EyePos makes a new vector).
+	local eye = mainOrigin or EyePos()
+	local pos = self:GetPos()
+	local d = eye:DistToSqr(pos)
 	local now = RealTime()
 	local away = now - (self.NGLViewT or 0) > DECAL_AWAY
 	self.NGLViewT = now
@@ -330,24 +358,49 @@ function ENT:Draw(flags)
 		if self.NGLWeaponEnt then self:NGLRemoveWeaponModel() end
 		Stats.far = Stats.far + 1
 		clearDecals(self, S, now)
+		Stats.drawLua = Stats.drawLua + (SysTime() - t0)
 		return
+	end
+	local Imp = NGL.Impostor
+	if not self.NGLAheadDone and Imp and Imp.Ahead then
+		-- First time within draw range (seen or behind a wall): its
+		-- pictures are made ahead, a few a frame.
+		self.NGLAheadDone = true
+		Imp.Ahead(self)
 	end
 	-- Hidden behind a wall: skip the model and the weapon, keep the weapon
 	-- model for when it comes out.
-	if self:NGLOccluded(d, S) then
+	if self:NGLOccluded(d, S, pos) then
 		Stats.occluded = Stats.occluded + 1
 		clearDecals(self, S, now)
+		Stats.drawLua = Stats.drawLua + (SysTime() - t0)
 		return
 	end
 	-- Far: a flat picture of it instead (cl_impostor.lua), once one is made.
-	local Imp = NGL.Impostor
-	if Imp and Imp.Draw(self, d) then
+	if Imp and Imp.Draw(self, d, pos, eye) then
 		Stats.impostor = Stats.impostor + 1
+		self.NGLShared = false
 		clearDecals(self, S, now)
+		Stats.drawLua = Stats.drawLua + (SysTime() - t0)
 		return
 	end
+	-- Mid-range in a crowd: drawn with a pose shared with every NPC playing
+	-- the same moment of the same animation (cl_crowd.lua), when that's on.
+	local Crowd = NGL.Crowd
+	if Crowd and Crowd.Draw(self, d, pos) then
+		self.NGLShared = true
+		Stats.shared = (Stats.shared or 0) + 1
+		clearDecals(self, S, now)
+		Stats.drawLua = Stats.drawLua + (SysTime() - t0)
+		return
+	end
+	self.NGLShared = false
 
 	if away or (S.decal and d > S.decal) then clearDecals(self, S, now) end
+	-- From here on it's mostly the engine's work (bones, skinning, drawing):
+	-- timed apart from our Lua.
+	local t1 = SysTime()
+	Stats.drawLua = Stats.drawLua + (t1 - t0)
 	self:DrawModel()
 	Stats.drawn = Stats.drawn + 1
 
@@ -377,6 +430,7 @@ function ENT:Draw(flags)
 		-- Out of weapon range: free it; it's made again when we come closer.
 		self:NGLRemoveWeaponModel()
 	end
+	Stats.drawModel = Stats.drawModel + (SysTime() - t1)
 end
 
 -- The model's client-side animation events (footsteps, sounds, effects),
