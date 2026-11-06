@@ -275,6 +275,7 @@ if CLIENT then
 				want = clamp((dist - R) / w.travel, -1, 1)
 			end
 			w.cur = w.cur + (want - w.cur) * k
+			if w.cur ~= w.cur then w.cur = 0 end
 			self:SetPoseParameter(w.pose, w.cur)
 		end
 	end
@@ -288,6 +289,8 @@ if CLIENT then
 		local cy, cp = self.NGLCAimYaw or ay, self.NGLCAimPitch or 0
 		cy = NormalizeAngle(cy + clamp(AngleDiff(ay, cy), -step, step))
 		cp = cp + clamp(ap - cp, -step, step)
+		if cy ~= cy then cy = 90 end
+		if cp ~= cp then cp = 0 end
 		self.NGLCAimYaw, self.NGLCAimPitch = cy, cp
 		self:SetPoseParameter("vehicle_weapon_yaw", cy)
 		self:SetPoseParameter("vehicle_weapon_pitch", cp)
@@ -304,8 +307,14 @@ if CLIENT then
 		if dt <= 0 then return end
 		local h = rad(yaw + self.HeadingOffset)
 		local speed = ((pos.x - lastPos.x) * math.cos(h) + (pos.y - lastPos.y) * math.sin(h)) / dt
+		-- A broken number (NaN) in a pose breaks every bone and the whole
+		-- APC disappears, for good: a jump in position (spawned, sent
+		-- again after being out of view) can't be allowed to make one.
+		if speed ~= speed or math.abs(speed) > 5000 then speed = 0 end
 		self.NGLSpeed = speed
-		self.NGLSpin = ((self.NGLSpin or 0) + deg(speed * dt / self.WheelRadius)) % 360
+		local spin = ((self.NGLSpin or 0) + deg(speed * dt / self.WheelRadius)) % 360
+		if spin ~= spin then spin = 0 end
+		self.NGLSpin = spin
 		for _, p in ipairs(self.NGLWheelSpin) do
 			self:SetPoseParameter(p[1], p[2] + (p[3] - p[2]) * self.NGLSpin / 360)
 		end
@@ -316,7 +325,9 @@ if CLIENT then
 				local yawRate = rad(AngleDiff(yaw, lastYaw)) / dt
 				want = clamp(deg(math.atan(yawRate * self.WheelBase / speed)) / self.MaxSteer, -1, 1)
 			end
-			self.NGLSteerF = (self.NGLSteerF or 0) + (want - (self.NGLSteerF or 0)) * math.min(dt * 6, 1)
+			local sf = (self.NGLSteerF or 0) + (want - (self.NGLSteerF or 0)) * math.min(dt * 6, 1)
+			if sf ~= sf then sf = 0 end
+			self.NGLSteerF = sf
 			-- The model steers right for positive values; our turn rate is
 			-- positive turning left.
 			local f = (1 - self.NGLSteerF) / 2
