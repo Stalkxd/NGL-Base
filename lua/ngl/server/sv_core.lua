@@ -1853,10 +1853,10 @@ local function railOk(npc, nearestPlayerSqr, seen)
 	if npc.NGLTraverse or npc.NGLLeapState or npc.IsVehicleNPC or npc.NGLDrive
 		or npc.NGLAnimUntil or npc.NGLMeleeHitAt or npc.Flying or npc.NGLFly then return false end
 	if not seen then
-		local r = cvRail:GetFloat()
+		local r = cvRail:GetFloat() * (NGL.SvScale or 1) -- steady tick: from closer
 		if r > 0 and nearestPlayerSqr >= r * r then return "think" end
 	end
-	local s = cvStepRange:GetFloat()
+	local s = cvStepRange:GetFloat() * (NGL.SvScale or 1)
 	if s > 0 and nearestPlayerSqr >= s * s then return "step" end
 	return false
 end
@@ -2093,9 +2093,10 @@ local function crowdCheck(npc, now, pos)
 end
 
 local function think(npc, now, dt, nearestPlayerSqr, seen, pos)
-	npc.NGLNear = nearestPlayerSqr < cvVisual:GetFloat() ^ 2 -- sounds and voice lines: by distance
+	local sc = NGL.SvScale or 1 -- steady tick (sv_tickguard.lua): both come in closer
+	npc.NGLNear = nearestPlayerSqr < (cvVisual:GetFloat() * sc) ^ 2 -- sounds and voice lines: by distance
 	npc.NGLSeen = seen -- some player may see it (in range and in their PVS)
-	local detailSqr = cvDetail:GetFloat() ^ 2
+	local detailSqr = (cvDetail:GetFloat() * sc) ^ 2
 	npc.NGLDetail = seen and nearestPlayerSqr < (npc.NGLDetail and detailSqr * DETAIL_LEAVE or detailSqr)
 	if npc.NGLMeleeHitAt and now >= npc.NGLMeleeHitAt then resolveMelee(npc) end
 	if nearestPlayerSqr < 10000 then playerOverlap(npc, now) end
@@ -2343,13 +2344,82 @@ local function isIdle(npc)
 		and not npc.NGLLeapState and not npc.NGLTraverse and not npc.IsVehicleNPC
 end
 
+-- What one tick's thinks need, read once a tick (the scheduler fills it).
+local T = { np = 0 }
+local prioCursor = 0
+local PRIO_SHARE = 0.7
+
+-- One NPC's think, and what follows it. Returns nothing.
+local function runOne(npc, now)
+	local np = T.np
+	local pos = npc:GetPos()
+	local best = math.huge
+	for p = 1, np do
+		local d = pos:DistToSqr(plyPos[p])
+		if d < best then best = d end
+	end
+	local seen = seenByPlayer(npc, pos, best, T.visualSqr, np, T.pvs)
+
+	-- Near but out of every player's sight: the medium rate.
+	-- Far, with nothing to do: asleep (Core.Wake ends it early).
+	-- Steady tick (sv_tickguard.lua) stretches them when the server falls
+	-- behind: near NPCs a player sees the least.
+	local interval
+	local near = best < T.nearSqr
+	if near then
+		interval = seen and T.rNear * T.nearStretch or T.rMid * T.stretch
+	elseif best < T.midSqr then
+		interval = T.rMid * T.stretch
+	elseif T.rSleep > T.rFar and isIdle(npc) then
+		interval = T.rSleep
+	else
+		interval = T.rFar * T.stretch
+	end
+	-- Near NPCs a player sees think first, every tick, before the rest
+	-- (their fights are the ones people watch).
+	npc.NGLPrio = near and seen or nil
+	local dt = now - npc.NGLLastThink
+	local B = T.B
+	if B then
+		B.ThinkLate = (B.ThinkLate or 0) + (now - npc.NGLNextThink)
+		B.ThinkN = (B.ThinkN or 0) + 1
+	end
+	npc.NGLLastThink = now
+	npc.NGLNextThink = now + interval * Rand(0.9, 1.1)
+
+	local AL = NGL.Alloc
+	if NGL.Off.think and NGL.IsOff(npc, "think") then
+		-- ngl_debug_parts: no thinking
+	elseif AL and AL.On() then
+		AL.Measure("think: decisions and fighting (the rest)", think, npc, now, dt, best, seen, pos)
+	else
+		think(npc, now, dt, best, seen, pos)
+	end
+	if npc.NGLDying then -- nothing
+	elseif npc.NGLDetail then npc:NGLUpdatePose()
+	elseif npc.NGLPosed then npc:NGLResetPose() end
+
+	-- Lag compensation (when the engine compensates NPCs at all)
+	-- only near players: far ones aren't recorded every tick.
+	if npc.NGLLagDefault then
+		local want = best < T.lagSqr
+		if want ~= npc.NGLLagOn then
+			npc.NGLLagOn = want
+			npc:SetLagCompensated(want)
+		end
+	end
+end
+
 hook.Add("Tick", "NGL.Core.Scheduler", function()
 	local n = #List
 	if n == 0 then return end
 	if aiDisabled and aiDisabled:GetBool() then return end
 
 	local start = SysTime()
-	local budget = cvBudget:GetFloat() / 1000
+	local scale = NGL.SvScale or 1
+	-- Steady tick shrinks the budget too, never under 1 ms.
+	local budgetMs = cvBudget:GetFloat()
+	local budget = math.max(math.min(budgetMs, 1), budgetMs * scale) / 1000
 	local now = CurTime()
 
 	-- Player positions once per tick (there are few players, many NPCs).
@@ -2364,73 +2434,49 @@ hook.Add("Tick", "NGL.Core.Scheduler", function()
 	for i = np + 1, #players do players[i] = nil end
 	for i = np + 1, #plyPos do plyPos[i] = nil end
 
-	local nearSqr, midSqr = cvNear:GetFloat() ^ 2, cvMid:GetFloat() ^ 2
-	local rNear, rMid, rFar = cvRateNear:GetFloat(), cvRateMid:GetFloat(), cvRateFar:GetFloat()
-	local rSleep = cvRateSleep:GetFloat()
-	local visualSqr = cvVisual:GetFloat() ^ 2
-	local pvs = cvPVS:GetBool()
+	T.np = np
+	T.nearSqr, T.midSqr = cvNear:GetFloat() ^ 2, cvMid:GetFloat() ^ 2
+	T.rNear, T.rMid, T.rFar = cvRateNear:GetFloat(), cvRateMid:GetFloat(), cvRateFar:GetFloat()
+	T.rSleep = cvRateSleep:GetFloat()
+	T.stretch = 1 / scale
+	T.nearStretch = 1 / math.sqrt(scale)
+	T.visualSqr = cvVisual:GetFloat() ^ 2 -- who may be seen isn't scaled: unseen NPCs may jump along their path
+	T.pvs = cvPVS:GetBool()
 	local lagR = cvLagRange:GetFloat()
-	local lagSqr = lagR > 0 and lagR * lagR or math.huge
-	local B = NGL.Bench
+	T.lagSqr = lagR > 0 and lagR * lagR or math.huge
+	T.B = NGL.Bench
 
+	-- First pass: near NPCs a player sees (from their last think), from
+	-- where the last pass stopped, with at most PRIO_SHARE of the budget.
+	-- Second pass: everyone else, in turn, with the rest of the budget (at
+	-- least a third of it, and always one think, so nobody waits for good
+	-- behind a big fight).
+	local prioBudget = budget * PRIO_SHARE
 	for i = 1, n do
-		local idx = ((cursor + i - 1) % n) + 1
+		local idx = ((prioCursor + i - 1) % n) + 1
 		local npc = List[idx]
-		if npc and now >= npc.NGLNextThink then
+		if npc and npc.NGLPrio and now >= npc.NGLNextThink then
 			if not IsValid(npc) then
 				Core.Remove(npc)
 			else
-				local pos = npc:GetPos()
-				local best = math.huge
-				for p = 1, np do
-					local d = pos:DistToSqr(plyPos[p])
-					if d < best then best = d end
-				end
-				local seen = seenByPlayer(npc, pos, best, visualSqr, np, pvs)
-
-				-- Near but out of every player's sight: the medium rate.
-				-- Far, with nothing to do: asleep (Core.Wake ends it early).
-				local interval
-				if best < nearSqr then
-					interval = seen and rNear or rMid
-				elseif best < midSqr then
-					interval = rMid
-				elseif rSleep > rFar and isIdle(npc) then
-					interval = rSleep
-				else
-					interval = rFar
-				end
-				local dt = now - npc.NGLLastThink
-				if B then
-					B.ThinkLate = (B.ThinkLate or 0) + (now - npc.NGLNextThink)
-					B.ThinkN = (B.ThinkN or 0) + 1
-				end
-				npc.NGLLastThink = now
-				npc.NGLNextThink = now + interval * Rand(0.9, 1.1)
-
-				local AL = NGL.Alloc
-				if NGL.Off.think and NGL.IsOff(npc, "think") then
-					-- ngl_debug_parts: no thinking
-				elseif AL and AL.On() then
-					AL.Measure("think: decisions and fighting (the rest)", think, npc, now, dt, best, seen, pos)
-				else
-					think(npc, now, dt, best, seen, pos)
-				end
-				if npc.NGLDying then -- nothing
-				elseif npc.NGLDetail then npc:NGLUpdatePose()
-				elseif npc.NGLPosed then npc:NGLResetPose() end
-
-				-- Lag compensation (when the engine compensates NPCs at all)
-				-- only near players: far ones aren't recorded every tick.
-				if npc.NGLLagDefault then
-					local want = best < lagSqr
-					if want ~= npc.NGLLagOn then
-						npc.NGLLagOn = want
-						npc:SetLagCompensated(want)
-					end
-				end
+				runOne(npc, now)
 			end
-
+			if SysTime() - start > prioBudget then
+				prioCursor = idx
+				break
+			end
+		end
+	end
+	n = #List
+	for i = 1, n do
+		local idx = ((cursor + i - 1) % n) + 1
+		local npc = List[idx]
+		if npc and not npc.NGLPrio and now >= npc.NGLNextThink then
+			if not IsValid(npc) then
+				Core.Remove(npc)
+			else
+				runOne(npc, now)
+			end
 			if SysTime() - start > budget then
 				cursor = idx
 				break
@@ -2438,7 +2484,7 @@ hook.Add("Tick", "NGL.Core.Scheduler", function()
 		end
 	end
 
-	if B then B.LuaTime = B.LuaTime + (SysTime() - start) end
+	if T.B then T.B.LuaTime = T.B.LuaTime + (SysTime() - start) end
 end)
 
 concommand.Add("ngl_status", function(ply)
@@ -2446,6 +2492,7 @@ concommand.Add("ngl_status", function(ply)
 	local nCells = 0
 	for _ in pairs(cells) do nCells = nCells + 1 end
 	local msg = string.format("[NGL] %d NPCs, %d grid cells in use, budget %.1f ms/tick", #List, nCells, cvBudget:GetFloat())
+	if NGL.TickGuard and NGL.TickGuard.Status then msg = msg .. "\n[NGL] " .. NGL.TickGuard.Status() end
 	print(msg)
 	if IsValid(ply) then ply:PrintMessage(HUD_PRINTCONSOLE, msg) end
 end)

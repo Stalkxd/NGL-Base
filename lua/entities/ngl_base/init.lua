@@ -339,6 +339,12 @@ function ENT:BodyUpdate()
 		if self.NGLSeen == false then gap = cvAnimHidden:GetFloat()
 		elseif not self.NGLDetail then gap = cvAnimFar:GetFloat()
 		else gap = cvAnimNear:GetFloat() end
+		-- Steady tick (sv_tickguard.lua): far and hidden ones less often
+		-- when the server falls behind, at most 0.15 / 0.3 s apart.
+		local sc = NGL.SvScale or 1
+		if sc < 1 and not self.NGLDetail then
+			gap = math.max(gap, math.min(gap / sc, self.NGLSeen == false and 0.3 or 0.15))
+		end
 	end
 	local now = CurTime()
 	-- ngl_debug_parts "clanim": the client plays the animation itself

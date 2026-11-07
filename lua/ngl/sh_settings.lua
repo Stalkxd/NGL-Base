@@ -17,6 +17,8 @@ local S = NGL.Settings
 S.Server = {
 	{ title = "AI" },
 	{ "ngl_ai_budget", "AI budget (ms a tick)", 0.5, 20, 1, help = "CPU time the AI may use each tick. Higher: smarter crowds, slower server." },
+	{ "ngl_sv_tick_guard", "Steady tick: 0 off, 1 dedicated, 2 always", 0, 2, 0, help = "When the server falls behind its tick rate, NPCs think less often and lose detail from closer until it keeps up." },
+	{ "ngl_sv_tick_guard_min", "Steady tick: lowest detail", 0.1, 1, 2 },
 	{ "ngl_ai_near", "Full AI range", 300, 6000, 0, help = "NPCs this close to a player think at the full rate." },
 	{ "ngl_ai_mid", "Reduced AI range", 1000, 15000, 0 },
 	{ "ngl_ai_melee_slots", "Melee attackers per target", 0, 12, 0, help = "How many melee NPCs attack one target at once; the rest wait round it. 0 = no limit." },

@@ -92,7 +92,7 @@ local function serverFrameMs()
 end
 
 local function newBucket()
-	return { frame = {}, lua = {}, late = {}, spikes = {}, overruns = 0, ticks = 0, gcAlloc = 0, gcCycles = 0, slotted = {}, waiting = {} }
+	return { frame = {}, lua = {}, late = {}, spikes = {}, overruns = 0, ticks = 0, gcAlloc = 0, gcCycles = 0, slotted = {}, waiting = {}, scale = {} }
 end
 
 local function stats(list)
@@ -117,6 +117,7 @@ local function stats(list)
 		p95 = pct(0.95),
 		p99 = pct(0.99),
 		max = sorted[n],
+		min = sorted[1],
 		n = n,
 	}
 end
@@ -312,6 +313,7 @@ local function sample(run, bucket)
 	if ms then bucket.frame[#bucket.frame + 1] = ms end
 	local luaMs = B.LuaTime * 1000
 	bucket.lua[#bucket.lua + 1] = luaMs
+	bucket.scale[#bucket.scale + 1] = NGL.SvScale or 1 -- steady tick (sv_tickguard.lua)
 
 	-- How late NGL thinks ran this tick (the AI budget was full when this
 	-- grows), and the Lua heap: what's allocated, and when a GC cycle ends
@@ -410,6 +412,8 @@ local function finish(run)
 		frame_ms = loaded,
 		bench_lua_ms = lua,
 		think_late_ms = stats(run.loaded.late),
+		tick_guard_scale = stats(run.loaded.scale),
+		tick_guard = GetConVar("ngl_sv_tick_guard") and GetConVar("ngl_sv_tick_guard"):GetInt(),
 		lua_spikes = run.loaded.spikes,
 		gc_alloc_kb_per_s = run.loaded.gcAlloc / math.max(0.001, run.duration or cvDuration:GetFloat()),
 		gc_cycles = run.loaded.gcCycles,
@@ -497,6 +501,10 @@ local function finish(run)
 	if lua and lua.max > 0 then
 		say(p, "  NGL / bench Lua:       " .. fmt(lua))
 		if result.think_late_ms then say(p, "  NGL thinks late by:    " .. fmt(result.think_late_ms)) end
+		local sc = result.tick_guard_scale
+		if sc and sc.min < 1 then
+			say(p, string.format("  Steady tick detail:    avg x%.2f, lowest x%.2f (the server fell behind and NPCs were turned down)", sc.avg, sc.min))
+		end
 		say(p, string.format("  Lua heap: %.0f KB allocated a second, %d GC cycles ended", result.gc_alloc_kb_per_s, result.gc_cycles))
 		for _, sp in ipairs(result.lua_spikes) do
 			say(p, string.format("  Lua spike: tick %d, %.1f ms%s", sp.tick, sp.lua_ms,
