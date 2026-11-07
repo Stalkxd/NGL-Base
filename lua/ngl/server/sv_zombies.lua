@@ -52,6 +52,7 @@ function Z.SpawnCrab(class, pos, yaw, enemy, opts)
 	crab:Spawn()
 	crab:Activate()
 	Z.Live[crab] = true
+	crab.NGLCrabT = CurTime()
 	opts = opts or {}
 	-- Next tick, once its locomotion is running.
 	timer.Simple(0, function()
@@ -111,3 +112,123 @@ function Z.OnKilled(npc, dmginfo)
 		Z.SpawnCrab(class, spot, yaw, enemy, { leap = false })
 	end)
 end
+
+
+----------------------------------------------------------------------------
+-- Crabs that can't be killed (0.32.2)
+--
+-- A crab coming off a zombie in a horde near a player could now and then
+-- not be killed: shots went past it or hit something in front of it. Fitting
+-- its spawn spot (0.26.4) wasn't enough, and the exact cause wasn't caught
+-- in game, so instead of guessing one more cause, two checks make sure any
+-- crab people can see and shoot dies:
+--
+-- 1. Stuck check. For STUCK_TIME seconds after it appears (and while it
+--    leaps), every STUCK_EVERY seconds: is its box inside a wall, a prop or
+--    the floor? Then it's moved to the nearest free spot around it, or, with
+--    none, killed.
+-- 2. Player shots near a crab hit it. After each bullet a player fires
+--    (PostEntityFireBullets), a crab whose middle is within SHOT_RADIUS of
+--    the bullet's path, before what the bullet hit, takes the bullet's
+--    damage, unless the bullet already hit it. Only the crabs that came off
+--    zombies are checked (at most ngl_headcrab_max), so it costs a few
+--    distance checks a shot.
+----------------------------------------------------------------------------
+
+local STUCK_TIME = 3
+local STUCK_EVERY = 0.25
+local SHOT_RADIUS = 14
+-- Walls, the floor and props; not NPCs or players (NGL NPCs walk through
+-- each other, so a crab overlapping a zombie isn't stuck).
+local stuckCrab
+local function stuckFilter(e)
+	return e ~= stuckCrab and not (e:IsPlayer() or e:IsNPC() or e:IsNextBot())
+end
+local stuckTrace = { mask = MASK_NPCSOLID, filter = stuckFilter, output = {} }
+local stuckOut = stuckTrace.output
+local OFFSETS = {
+	Vector(0, 0, 8), Vector(16, 0, 4), Vector(-16, 0, 4), Vector(0, 16, 4), Vector(0, -16, 4),
+	Vector(24, 24, 8), Vector(-24, 24, 8), Vector(24, -24, 8), Vector(-24, -24, 8), Vector(0, 0, 24),
+}
+
+local function boxStuck(crab, pos)
+	local t = stuckTrace
+	t.start, t.endpos = pos, pos
+	t.mins, t.maxs = crab:OBBMins(), crab:OBBMaxs()
+	stuckCrab = crab
+	util.TraceHull(t)
+	return stuckOut.StartSolid
+end
+
+local function unstick(crab)
+	local pos = crab:GetPos()
+	if not boxStuck(crab, pos) then return end
+	for _, o in ipairs(OFFSETS) do
+		local p = pos + o
+		if not boxStuck(crab, p) then
+			crab:SetPos(p)
+			return
+		end
+	end
+	-- Nowhere free round it: it's gone, rather than left unkillable.
+	local d = DamageInfo()
+	d:SetDamage(crab:Health() + 100)
+	d:SetDamageType(DMG_GENERIC)
+	d:SetAttacker(game.GetWorld())
+	d:SetInflictor(game.GetWorld())
+	crab:TakeDamageInfo(d)
+end
+
+local nextStuck = 0
+hook.Add("Tick", "NGL.Zombie.CrabStuck", function()
+	local now = CurTime()
+	if now < nextStuck or next(Z.Live) == nil then return end
+	nextStuck = now + STUCK_EVERY
+	for crab in pairs(Z.Live) do
+		if IsValid(crab) and not crab.NGLDying
+			and (now - (crab.NGLCrabT or 0) < STUCK_TIME or crab.NGLLeapState) then
+			unstick(crab)
+		end
+	end
+end)
+
+hook.Add("PostEntityFireBullets", "NGL.Zombie.CrabShots", function(ent, data)
+	if not (IsValid(ent) and ent:IsPlayer()) or next(Z.Live) == nil then return end
+	local tr = data.Trace
+	if not tr then return end
+	local a, b = tr.StartPos, tr.HitPos
+	if not a or not b then return end
+	local dir = b - a
+	local len = dir:Length()
+	if len < 1 then return end
+	dir:Div(len)
+	local best, bestAlong
+	for crab in pairs(Z.Live) do
+		if IsValid(crab) and not crab.NGLDying and crab ~= tr.Entity then
+			local c = crab:WorldSpaceCenter()
+			local along = (c - a):Dot(dir)
+			-- Before what the bullet hit (a crab half inside the wall it hit
+			-- counts), and close to its path.
+			if along > 0 and along < len + SHOT_RADIUS and (not bestAlong or along < bestAlong)
+				and (a + dir * along):DistToSqr(c) < SHOT_RADIUS * SHOT_RADIUS then
+				best, bestAlong = crab, along
+			end
+		end
+	end
+	if not best then return end
+	-- HL2's own guns leave Damage at 0: their ammo type says how much.
+	local dmg = data.Damage or 0
+	if dmg <= 0 and data.AmmoType then
+		local id = game.GetAmmoID(data.AmmoType)
+		dmg = id and id >= 0 and game.GetAmmoPlayerDamage(id) or 0
+	end
+	local d = DamageInfo()
+	d:SetDamage(dmg > 0 and dmg or 5)
+	d:SetDamageType(DMG_BULLET)
+	d:SetAttacker(ent)
+	local wep = ent:GetActiveWeapon()
+	d:SetInflictor(IsValid(wep) and wep or ent)
+	d:SetDamagePosition(a + dir * bestAlong)
+	d:SetDamageForce(dir * (data.Force or 1) * 100)
+	best:TakeDamageInfo(d)
+end)
