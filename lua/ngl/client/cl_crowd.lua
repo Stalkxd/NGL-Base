@@ -11,11 +11,14 @@
 -- 100 running zombies then cost 16 poses, made once, instead of 100 a
 -- frame, and still look 3D (unlike the pictures further out).
 --
--- What it gives up: the in-between moments (16 a loop), leg turns and aim
--- (poses are made facing straight ahead, legs straight, which is how
--- running NPCs move anyway), facial animation, decals, the map's detailed
--- lighting (it's lit like the pictures: the light where it stands), and
--- the weapon is drawn the same way from its own pose.
+-- Leg turns, aim and head follow the NPC's own pose parameters, in 8 steps
+-- each. An NPC playing a gesture (firing, reloading, flinching, a hand
+-- signal) is drawn as a full model: shared poses can't show gestures.
+--
+-- What it gives up: the in-between moments (16 a loop) and pose steps,
+-- facial animation, decals, the map's detailed lighting (it's lit like the
+-- pictures: the light where it stands), and the weapon is drawn the same
+-- way from its own pose.
 --
 -- Needs IMesh:DrawSkinned and a skinned Mesh() (GMod 2026.02 and later;
 -- may only be on the dev branch). Without them, or if anything goes wrong
@@ -40,9 +43,17 @@ local cvBase = CreateClientConVar("ngl_cl_crowd_bone_base", "1", true, false,
 
 local CROWD_FRAMES = 16  -- poses per animation
 local MAX_BONES = 51     -- matrices one DrawSkinned call takes (52, one kept spare)
-local MAX_POSES = 6000   -- poses kept before they're all made again
+local MAX_POSES = 3000   -- poses kept before they're all made again
 local LIGHT_REFRESH = 1  -- s between samples of the light at an NPC
-local POSES = { move_yaw = 0, move_x = 1, move_y = 0, aim_yaw = 0, aim_pitch = 0 }
+-- Each pose parameter of the NPC (legs turned to where it walks, aim, head)
+-- is copied to the shared pose in POSE_STEPS steps over its range: the legs
+-- of a soldier strafing sideways or walking back turn with it, its arms aim
+-- where it aims. Made with them fixed straight ahead, strafing soldiers ran
+-- forwards sideways and aimed into the air.
+local POSE_STEPS = 8
+local MAX_POSE_PARAMS = 10
+local LAYER_CHECK = 0.2  -- s between checks for a gesture playing on an NPC
+local LEAVE = 0.9        -- back to a full model this much closer than it left one
 
 local floor, min, max = math.floor, math.min, math.max
 
@@ -198,6 +209,17 @@ local function getModel(npc)
 	return nil
 end
 
+-- The model's pose parameters: name and range, at most MAX_POSE_PARAMS.
+local function poseParams(rig)
+	local list = {}
+	for i = 0, min(rig:GetNumPoseParameters(), MAX_POSE_PARAMS) - 1 do
+		local name = rig:GetPoseParameterName(i)
+		local lo, hi = rig:GetPoseParameterRange(i)
+		if name and lo and hi and hi > lo then list[#list + 1] = { name = name, lo = lo, hi = hi } end
+	end
+	return list
+end
+
 local function buildOne()
 	local key = table.remove(building, 1)
 	if not key then return end
@@ -215,11 +237,7 @@ local function buildOne()
 		models[key] = false
 		return
 	end
-	local poses = {}
-	for name, v in pairs(POSES) do
-		if rig:LookupPoseParameter(name) >= 0 then poses[name] = v end
-	end
-	local m = { parts = parts, bind = bind, rig = rig, poses = poses, posed = {} }
+	local m = { parts = parts, bind = bind, rig = rig, params = poseParams(rig), posed = {} }
 	-- The weapon: its own meshes and pose, bonemerged to the rig.
 	if npc.WeaponModel then
 		local wparts, wbind = buildParts(npc.WeaponModel, 0, 0)
@@ -253,8 +271,42 @@ local function skinMatrices(rig, bind)
 	return out
 end
 
-local function getPose(m, seq, f)
+-- The NPC's pose parameters as steps, packed into one number with the
+-- animation and its moment (the pose's key), and the steps themselves.
+local steps = {}
+local function poseKey(m, npc, seq, f)
 	local id = seq * CROWD_FRAMES + f
+	local params = m.params
+	for i = 1, #params do
+		-- 0..1 over the range on clients (Entity:GetPoseParameter).
+		local v = npc:GetPoseParameter(params[i].name) or 0.5
+		local st = floor(min(1, max(0, v)) * POSE_STEPS + 0.5)
+		steps[i] = st
+		id = id * (POSE_STEPS + 1) + st
+	end
+	return id
+end
+
+-- Is a gesture (firing, reloading, a flinch, a hand signal) playing over
+-- its animation? Shared poses can't show those: such an NPC is drawn as
+-- a full model. Checked every LAYER_CHECK seconds an NPC.
+local function hasGesture(npc, now)
+	if now < (npc.NGLCrowdLayerT or 0) then return npc.NGLCrowdLayer end
+	npc.NGLCrowdLayerT = now + LAYER_CHECK * math.Rand(0.8, 1.2)
+	local g = false
+	if npc.GetNumLayers and npc.GetLayerWeight and npc.GetLayerSequence then
+		for i = 0, (npc:GetNumLayers() or 0) - 1 do
+			if (npc:GetLayerWeight(i) or 0) > 0.05 and (npc:GetLayerSequence(i) or -1) >= 0 then
+				g = true
+				break
+			end
+		end
+	end
+	npc.NGLCrowdLayer = g
+	return g
+end
+
+local function getPose(m, id, seq, f)
 	local p = m.posed[id]
 	if p then return p end
 	if nPoses >= MAX_POSES then
@@ -264,7 +316,11 @@ local function getPose(m, seq, f)
 	local rig = m.rig
 	rig:SetSequence(seq)
 	rig:SetCycle((f + 0.5) / CROWD_FRAMES)
-	for name, v in pairs(m.poses) do rig:SetPoseParameter(name, v) end
+	local params = m.params
+	for i = 1, #params do
+		local pp = params[i]
+		rig:SetPoseParameter(pp.name, pp.lo + (pp.hi - pp.lo) * steps[i] / POSE_STEPS)
+	end
 	rig:InvalidateBoneCache()
 	rig:SetupBones()
 	p = { body = skinMatrices(rig, m.bind) }
@@ -301,6 +357,9 @@ end
 function C.Draw(npc, d, pos)
 	if not cvOn:GetBool() or C.Broken or npc.IsVehicleNPC or npc.NoImpostor then return false end
 	local r = cvRange:GetFloat() * (NGL.ClScale or 1)
+	-- A little closer to leave than to enter, so one on the edge doesn't
+	-- switch back and forth.
+	if npc.NGLShared then r = r * LEAVE end
 	if d < r * r then return false end
 	if not supported() then
 		C.Broken = "this GMod has no IMesh:DrawSkinned (needs a 2026.02 or newer build, maybe the dev branch)"
@@ -309,11 +368,12 @@ function C.Draw(npc, d, pos)
 	end
 	local m = getModel(npc)
 	if not m then return false end
+	local now = RealTime()
+	if hasGesture(npc, now) then return false end
 	local seq = npc:GetSequence()
 	local f = floor((npc:GetCycle() % 1) * CROWD_FRAMES) % CROWD_FRAMES
 	local ok, err = pcall(function()
-		local p = getPose(m, seq, f)
-		local now = RealTime()
+		local p = getPose(m, poseKey(m, npc, seq, f), seq, f)
 		if now >= (npc.NGLCrowdLightAt or 0) then
 			npc.NGLCrowdLightAt = now + LIGHT_REFRESH * math.Rand(0.8, 1.2)
 			lightAt:SetUnpacked(pos.x, pos.y, pos.z + 36)
