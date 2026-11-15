@@ -103,21 +103,43 @@ local function cellKey(x, y)
 	return (floor(x / CELL) + OFFSET) * 4096 + (floor(y / CELL) + OFFSET)
 end
 
-local function gridUpdate(ent, pos)
+-- A cell maps each NPC in it to its position at its last think (the same
+-- vector as NPC.NGLGridPos), or false before its first one: the loops over
+-- cells read it from there, a plain table, instead of from the entity
+-- (each ent.X is a call into the engine, and in a crowd one check looks at
+-- every NPC in up to four cells). gp: the new grid position, or nil to keep
+-- the one it had.
+local function gridUpdate(ent, pos, gp)
 	local k = cellKey(pos.x, pos.y)
 	local old = ent.NGLCell
-	if old == k then return end
+	if old == k then
+		if gp then
+			local c = cells[k]
+			if c then c[ent] = gp end
+		end
+		return
+	end
+	local v = gp or false
 	if old then
 		local c = cells[old]
-		if c then c[ent] = nil end
+		if c then
+			if not gp then v = c[ent] or false end
+			c[ent] = nil
+		end
 	end
 	local c = cells[k]
 	if not c then
 		c = {}
 		cells[k] = c
 	end
-	c[ent] = true
+	c[ent] = v
 	ent.NGLCell = k
+end
+
+-- Moved (or thought) at pos: its grid cell and grid position.
+local function gridSet(ent, pos)
+	gridUpdate(ent, pos, pos)
+	ent.NGLGridPos = pos
 end
 
 local function gridRemove(ent)
@@ -289,19 +311,19 @@ local function addCand(ent, d)
 	end
 end
 
-local function scanCell(c, npc, pos, faction, rangeSqr)
-	for ent in pairs(c) do
-		-- Same faction is never hostile (NGL.GetRelation): no further checks.
-		if ent ~= npc and ent.Faction ~= faction and Core.IsHostile(npc, ent) then
-			local d = pos:DistToSqr(ent.NGLGridPos or ent:GetPos())
-			if d <= rangeSqr then addCand(ent, d) end
+-- Core.IsHostile for the NGL NPCs in a cell, without the call: the grid
+-- holds NGL NPCs only. rel: Relations[faction], the searcher's relations.
+-- Same faction is never hostile (NGL.GetRelation): no further checks.
+local function scanCell(c, npc, pos, faction, rel, rangeSqr)
+	for ent, p in pairs(c) do
+		if ent ~= npc then
+			local f = ent.Faction
+			if f ~= faction and ((rel and rel[f]) or D_HT) == D_HT and not ent.NGLDying then
+				local d = pos:DistToSqr(p or ent:GetPos())
+				if d <= rangeSqr then addCand(ent, d) end
+			end
 		end
 	end
-end
-
-local function scanAt(x, y, npc, pos, faction, rangeSqr)
-	local c = cells[x * 4096 + y]
-	if c then scanCell(c, npc, pos, faction, rangeSqr) end
 end
 
 local function findEnemy(npc, pos)
@@ -347,19 +369,29 @@ local function findEnemy(npc, pos)
 		end
 		local R = math.ceil(math.sqrt(searchSqr) / CELL)
 		local cx, cy = floor(pos.x / CELL) + OFFSET, floor(pos.y / CELL) + OFFSET
+		local rel = Relations[faction]
 		for k = 0, R do
 			-- Everything in ring k is at least (k - 1) cells away.
 			if nCand == nSlots and k > 1 and candD[nSlots] <= ((k - 1) * CELL) ^ 2 then break end
 			if k == 0 then
-				scanAt(cx, cy, npc, pos, faction, searchSqr)
+				local c = cells[cx * 4096 + cy]
+				if c then scanCell(c, npc, pos, faction, rel, searchSqr) end
 			else
+				-- Most cells are empty: looked up here, a call only for the rest.
+				local lo, hi = cy - k, cy + k
 				for x = cx - k, cx + k do
-					scanAt(x, cy - k, npc, pos, faction, searchSqr)
-					scanAt(x, cy + k, npc, pos, faction, searchSqr)
+					local base = x * 4096
+					local c = cells[base + lo]
+					if c then scanCell(c, npc, pos, faction, rel, searchSqr) end
+					c = cells[base + hi]
+					if c then scanCell(c, npc, pos, faction, rel, searchSqr) end
 				end
-				for y = cy - k + 1, cy + k - 1 do
-					scanAt(cx - k, y, npc, pos, faction, searchSqr)
-					scanAt(cx + k, y, npc, pos, faction, searchSqr)
+				local bl, bh = (cx - k) * 4096, (cx + k) * 4096
+				for y = lo + 1, hi - 1 do
+					local c = cells[bl + y]
+					if c then scanCell(c, npc, pos, faction, rel, searchSqr) end
+					c = cells[bh + y]
+					if c then scanCell(c, npc, pos, faction, rel, searchSqr) end
 				end
 			end
 		end
@@ -470,17 +502,21 @@ local function pushCheck(npc, now, pos)
 	if mySpeed < 30 then mySpeed = npc.NGLMoveMode == "walk" and 90 or 180 end -- just starting
 	local myR = radiusOf(npc)
 	local reach = myR + 40 + PUSH_LOOK
-	local x0, x1 = floor((pos.x - reach) / CELL) + OFFSET, floor((pos.x + reach) / CELL) + OFFSET
-	local y0, y1 = floor((pos.y - reach) / CELL) + OFFSET, floor((pos.y + reach) / CELL) + OFFSET
+	local px0, py0, pz0 = pos.x, pos.y, pos.z
+	local box = myR + 64 + PUSH_LOOK -- nobody further than this on either axis can be in the way
+	local x0, x1 = floor((px0 - reach) / CELL) + OFFSET, floor((px0 + reach) / CELL) + OFFSET
+	local y0, y1 = floor((py0 - reach) / CELL) + OFFSET, floor((py0 + reach) / CELL) + OFFSET
 	for x = x0, x1 do
 		local base = x * 4096
 		for y = y0, y1 do
 			local c = cells[base + y]
 			if c then
-				for e in pairs(c) do
-					local p = e.NGLGridPos
-					if p and e ~= npc and not e.NGLDying and not e.IsVehicleNPC and abs(p.z - pos.z) < 64 then
-						local ox, oy = p.x - pos.x, p.y - pos.y
+				-- Positions from the cell first: in a crowd most of a cell is
+				-- too far off, and is passed over without a look at the entity.
+				for e, p in pairs(c) do
+					local ox, oy = p and p.x - px0, p and p.y - py0
+					if p and ox < box and ox > -box and oy < box and oy > -box and e ~= npc
+						and abs(p.z - pz0) < 64 and not e.NGLDying and not e.IsVehicleNPC then
 						local along = ox * dx + oy * dy
 						local w = myR + radiusOf(e)
 						if along > -w * 0.5 and along < w + PUSH_LOOK then
@@ -562,7 +598,7 @@ local function slideTo(npc, pos, x, y, z)
 	end
 	to:SetUnpacked(x, y, z)
 	npc:SetPos(to)
-	npc.NGLGridPos = to
+	gridSet(npc, to)
 	return to
 end
 
@@ -600,17 +636,20 @@ local function overlapCheck(npc, now, pos)
 	local myR = radiusOf(npc)
 	local sx, sy = 0, 0
 	local reach = myR + 40
-	local x0, x1 = floor((pos.x - reach) / CELL) + OFFSET, floor((pos.x + reach) / CELL) + OFFSET
-	local y0, y1 = floor((pos.y - reach) / CELL) + OFFSET, floor((pos.y + reach) / CELL) + OFFSET
+	local px0, py0, pz0 = pos.x, pos.y, pos.z
+	local box = myR + 64 -- nobody further than this on either axis can be inside it
+	local x0, x1 = floor((px0 - reach) / CELL) + OFFSET, floor((px0 + reach) / CELL) + OFFSET
+	local y0, y1 = floor((py0 - reach) / CELL) + OFFSET, floor((py0 + reach) / CELL) + OFFSET
 	for x = x0, x1 do
 		local base = x * 4096
 		for y = y0, y1 do
 			local c = cells[base + y]
 			if c then
-				for e in pairs(c) do
-					local p = e.NGLGridPos
-					if p and e ~= npc and not e.NGLDying and not e.IsVehicleNPC and abs(p.z - pos.z) < 64 then
-						local ox, oy = pos.x - p.x, pos.y - p.y
+				-- Positions from the cell first (see pushCheck).
+				for e, p in pairs(c) do
+					local ox, oy = p and px0 - p.x, p and py0 - p.y
+					if p and ox < box and ox > -box and oy < box and oy > -box and e ~= npc
+						and abs(p.z - pz0) < 64 and not e.NGLDying and not e.IsVehicleNPC then
 						local gap = math.sqrt(ox * ox + oy * oy) - myR - radiusOf(e)
 						if gap < -2 then
 							local bx, by = apartDir(npc, pos, e, p)
@@ -815,11 +854,13 @@ function Core.AnyNear(x, y, z, radius, except)
 		for gy = cy - r, cy + r do
 			local c = cells[base + gy]
 			if c then
-				for ent in pairs(c) do
-					if ent ~= except and not ent.NGLDying and not ent.IsVehicleNPC then
-						local p = ent.NGLGridPos or ent:GetPos()
-						local dx, dy, dz = p.x - x, p.y - y, p.z - z
-						if dx * dx + dy * dy + dz * dz <= rSqr then return true end
+				-- Distance first, from the cell's positions: the entity is only
+				-- looked at for the few close enough.
+				for ent, p in pairs(c) do
+					p = p or ent:GetPos()
+					local dx, dy, dz = p.x - x, p.y - y, p.z - z
+					if dx * dx + dy * dy + dz * dz <= rSqr and ent ~= except and not ent.NGLDying and not ent.IsVehicleNPC then
+						return true
 					end
 				end
 			end
@@ -1901,8 +1942,7 @@ local function railStep(npc, pos, dt)
 	npc.NGLSteer = npc.NGLPath and npc.NGLPath[idx] or nil
 	local A = npc.NGLActs
 	if A then npc:NGLSetAct(npc.NGLMoveMode == "walk" and A.Walk or A.Run) end
-	gridUpdate(npc, to)
-	npc.NGLGridPos = to
+	gridSet(npc, to)
 	if not npc.NGLPath then npc.NGLRail = nil end
 	return to
 end
@@ -2024,8 +2064,7 @@ local function otherTarget(npc, pos, now, current)
 		for gy = cy - r, cy + r do
 			local c = cells[base + gy]
 			if c then
-				for e in pairs(c) do
-					local p = e.NGLGridPos
+				for e, p in pairs(c) do
 					if p and e ~= current and e ~= npc and e.Faction ~= faction and Core.IsHostile(npc, e) then
 						local d = pos:DistToSqr(p)
 						if d < rSqr and (not bestD or d < bestD) and Core.SlotFree(e, now) then best, bestD = e, d end
@@ -2107,14 +2146,12 @@ local function think(npc, now, dt, nearestPlayerSqr, seen, pos)
 		return
 	end
 
-	gridUpdate(npc, pos)
-	npc.NGLGridPos = pos
+	gridSet(npc, pos)
 	if not npc.NGLPlaced then
 		npc.NGLPlaced = true
 		Core.PlaceFree(npc, pos)
 		pos = npc:GetPos()
-		gridUpdate(npc, pos)
-		npc.NGLGridPos = pos
+		gridSet(npc, pos)
 	end
 	local rail = railOk(npc, nearestPlayerSqr, seen)
 	if rail == "think" then
