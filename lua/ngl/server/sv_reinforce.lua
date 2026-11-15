@@ -105,6 +105,14 @@ local MIN_PLAYER_DIST = 500 -- never pop up right next to a player, seen or not
 -- side away from the enemy first, that neither the enemy nor any player
 -- can see. A vehicle drives in from such a point if it is wide enough.
 -- At most 16 spots tried (two traces per watcher each).
+-- A class's own fields (NavWidth, HeadingOffset) without a copy:
+-- scripted_ents.Get copies the whole class table with its bases (2.4 ms in
+-- the profiler at 400 NPCs).
+local function classTable(class)
+	local st = scripted_ents.GetStored(class)
+	return st and st.t or nil
+end
+
 function R.FindHiddenSpot(npc, enemy, vehicle)
 	local Nav = NGL.Nav
 	if not (Nav and Nav.Loaded) then return nil end
@@ -112,7 +120,7 @@ function R.FindHiddenSpot(npc, enemy, vehicle)
 	local away = pos - ePos
 	local base = math.atan2(away.y, away.x)
 	local players = player.GetAll()
-	local vt = vehicle and scripted_ents.Get(vehicle) or {}
+	local vt = vehicle and classTable(vehicle) or {}
 	local width = vt.NavWidth
 	for try = 0, 15 do
 		-- fan out from straight behind the leader: 0, +40, -40, +80 ... degrees
@@ -138,7 +146,7 @@ function R.OnFoot(npc, sq, enemy, rc, vehicle)
 	local pos = npc:GetPos()
 	if vehicle then
 		-- Facing the leader (vehicle models may face +Y: HeadingOffset).
-		local vt = scripted_ents.Get(vehicle) or {}
+		local vt = classTable(vehicle) or {}
 		local v = R.Spawn(vehicle, gp + Vector(0, 0, 8), npc, nil, math.deg(base) + 180 - (vt.HeadingOffset or 0))
 		if not IsValid(v) then return false end
 		R.AttachVehicle(v, npc, sq)

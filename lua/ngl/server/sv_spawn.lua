@@ -36,7 +36,7 @@ local function resolveClass(name)
 	local npcs = list.Get("NPC")
 	local e = npcs[name]
 	if e and e.Class then return e.Class, e end
-	if scripted_ents.Get(name) then return name end
+	if scripted_ents.GetStored(name) then return name end -- Get copies the whole class
 	if string.StartWith(name, "npc_") then return name end
 	return nil
 end

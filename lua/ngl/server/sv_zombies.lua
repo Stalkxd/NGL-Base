@@ -29,9 +29,28 @@ function Z.CrabCount()
 	return n
 end
 
+-- Crabs waiting to come off dead zombies (Z.OnKilled): made at most
+-- CRABS_PER_TICK a tick. Making an NPC costs the engine 2 to 4 ms (the
+-- profiler at 400 NPCs), and a horde dying at once made a dozen crabs in
+-- one tick: a 30 to 50 ms hitch.
+local CRABS_PER_TICK = 2
+local queue, qHead, qTail = {}, 1, 0
+
 function Z.CanSpawnCrab()
-	return cvCrabs:GetBool() and Z.CrabCount() < cvMax:GetInt()
+	return cvCrabs:GetBool() and Z.CrabCount() + (qTail - qHead + 1) < cvMax:GetInt()
 end
+
+hook.Add("Tick", "NGL.Zombie.CrabQueue", function()
+	if qTail < qHead then return end
+	for _ = 1, CRABS_PER_TICK do
+		if qTail < qHead then break end
+		local q = queue[qHead]
+		queue[qHead] = nil
+		qHead = qHead + 1
+		Z.SpawnCrab(q.class, q.spot, q.yaw, IsValid(q.enemy) and q.enemy or nil, q.opts)
+	end
+	if qTail < qHead then qHead, qTail = 1, 0 end
+end)
 
 -- Shows or hides the crab riding on a zombie's head.
 function Z.ShowCrab(npc, on)
@@ -89,10 +108,11 @@ local function crabSpot(class, npc, pos, height)
 	return tr.HitPos
 end
 
--- The crab comes off a dying zombie (ENT:OnKilled). It's spawned on the next
--- tick, once the zombie's death is done, not in the middle of the damage
--- that killed it; the crab on its head is taken off the body now, so the
--- ragdoll is made without it.
+-- The crab comes off a dying zombie (ENT:OnKilled). It's queued and made on
+-- a later tick (at most CRABS_PER_TICK a tick), once the zombie's death is
+-- done, not in the middle of the damage that killed it; the crab on its
+-- head is taken off the body now, so the ragdoll is made without it.
+local NO_LEAP = { leap = false }
 local HEAD_BAND = 14 -- damage this close to the top of the head is a head shot
 function Z.OnKilled(npc, dmginfo)
 	if not npc.Headcrab then return end
@@ -107,10 +127,8 @@ function Z.OnKilled(npc, dmginfo)
 	local spot = crabSpot(npc.Headcrab, npc, pos, (npc.EyeHeight or 60) - 8)
 	if not spot then return end -- nowhere it fits: it died with the zombie
 	Z.ShowCrab(npc, false)
-	local class, yaw, enemy = npc.Headcrab, npc:GetAngles().y, npc.NGLEnemy
-	timer.Simple(0, function()
-		Z.SpawnCrab(class, spot, yaw, enemy, { leap = false })
-	end)
+	qTail = qTail + 1
+	queue[qTail] = { class = npc.Headcrab, spot = spot, yaw = npc:GetAngles().y, enemy = npc.NGLEnemy, opts = NO_LEAP }
 end
 
 
