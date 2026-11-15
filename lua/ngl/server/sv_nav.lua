@@ -1974,59 +1974,71 @@ Nav.BuildAreaEdges = buildAreaEdges
 -- single point when l == r), from the first to the last ("simple stupid
 -- funnel"). Left is the side a positive cross product points to, seen
 -- along the way. Returns the corner points, the same Vector objects.
-local function cross(o, a, b) return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x) end
 local function same(a, b) return a.x == b.x and a.y == b.y end
+-- The portal points' coordinates, read once per call: each .x on a Vector
+-- is a call into the engine, and the funnel looked at each point many
+-- times. Shared scratch arrays (the funnel never yields), refilled each call.
+local PLX, PLY, PRX, PRY = {}, {}, {}, {}
 local function funnel(portals)
-	local out = { portals[1].l }
-	local apex, left, right = portals[1].l, portals[1].l, portals[1].r
-	local ai, li, ri = 1, 1, 1
-	local i = 2
 	local n = #portals
+	for k = 1, n do
+		local p = portals[k]
+		local l, r = p.l, p.r
+		PLX[k], PLY[k] = l.x, l.y
+		PRX[k], PRY[k] = r.x, r.y
+	end
+	local p1 = portals[1]
+	local out = { p1.l }
+	-- apex, left and right as numbers, plus the left and right Vectors (the
+	-- corners handed back) and their portal numbers.
+	local ax, ay = PLX[1], PLY[1]
+	local lx, ly, leftV, li = ax, ay, p1.l, 1
+	local rx, ry, rightV, ri = PRX[1], PRY[1], p1.r, 1
+	local i = 2
 	local guard = 0
 	while i <= n do
 		guard = guard + 1
 		if guard > n * 8 + 64 then break end
-		local l, r = portals[i].l, portals[i].r
 		local restart = false
 		-- right side tightens when r is not right of the right edge
-		if cross(apex, right, r) >= 0 then
-			if same(apex, right) or cross(apex, left, r) < 0 then
-				right, ri = r, i
+		local qx, qy = PRX[i], PRY[i]
+		if (rx - ax) * (qy - ay) - (ry - ay) * (qx - ax) >= 0 then
+			if (ax == rx and ay == ry) or (lx - ax) * (qy - ay) - (ly - ay) * (qx - ax) < 0 then
+				rx, ry, rightV, ri = qx, qy, portals[i].r, i
 			else
 				-- crossed over the left edge: its end is a corner
-				out[#out + 1] = left
-				apex, ai = left, li
-				right, ri = apex, ai
-				i = ai + 1
+				out[#out + 1] = leftV
+				ax, ay = lx, ly
+				rx, ry, rightV, ri = lx, ly, leftV, li
+				i = li + 1
 				restart = true
 			end
 		end
 		if not restart then
-			if cross(apex, left, l) <= 0 then
-				if same(apex, left) or cross(apex, right, l) > 0 then
-					left, li = l, i
+			qx, qy = PLX[i], PLY[i]
+			if (lx - ax) * (qy - ay) - (ly - ay) * (qx - ax) <= 0 then
+				if (ax == lx and ay == ly) or (rx - ax) * (qy - ay) - (ry - ay) * (qx - ax) > 0 then
+					lx, ly, leftV, li = qx, qy, portals[i].l, i
 				else
-					out[#out + 1] = right
-					apex, ai = right, ri
-					left, li = apex, ai
-					i = ai + 1
+					out[#out + 1] = rightV
+					ax, ay = rx, ry
+					lx, ly, leftV, li = rx, ry, rightV, ri
+					i = ri + 1
 					restart = true
 				end
 			end
 		end
 		if not restart then i = i + 1 end
 	end
-	local last = portals[n].l
-	if not same(out[#out], last) then out[#out + 1] = last end
+	local o = out[#out]
+	if not (o.x == PLX[n] and o.y == PLY[n]) then out[#out + 1] = portals[n].l end
 	return out
 end
 Nav.Funnel = funnel
 
--- A portal from segment (p, q) for going from `from` towards `to`.
-local function portalOf(p, q, from, to)
-	local d = { x = to.x - from.x, y = to.y - from.y }
-	local c = d.x * (q.y - p.y) - d.y * (q.x - p.x)
-	if c > 0 then return { l = q, r = p } end
+-- A portal from segment (p, q) for going the way (dx, dy).
+local function portalOf(p, q, dx, dy)
+	if dx * (q.y - p.y) - dy * (q.x - p.x) > 0 then return { l = q, r = p } end
 	return { l = p, r = q }
 end
 
@@ -2198,12 +2210,13 @@ areaSearchIn = function(start, goal, caps, allowed, R)
 				for k = 1, #list do
 					local e = list[k]
 					local b = e.to
-					if not closed[b] and (e.kind ~= "link" or linkMove(e.L, caps)) and (not allowed or allowed[R[b]]) then
-						local ng = gc + e.cost
-						if not g[b] or ng < g[b] then
-							g[b], came[b], cameBy[b] = ng, cur, e
-							size = heapPush(hn, hf, size, b, ng + centers[b]:Distance(goalPos))
-						end
+					local ng = gc + e.cost
+					local gb = g[b]
+					-- Cheapest test first: most edges lead nowhere better.
+					if (not gb or ng < gb) and not closed[b] and (not allowed or allowed[R[b]])
+						and (e.kind ~= "link" or linkMove(e.L, caps)) then
+						g[b], came[b], cameBy[b] = ng, cur, e
+						size = heapPush(hn, hf, size, b, ng + centers[b]:Distance(goalPos))
 					end
 				end
 			end
@@ -2236,8 +2249,10 @@ areaPath = function(start, goal, seq, caps)
 	local function point(p) stretch[#stretch + 1] = { l = p, r = p } end
 	local function flush()
 		local corners = funnel(stretch)
-		for _, c in ipairs(corners) do
-			if not (pts[#pts] and same(pts[#pts], c) and pts[#pts].z == c.z) then
+		for k = 1, #corners do
+			local c = corners[k]
+			local last = pts[#pts]
+			if not (last and same(last, c) and last.z == c.z) then
 				pts[#pts + 1] = c
 				if tight[c] then tightIdx = tightIdx or {}; tightIdx[#pts] = true end
 			end
@@ -2245,9 +2260,13 @@ areaPath = function(start, goal, seq, caps)
 	end
 	for _, e in ipairs(seq) do
 		if e.kind == "portal" then
-			local mp, mq = (e.p1 + e.p2) * 0.5, (e.q1 + e.q2) * 0.5
-			stretch[#stretch + 1] = portalOf(e.p1, e.p2, mp, mq)
-			stretch[#stretch + 1] = portalOf(e.q1, e.q2, mp, mq)
+			-- From the middle of one side to the middle of the other, as
+			-- numbers (four new vectors per portal before).
+			local p1, p2, q1, q2 = e.p1, e.p2, e.q1, e.q2
+			local dx = (q1.x + q2.x - p1.x - p2.x) * 0.5
+			local dy = (q1.y + q2.y - p1.y - p2.y) * 0.5
+			stretch[#stretch + 1] = portalOf(p1, p2, dx, dy)
+			stretch[#stretch + 1] = portalOf(q1, q2, dx, dy)
 		elseif e.kind == "pair" then
 			local pi, pj = nodePos(e.i), nodePos(e.j)
 			if not Areas[AreaOf[e.i]].big then tight[pi] = true end
@@ -2329,12 +2348,13 @@ local function buildField(goal, caps)
 				local dc = dist[cur]
 				for k = 1, #list, 2 do
 					local a, e = list[k], list[k + 1]
-					if not closed[a] and (e.kind ~= "link" or linkMove(e.L, caps)) then
-						local nd = dc + e.cost
-						if not dist[a] or nd < dist[a] then
-							dist[a], nextE[a] = nd, e
-							size = heapPush(hn, hf, size, a, nd)
-						end
+					local nd = dc + e.cost
+					local da = dist[a]
+					-- Cheapest test first: the link check only for an edge that
+					-- would be the area's best way so far.
+					if (not da or nd < da) and not closed[a] and (e.kind ~= "link" or linkMove(e.L, caps)) then
+						dist[a], nextE[a] = nd, e
+						size = heapPush(hn, hf, size, a, nd)
 					end
 				end
 			end

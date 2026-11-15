@@ -267,7 +267,8 @@ end
 
 -- The model of the carried vehicle, parented under the ship.
 function ENT:NGLHang(class)
-	local t = scripted_ents.Get(class)
+	local st = scripted_ents.GetStored(class) -- Get copies the whole class
+	local t = st and st.t
 	local mdl = t and t.Model
 	if not mdl then return end
 	local p = ents.Create("prop_dynamic")

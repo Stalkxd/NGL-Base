@@ -27,6 +27,12 @@ local cvAnimNear = CreateConVar("ngl_anim_rate_near", "0.03", FCVAR_ARCHIVE,
 	"Seconds between animation updates on the server for NPCs in full detail (0 = every tick). Each update changes the animation's frame, which is sent to every client; clients play it smoothly in between.", 0, 0.1)
 local cvAnimHidden = CreateConVar("ngl_anim_rate_hidden", "0.15", FCVAR_ARCHIVE,
 	"Seconds between animation updates on the server for NPCs no player can see (0 = every tick). The engine caps one update at 0.2 s of animation.", 0, 0.19)
+-- Read on every NPC's every tick (BodyUpdate): kept in locals, updated when
+-- they change.
+local animFar, animNear, animHidden = cvAnimFar:GetFloat(), cvAnimNear:GetFloat(), cvAnimHidden:GetFloat()
+cvars.AddChangeCallback("ngl_anim_rate_far", function() animFar = cvAnimFar:GetFloat() end, "NGL.AnimRate")
+cvars.AddChangeCallback("ngl_anim_rate_near", function() animNear = cvAnimNear:GetFloat() end, "NGL.AnimRate")
+cvars.AddChangeCallback("ngl_anim_rate_hidden", function() animHidden = cvAnimHidden:GetFloat() end, "NGL.AnimRate")
 
 -- Sounds from our own code go through here, so the sound budget (sv_fx.lua)
 -- can tell them from the ones the engine plays for the model's animations.
@@ -202,7 +208,10 @@ end
 -- scheduler right after each think, for NPCs within ngl_anim_detail_range of
 -- a player only; pose parameters are interpolated on the client, so 10
 -- updates a second look smooth.
-local AngleDiff, deg, atan2 = math.AngleDifference, math.deg, math.atan2
+local deg, atan2 = math.deg, math.atan2
+-- math.AngleDifference in one step (it calls math.NormalizeAngle, two calls
+-- for each use, every tick for every walking NPC). Same result: -180..180.
+local function AngleDiff(a, b) return (a - b + 180) % 360 - 180 end
 function ENT:NGLUpdatePose()
 	self.NGLPosed = true
 	local p = self.NGLPoses
@@ -317,6 +326,11 @@ function ENT:NGLSetAct(act)
 		self:StartActivity(act)
 	end
 end
+-- BehaveUpdate asks for the activity every tick; it's the same nearly
+-- always, so the method is only looked up and called when it changes.
+local function setAct(self, T, act)
+	if T.NGLAct ~= act then self:NGLSetAct(act) end
+end
 
 -- Engine calls this every tick. Same cost as the stock NextBot version, but
 -- it handles every movement activity (the stock one only knows ACT_WALK and
@@ -332,18 +346,21 @@ end
 function ENT:BodyUpdate()
 	if NGL.Off.anim and NGL.IsOff(self, "anim") then return end -- ngl_debug_parts
 	local t0 = SysTime()
-	self:NGLUpdateMoveYaw()
-	local oneOff = self.NGLAnimUntil or self.NGLLeapState or self.NGLTraverse or self.NGLDying
+	-- Fields straight from the entity's table: each self.X on an entity is a
+	-- call into the engine, and this runs for every NPC on every tick.
+	local T = self:GetTable()
+	self:NGLUpdateMoveYaw(T)
+	local oneOff = T.NGLAnimUntil or T.NGLLeapState or T.NGLTraverse or T.NGLDying
 	local gap = 0
 	if not oneOff then
-		if self.NGLSeen == false then gap = cvAnimHidden:GetFloat()
-		elseif not self.NGLDetail then gap = cvAnimFar:GetFloat()
-		else gap = cvAnimNear:GetFloat() end
+		if T.NGLSeen == false then gap = animHidden
+		elseif not T.NGLDetail then gap = animFar
+		else gap = animNear end
 		-- Steady tick (sv_tickguard.lua): far and hidden ones less often
 		-- when the server falls behind, at most 0.15 / 0.3 s apart.
 		local sc = NGL.SvScale or 1
-		if sc < 1 and not self.NGLDetail then
-			gap = math.max(gap, math.min(gap / sc, self.NGLSeen == false and 0.3 or 0.15))
+		if sc < 1 and not T.NGLDetail then
+			gap = math.max(gap, math.min(gap / sc, T.NGLSeen == false and 0.3 or 0.15))
 		end
 	end
 	local now = CurTime()
@@ -351,20 +368,20 @@ function ENT:BodyUpdate()
 	-- (cl_init.lua); the server only keeps legs and playback rate.
 	local clAnim = not oneOff and NGL.Off.clanim and NGL.IsOff(self, "clanim")
 	if clAnim then
-		self.NGLNextAnim = now
+		T.NGLNextAnim = now
 		gap = -1
 	end
-	if gap <= 0 or now >= (self.NGLNextAnim or 0) then
-		self.NGLNextAnim = now + gap
+	if gap <= 0 or now >= (T.NGLNextAnim or 0) then
+		T.NGLNextAnim = now + gap
 		-- Moving in full detail: the cycle plays at the speed we really move
 		-- (what BodyMoveXY does), but the rate is only changed when it's 5%
 		-- off. BodyMoveXY set it on every tick, and every change is sent to
 		-- every client: in a running crowd that was every NPC, every tick.
-		if self.NGLMoving and self.NGLDetail and not self.NGLStandStill and not oneOff then
-			local vt = self.NGLVelTick
+		if T.NGLMoving and T.NGLDetail and not T.NGLStandStill and not oneOff then
+			local vt = T.NGLVelTick
 			local vx, vy
 			if vt and engine.TickCount() - vt <= 1 then
-				vx, vy = self.NGLVelX, self.NGLVelY
+				vx, vy = T.NGLVelX, T.NGLVelY
 			else
 				local v = self.loco:GetVelocity()
 				vx, vy = v.x, v.y
@@ -391,16 +408,18 @@ end
 local MOVE_YAW_RATE = 720 -- degrees per second the legs can swing
 local MOVE_YAW_FAR = 10   -- degrees: smallest leg turn sent past ngl_anim_detail_range
 local MOVE_YAW_NEAR = 3   -- degrees: smallest leg turn sent in full detail
-function ENT:NGLUpdateMoveYaw()
-	if not self.NGLPoses.move then return end
+function ENT:NGLUpdateMoveYaw(T)
+	T = T or self:GetTable()
+	if not T.NGLPoses.move then return end
+	local cur = T.NGLMoveYaw or 0
 	local target = 0
 	-- Running NPCs face where they go (BehaveUpdate), so their legs are
 	-- straight; only walking (strafing) swings them.
-	if self.NGLMoving and self.NGLNear and self.NGLSeen ~= false and self.NGLMoveMode == "walk" then
+	if T.NGLMoving and T.NGLNear and T.NGLSeen ~= false and T.NGLMoveMode == "walk" then
 		local dx, dy
-		local vt = self.NGLVelTick
+		local vt = T.NGLVelTick
 		if vt and engine.TickCount() - vt <= 1 then
-			dx, dy = self.NGLVelX, self.NGLVelY
+			dx, dy = T.NGLVelX, T.NGLVelY
 		else
 			local v = self.loco:GetVelocity()
 			dx, dy = v.x, v.y
@@ -408,38 +427,39 @@ function ENT:NGLUpdateMoveYaw()
 		if dx * dx + dy * dy < 400 then
 			-- Just starting (or pushing against something): the velocity is
 			-- too small to trust, use where we are heading instead.
-			local g = self.NGLSteer
+			local g = T.NGLSteer
 			if g then
 				local pos = self:GetPos()
 				dx, dy = g.x - pos.x, g.y - pos.y
 			end
 		end
 		if dx * dx + dy * dy > 1 then
-			target = AngleDiff(deg(atan2(dy, dx)), self:GetAngles().y)
+			target = (deg(atan2(dy, dx)) - self:GetAngles().y + 180) % 360 - 180
 		end
+	elseif cur == 0 then
+		return -- legs straight and staying straight: most NPCs, most ticks
 	end
-	local cur = self.NGLMoveYaw or 0
-	local diff = AngleDiff(target, cur)
+	local diff = (target - cur + 180) % 360 - 180
 	if diff == 0 then return end
 	local now = CurTime()
 	local dt = engine.TickInterval()
-	if not self.NGLDetail then
+	if not T.NGLDetail then
 		-- Past full detail the legs only turn in steps of MOVE_YAW_FAR or
 		-- more (or back to straight): each change is sent to every client,
 		-- which animates the NPC again for it, and at that distance a few
 		-- degrees don't show. The client smooths each step out.
 		if target ~= 0 and math.abs(diff) < MOVE_YAW_FAR then return end
-		dt = math.min(now - (self.NGLMoveYawT or 0), 0.25)
+		dt = math.min(now - (T.NGLMoveYawT or 0), 0.25)
 	elseif target ~= 0 and math.abs(diff) < MOVE_YAW_NEAR then
 		return -- a degree or two isn't worth sending to every client
 	else
-		dt = math.min(now - (self.NGLMoveYawT or now - dt), 0.25)
+		dt = math.min(now - (T.NGLMoveYawT or now - dt), 0.25)
 	end
-	self.NGLMoveYawT = now
+	T.NGLMoveYawT = now
 	local step = MOVE_YAW_RATE * dt
 	if diff > step then diff = step elseif diff < -step then diff = -step end
-	cur = math.NormalizeAngle(cur + diff)
-	self.NGLMoveYaw = cur
+	cur = (cur + diff + 180) % 360 - 180
+	T.NGLMoveYaw = cur
 	self:SetPoseParameter("move_yaw", cur)
 end
 
@@ -450,18 +470,20 @@ function ENT:BehaveStart() end
 function ENT:RunBehaviour() end
 
 function ENT:BehaveUpdate(interval)
-	if self.NGLDying then return end
+	-- Fields straight from the entity's table (see BodyUpdate).
+	local T = self:GetTable()
+	if T.NGLDying then return end
 	if NGL.Off.move and NGL.IsOff(self, "move") then return end -- ngl_debug_parts
 	-- Moved along its path at each think instead (sv_core.lua, railStep),
 	-- or in steps when players can see it from far away (Core.RailTick).
-	if self.NGLRail then
-		if self.NGLRailSeen then NGL.Core.RailTick(self, CurTime()) end
+	if T.NGLRail then
+		if T.NGLRailSeen then NGL.Core.RailTick(self, CurTime()) end
 		return
 	end
 	local t0 = SysTime()
 	-- A melee blow lands on its tick, not on the next AI think (up to a
 	-- tenth of a second later, more in a big fight), so it matches the swing.
-	local hitAt = self.NGLMeleeHitAt
+	local hitAt = T.NGLMeleeHitAt
 	if hitAt and CurTime() >= hitAt then NGL.Core.ResolveMelee(self) end
 
 	local pos = self:GetPos()
@@ -469,20 +491,20 @@ function ENT:BehaveUpdate(interval)
 	-- Following a nav path: advance waypoints here, every tick, so NPCs that
 	-- think rarely (far from players) don't stop at each corner.
 	local goal
-	local path = self.NGLPath
+	local path = T.NGLPath
 	if path then
-		local idx = self.NGLPathIdx
+		local idx = T.NGLPathIdx
 		local wp = path[idx]
 		if wp then
 			local dx, dy = wp.x - pos.x, wp.y - pos.y
-			local reach = self.WaypointRadius
+			local reach = T.WaypointRadius
 			local r2 = reach and reach * reach or WAYPOINT_SQR
 			if path.tight and path.tight[idx] then r2 = math.min(r2, TIGHT_SQR) end
-			if dx * dx + dy * dy < r2 and not self.NGLTraverse then
+			if dx * dx + dy * dy < r2 and not T.NGLTraverse then
 				-- At a ledge or gap on the path: jump (or climb) to the next point.
 				local L = path.links and path.links[idx]
 				idx = idx + 1
-				self.NGLPathIdx = idx
+				T.NGLPathIdx = idx
 				wp = path[idx]
 				if L and L.move and wp then self:NGLStartTraverse(L.move, wp, L.h) end
 			end
@@ -490,20 +512,20 @@ function ENT:BehaveUpdate(interval)
 		if wp then
 			goal = wp
 		else
-			self.NGLPath = nil
+			T.NGLPath = nil
 		end
 	end
 	local onPath = goal ~= nil
 
 	-- In the air or climbing: nothing else until we're there.
-	if self.NGLTraverse then
+	if T.NGLTraverse then
 		self:NGLTraverseUpdate(CurTime())
 		local B = NGL.Bench
 		if B then B.LuaTime = B.LuaTime + (SysTime() - t0) end
 		return
 	end
 	-- Leaping at someone (sv_leap.lua): one touch check a tick until it lands.
-	if self.NGLLeapState then
+	if T.NGLLeapState then
 		NGL.Leap.Update(self, CurTime())
 		local B = NGL.Bench
 		if B then B.LuaTime = B.LuaTime + (SysTime() - t0) end
@@ -514,42 +536,42 @@ function ENT:BehaveUpdate(interval)
 	-- standing inside each other (Core.OverlapCheck): moved aside a little
 	-- this tick. Nobody's path changes; NGL NPCs don't collide with each
 	-- other at all.
-	if self.NGLShove then
+	if T.NGLShove then
 		local to = NGL.Core.ShoveStep(self, pos, interval, CurTime())
 		if to then pos = to end
 	end
 
 	if not goal then
-		goal = self.NGLGoal
-		local reach = self.WaypointRadius
+		goal = T.NGLGoal
+		local reach = T.WaypointRadius
 		if goal and pos:DistToSqr(goal) < (reach and reach * reach or NEAR_GOAL_SQR) then
 			goal = nil
-			self.NGLGoal = nil
+			T.NGLGoal = nil
 		end
 	end
 
 	-- A one-off animation (PlayAnim, melee swing) owns the body until it ends.
-	if self.NGLAnimUntil then
-		if CurTime() < self.NGLAnimUntil then
-			if goal and not self.NGLAnimLock then self.loco:Approach(goal, 1) end
-			self.NGLMoving = goal ~= nil and not self.NGLAnimLock
-			self.NGLSteer = self.NGLMoving and goal or nil
-			local f = self.NGLFace
+	if T.NGLAnimUntil then
+		if CurTime() < T.NGLAnimUntil then
+			if goal and not T.NGLAnimLock then self.loco:Approach(goal, 1) end
+			T.NGLMoving = goal ~= nil and not T.NGLAnimLock
+			T.NGLSteer = T.NGLMoving and goal or nil
+			local f = T.NGLFace
 			if f then self.loco:FaceTowards(f) end
 			local B = NGL.Bench
 			if B then B.LuaTime = B.LuaTime + (SysTime() - t0) end
 			return
 		end
-		self.NGLAnimUntil = nil
-		self.NGLAct = nil -- restart the normal activity
+		T.NGLAnimUntil = nil
+		T.NGLAct = nil -- restart the normal activity
 		self:SetPlaybackRate(1)
 	end
 
 	-- Vehicles steer and drive themselves (ENT:NGLDrive, see ngl_apc.lua):
 	-- no animations, no turning on the spot.
-	if self.NGLDrive then
+	if T.NGLDrive then
 		self:NGLDrive(goal, interval)
-		self.NGLSteer = goal
+		T.NGLSteer = goal
 		local B = NGL.Bench
 		if B then B.LuaTime = B.LuaTime + (SysTime() - t0) end
 		return
@@ -560,22 +582,22 @@ function ENT:BehaveUpdate(interval)
 	-- for a moment.
 	-- The steered goal goes in a vector of the NPC's own, refilled each
 	-- tick (it's kept only as NGLSteer, which means "where it heads now").
-	local un = self.NGLUnstick
+	local un = T.NGLUnstick
 	if un then
 		if now >= un.untilT then
-			self.NGLUnstick = nil
+			T.NGLUnstick = nil
 		elseif goal then
 			local dx, dy = goal.x - pos.x, goal.y - pos.y
 			local l = math.sqrt(dx * dx + dy * dy)
 			if l > 1 then
-				local v = self.NGLSteerVec or Vector()
-				self.NGLSteerVec = v
+				local v = T.NGLSteerVec or Vector()
+				T.NGLSteerVec = v
 				v:SetUnpacked(pos.x + dx / l * 24 + un.x * 48, pos.y + dy / l * 24 + un.y * 48, goal.z)
 				goal = v
 			end
 		else
-			local v = self.NGLSteerVec or Vector()
-			self.NGLSteerVec = v
+			local v = T.NGLSteerVec or Vector()
+			T.NGLSteerVec = v
 			v:SetUnpacked(pos.x + un.x * 48, pos.y + un.y * 48, pos.z)
 			goal = v
 		end
@@ -583,16 +605,16 @@ function ENT:BehaveUpdate(interval)
 	-- Inside another NGL NPC (Core.OverlapCheck): steer away from it as well
 	-- as towards the goal, so a pack running at one target spreads out
 	-- instead of piling into one spot.
-	local sep = self.NGLSep
+	local sep = T.NGLSep
 	if sep then
 		if now >= sep.untilT then
-			self.NGLSep = nil
+			T.NGLSep = nil
 		elseif goal then
 			local dx, dy = goal.x - pos.x, goal.y - pos.y
 			local l = math.sqrt(dx * dx + dy * dy)
 			if l > 1 then
-				local v = self.NGLSteerVec or Vector()
-				self.NGLSteerVec = v
+				local v = T.NGLSteerVec or Vector()
+				T.NGLSteerVec = v
 				v:SetUnpacked(pos.x + dx / l * 32 + sep.x * 40, pos.y + dy / l * 32 + sep.y * 40, goal.z)
 				goal = v
 			end
@@ -602,12 +624,12 @@ function ENT:BehaveUpdate(interval)
 	-- don't walk off a drop. One short trace down just ahead (not the grid,
 	-- which may be patchy at door frames and wall corners), again every
 	-- 0.25 s, every EDGE_MOVE units walked, or when we turn.
-	if goal and not onPath and not self.IsVehicleNPC then
+	if goal and not onPath and not T.IsVehicleNPC then
 		local dx, dy = goal.x - pos.x, goal.y - pos.y
 		local l = math.sqrt(dx * dx + dy * dy)
 		if l > 1 then
 			dx, dy = dx / l, dy / l
-			local E = self.NGLEdge
+			local E = T.NGLEdge
 			if not E or now >= E.t or dx * E.x + dy * E.y < 0.7
 				or (pos.x - E.px) ^ 2 + (pos.y - E.py) ^ 2 > EDGE_MOVE * EDGE_MOVE then
 				local look = math.min(l, EDGE_LOOK)
@@ -621,33 +643,33 @@ function ENT:BehaveUpdate(interval)
 				E = E or {}
 				E.t, E.x, E.y, E.px, E.py = now + 0.25, dx, dy, pos.x, pos.y
 				E.blocked = not tr.Hit and not tr.StartSolid
-				self.NGLEdge = E
+				T.NGLEdge = E
 			end
 			if E.blocked then
 				goal = nil
 				-- Going straight at someone: take a path round instead.
-				if self.NGLDirect then self.NGLForcePathUntil = now + 5 end
+				if T.NGLDirect then T.NGLForcePathUntil = now + 5 end
 			end
 		end
 	end
 
 	-- Aimed variants (with their extra aim layers) only in full-detail range;
 	-- further away the plain cycles look the same at that size.
-	local A = self.NGLActs
-	local fighting = self.NGLDetail and self.NGLEnemy ~= nil
-	local crouch = self.NGLCrouch
+	local A = T.NGLActs
+	local fighting = T.NGLDetail and T.NGLEnemy ~= nil
+	local crouch = T.NGLCrouch
 	if goal then
-		if self.DriveLikeVehicle then
+		if T.DriveLikeVehicle then
 			-- Vehicles drive forward: turn towards the goal first, then go.
 			local off = math.abs(AngleDiff(deg(atan2(goal.y - pos.y, goal.x - pos.x)), self:GetAngles().y))
 			if off < 40 then self.loco:Approach(goal, 1) end
 		else
 			self.loco:Approach(goal, 1)
 		end
-		self.NGLMoving = true
-		local f = self.NGLFace
+		T.NGLMoving = true
+		local f = T.NGLFace
 		local aim = fighting and f ~= nil
-		if aim and self.NGLMoveMode ~= "walk" then
+		if aim and T.NGLMoveMode ~= "walk" then
 			-- Running faces the way we go (see below); the aimed run only
 			-- when the target is roughly ahead, the gun can't point backwards.
 			local dx, dy, ex, ey = goal.x - pos.x, goal.y - pos.y, f.x - pos.x, f.y - pos.y
@@ -661,43 +683,43 @@ function ENT:BehaveUpdate(interval)
 		-- into a player or the crowd it stayed near full speed while the NPC
 		-- didn't move, so it ran on the spot (the fast zombie at your feet).
 		local vx, vy
-		local lt = self.NGLLastPosT
+		local lt = T.NGLLastPosT
 		local dt = lt and now - lt
 		if dt and dt > 0 and dt < 0.2 then
-			vx, vy = (pos.x - self.NGLLastX) / dt, (pos.y - self.NGLLastY) / dt
+			vx, vy = (pos.x - T.NGLLastX) / dt, (pos.y - T.NGLLastY) / dt
 		else
 			local v = self.loco:GetVelocity()
 			vx, vy = v.x, v.y
 		end
-		if not dt or dt > 0 then self.NGLLastX, self.NGLLastY, self.NGLLastPosT = pos.x, pos.y, now end
+		if not dt or dt > 0 then T.NGLLastX, T.NGLLastY, T.NGLLastPosT = pos.x, pos.y, now end
 		-- Kept for the legs and the cycle speed (NGLUpdateMoveYaw and
 		-- BodyUpdate, the same tick or the next).
-		self.NGLVelX, self.NGLVelY, self.NGLVelTick = vx, vy, engine.TickCount()
+		T.NGLVelX, T.NGLVelY, T.NGLVelTick = vx, vy, engine.TickCount()
 		local still = vx * vx + vy * vy < 20 * 20
 		if not still then
-			self.NGLStillSince = nil
-		elseif not self.NGLStillSince then
-			self.NGLStillSince = now
+			T.NGLStillSince = nil
+		elseif not T.NGLStillSince then
+			T.NGLStillSince = now
 		end
-		self.NGLStandStill = still and now - self.NGLStillSince > 0.15 or nil
-		if self.NGLStandStill then
+		T.NGLStandStill = still and now - T.NGLStillSince > 0.15 or nil
+		if T.NGLStandStill then
 			if self:GetPlaybackRate() ~= 1 then self:SetPlaybackRate(1) end
-			self:NGLSetAct(crouch and A.CrouchIdle and (fighting and A.CrouchAim or A.CrouchIdle) or (fighting and A.IdleAim or A.Idle))
+			setAct(self, T, crouch and A.CrouchIdle and (fighting and A.CrouchAim or A.CrouchIdle) or (fighting and A.IdleAim or A.Idle))
 		elseif crouch and A.CrouchWalk then
-			self:NGLSetAct(A.CrouchWalk)
-		elseif self.NGLMoveMode == "walk" then
-			self:NGLSetAct(aim and A.WalkAim or A.Walk)
+			setAct(self, T, A.CrouchWalk)
+		elseif T.NGLMoveMode == "walk" then
+			setAct(self, T, aim and A.WalkAim or A.Walk)
 		else
-			self:NGLSetAct(aim and A.RunAim or A.Run)
+			setAct(self, T, aim and A.RunAim or A.Run)
 		end
 	elseif crouch and A.CrouchIdle then
-		self.NGLMoving = false
-		self.NGLStillSince, self.NGLStandStill = nil, nil
-		self:NGLSetAct(fighting and A.CrouchAim or A.CrouchIdle)
+		T.NGLMoving = false
+		T.NGLStillSince, T.NGLStandStill = nil, nil
+		setAct(self, T, fighting and A.CrouchAim or A.CrouchIdle)
 	else
-		self.NGLMoving = false
-		self.NGLStillSince, self.NGLStandStill = nil, nil
-		self:NGLSetAct(fighting and A.IdleAim or A.Idle)
+		T.NGLMoving = false
+		T.NGLStillSince, T.NGLStandStill = nil, nil
+		setAct(self, T, fighting and A.IdleAim or A.Idle)
 	end
 
 	-- Walking (strafing) keeps the body on the target while the legs step
@@ -705,12 +727,12 @@ function ENT:BehaveUpdate(interval)
 	-- turns to where it goes.
 	-- Out of every player's sight the legs stay straight (NGLUpdateMoveYaw),
 	-- so walk where we face there too.
-	self.NGLSteer = goal
-	local face = self.NGLFace
-	if goal and (not face or self.NGLMoveMode ~= "walk" or not self.NGLNear or self.DriveLikeVehicle) then face = goal end
+	T.NGLSteer = goal
+	local face = T.NGLFace
+	if goal and (not face or T.NGLMoveMode ~= "walk" or not T.NGLNear or T.DriveLikeVehicle) then face = goal end
 	if face then
 		if goal then
-			self.NGLTurning = nil
+			T.NGLTurning = nil
 			self.loco:FaceTowards(face)
 		else
 			-- Standing or crouched: the upper body aims (aim_yaw) and the feet
@@ -718,8 +740,8 @@ function ENT:BehaveUpdate(interval)
 			-- off to the side, then all the way round. Turning in place every
 			-- tick made the feet slide and twist.
 			local off = math.abs(AngleDiff(deg(atan2(face.y - pos.y, face.x - pos.x)), self:GetAngles().y))
-			if off > 45 then self.NGLTurning = true elseif off < 8 then self.NGLTurning = nil end
-			if self.NGLTurning then self.loco:FaceTowards(face) end
+			if off > 45 then T.NGLTurning = true elseif off < 8 then T.NGLTurning = nil end
+			if T.NGLTurning then self.loco:FaceTowards(face) end
 		end
 	end
 
