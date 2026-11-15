@@ -2530,6 +2530,7 @@ concommand.Add("ngl_status", function(ply)
 	for _ in pairs(cells) do nCells = nCells + 1 end
 	local msg = string.format("[NGL] %d NPCs, %d grid cells in use, budget %.1f ms/tick", #List, nCells, cvBudget:GetFloat())
 	if NGL.TickGuard and NGL.TickGuard.Status then msg = msg .. "\n[NGL] " .. NGL.TickGuard.Status() end
+	if NGL.HL and NGL.HL.StatusLines then msg = msg .. "\n" .. NGL.HL.StatusLines()[1] end
 	print(msg)
 	if IsValid(ply) then ply:PrintMessage(HUD_PRINTCONSOLE, msg) end
 end)

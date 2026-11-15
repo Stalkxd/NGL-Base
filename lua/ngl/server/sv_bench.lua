@@ -425,6 +425,19 @@ local function finish(run)
 		baseline_ticks = run.baseline.ticks,
 		client = client,
 		server_fx = run.fx,
+		-- HolyLib edition (sv_holylib.lua): what was on, and each player's
+		-- network channel while sampling (needs HolyLib's gameserver module).
+		holylib = NGL.HL and NGL.HL.Info and NGL.HL.Info.present and {
+			version = NGL.HL.Info.version,
+			fast_paths = GetConVar("ngl_holylib"):GetBool(),
+			networking = NGL.HL.Info.networking,
+			fasttransmit = NGL.HL.Info.fasttransmit,
+			fastpath = NGL.HL.Info.fastpath,
+			bulk_transmit = NGL.HL.BulkTransmit(),
+			luajit = NGL.HL.Info.luajit,
+		} or false,
+		net = run.net,
+		net_settings = NGL.NetSettings and NGL.NetSettings() or nil,
 	}
 
 	-- On srcds the frame time the engine reports is wall time per frame,
@@ -550,6 +563,24 @@ local function finish(run)
 				lt, ls, ls / (lt + ls) * 100))
 		end
 	end
+	if result.holylib then
+		local h = result.holylib
+		say(p, string.format("  HolyLib:               fast paths %s, networking module %s (fasttransmit %s), bulk transmit %s",
+			h.fast_paths and "on" or "off", h.networking and "on" or "off", h.fasttransmit and "on" or "off", h.bulk_transmit and "on" or "off"))
+	end
+	if run.net then
+		for _, n in ipairs(run.net) do
+			say(p, string.format("  Network to %s: rate %s B/s, update rate %s, %.0f packets/s sent, %.1f%% choked (%.0f/s)%s%s",
+				n.player, tostring(n.rate or "?"), tostring(n.update_rate or "?"), n.packets_per_s, n.choke_pct, n.choked_per_s,
+				n.loss_pct and string.format(", loss %.1f%%", n.loss_pct) or "",
+				n.latency_ms and string.format(", latency %.0f ms", n.latency_ms) or ""))
+		end
+		local any = false
+		for _, n in ipairs(run.net) do if n.choke_pct > 1 then any = true end end
+		if any then say(p, "    Choke: the snapshot is bigger than the client's rate allows. Raise sv_minrate (see ngl_net_check).") end
+	elseif result.dedicated and not result.holylib then
+		say(p, "  Network:               not measured (needs HolyLib's gameserver module); read net_graph 4 by hand")
+	end
 	say(p, string.format("  Alive at end:          %d / %d", alive, run.count))
 
 	file.CreateDir("ngl_bench")
@@ -656,6 +687,7 @@ hook.Add("Tick", "NGL.Bench.Harness", function()
 			run.lastTick = nil
 			local C = NGL.FX and NGL.FX.Count
 			if C then run.fx0 = { start = table.Copy(C), t = SysTime() } end
+			if NGL.HL and NGL.HL.NetStart then NGL.HL.NetStart() end
 			sendPhase(run, "loaded")
 			say(run.ply, string.format("Sampling for %ds...", dur))
 			if run.clientMode then
@@ -667,6 +699,7 @@ hook.Add("Tick", "NGL.Bench.Harness", function()
 
 	elseif run.phase == "sampling" then
 		sample(run, run.loaded)
+		if NGL.HL and NGL.HL.NetSample then NGL.HL.NetSample() end
 		if run.awayAt and now >= run.awayAt then
 			run.awayAt = nil
 			lookAt(run, true)
@@ -676,6 +709,7 @@ hook.Add("Tick", "NGL.Bench.Harness", function()
 			run.fxEnd = SysTime()
 			local C = NGL.FX and NGL.FX.Count
 			if C and run.fx0 then run.fx0.stop = table.Copy(C) end
+			if NGL.HL and NGL.HL.NetStop then run.net = NGL.HL.NetStop() end
 			if IsValid(run.reporter) then
 				run.phase = "collecting"
 				run.phaseEnd = now + CLIENT_REPORT_TIMEOUT

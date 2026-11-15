@@ -52,6 +52,7 @@ An NPC base for Garry's Mod built for large battles (100+ NPCs) with minimal ser
 3z17. **Headcrabs that couldn't be killed, another way** (v0.32.2). Fitting the crab's spawn spot (0.26.4) didn't stop a crab off a zombie killed in a horde near a player from now and then surviving every shot, and the exact cause wasn't caught in game. Instead of guessing another cause, two checks make sure a crab people can see and shoot dies. For 3 seconds after it appears, and while it leaps, a crab whose box is inside a wall, the floor or a prop is moved to the nearest free spot, or killed if there's none. And a player's bullet that passes within 14 units of a crab's middle, before whatever it hit, hurts the crab with the bullet's damage (HL2 guns: their ammo's damage). Only crabs that came off zombies are checked, at most `ngl_headcrab_max`.
 3z18. **Profiler spikes at 400 NPCs** (v0.32.3). FProfiler's slowest single calls at 400 NPCs showed a dozen crabs made in the same tick when a horde died, 2 to 4 ms each in the engine: crabs off dead zombies now wait in a queue and come off at most 2 a tick (the cap counts the queued ones). `scripted_ents.Get`, which copies a whole class table with its bases (2.4 ms), is replaced by `scripted_ents.GetStored` where only a field or two is read (spawn command, reinforcement vehicles, the dropship's hanging vehicle). Tiny functions with slow single calls in that list (a 597 ms line-of-sight check, an 11 ms `linkMove`) are one-off stalls, most likely Lua garbage collection, that landed inside them, not their own cost.
 3z19. **The profiler's biggest totals at 400 NPCs** (v0.32.4). FProfiler's Bottlenecks list put NGL's own Lua at about 1.5 ms a tick at 400 NPCs (the profiler inflates small calls), so most of a big fight's cost is the engine's; the top totals were cut anyway. BehaveUpdate and BodyUpdate read their fields from the entity's table (`GetTable`) instead of through the entity, once per field per tick for every NPC; the animation-rate settings are kept in locals; the activity is only set when it changes. The legs' turn (`NGLUpdateMoveYaw`) returns at once for NPCs whose legs are straight and stay straight, and does its angle math in one step instead of `math.AngleDifference` and `math.NormalizeAngle`. The spatial grid's cells now hold each NPC's last-think position, so the crowd checks (`overlapCheck`, `pushCheck`), `AnyNear` and the enemy search skip NPCs that are too far off before reading anything from them; the enemy search checks hostility inline (no `Core.IsHostile` call for each NPC in a cell) and only calls into a cell that has someone in it. Path searches and flow fields check a jump or climb (`linkMove`) only for an edge that would be the best way so far; the funnel that straightens paths works on plain numbers (each `.x` on a Vector is a call into the engine) and portals no longer make four new vectors each.
+3z20. **HolyLib edition** (v0.33.0). Optional fast paths for servers that run the [HolyLib](https://github.com/RaphaelIT7/gmod-holylib) binary module; without it nothing changes. HolyLib's networking module (Linux srcds) replaces the engine's per-player transmit checks and speeds up packing entities, which is most of what sending hundreds of moving NPCs costs; NGL needs nothing for it and reports whether it's on. With HolyLib's pvs module, the far-NPC culling hides and shows NPCs with one bulk call per player and tick instead of one per NPC. With its gameserver module the benchmark reports each player's network channel while sampling (rate, update rate, packets sent, choke, loss, latency), so bandwidth is measured like CPU. With its vprof module, `ngl_holylib_vprof 1` puts NGL's scheduler, culling, BehaveUpdate and BodyUpdate in their own vprof scopes next to the engine's own work. `ngl_holylib 0` turns them all off for A/B runs, `ngl_holylib_status` says what's on. `ngl_net_check` checks the server's rate settings for big fights (see below). The last version without this is kept on the `stable` branch.
 4. **Battle test.** Two teams of 100+ soldiers on several maps, singleplayer and dedicated server, tuned against the target.
 
 **Target:** 300 NGL NPCs with real combat AI holding 67 tick (under 1% late ticks, `ngl_bench_limit`) on a local dedicated server on a normal PC. That's 3x the 100 goal, so weaker servers still manage 100+.
@@ -62,6 +63,31 @@ An NPC base for Garry's Mod built for large battles (100+ NPCs) with minimal ser
 2. **Hooks run on events or at the AI rate, never every tick.** A mod can't accidentally make every NPC run expensive code 67 times a second.
 3. **Pay for what players can see.** NPCs far from every player think less often and shoot with one silent trace instead of real bullets, but deal the same damage over time.
 4. **Everything is measured.** Each optimization is checked with `ngl_bench_limit` before and after.
+
+## Running big battles (server settings and HolyLib)
+
+**Rates.** Each client is sent at most `rate` bytes a second, between the server's `sv_minrate` and `sv_maxrate`. GMod's default client rate is too low for a few hundred NPCs moving in view: the engine holds snapshots back (choke in `net_graph 4`) and NPCs hitch. For big fights, in `server.cfg`:
+
+```
+sv_minrate 262144
+sv_maxrate 0
+sv_maxupdaterate 66          // your tick rate
+sv_minupdaterate 33
+sv_parallel_packentities 1
+// sv_parallel_sendsnapshot 1 // off by default since July 2025 (rare crashes): test only
+```
+
+`ngl_net_check` prints these and says which to change.
+
+**HolyLib (optional, dedicated servers).** Install HolyLib following its README (Linux: `holylib_linux.vdf` in `garrysmod/addons`, the `.so` in `garrysmod/lua/bin`; the 32-bit build also needs `ghostinj.dll` and `-usegh`). NGL finds it on its own; the console says what it uses when the map loads, and `ngl_holylib_status` any time. The networking module is the big one and is Linux only; on Windows only bulk transmit and vprof apply. HolyLib is a third-party hobby project with no licence file: NGL only calls it, and every part has a plain Lua fallback. Say in reports whether HolyLib was on (the benchmark saves it).
+
+| Setting | Default | What it does |
+|---|---|---|
+| `ngl_holylib` | 1 | Use HolyLib's fast paths when it's installed; 0 = plain Lua paths, for comparing |
+| `ngl_holylib_transmit` | 1 | Far-NPC culling with one `pvs.SetPreventTransmitBulk` call per player and tick |
+| `ngl_holylib_vprof` | 0 | NGL's own vprof scopes (budget group NGL) for profiling the engine's share |
+
+To compare: run `ngl_bench_limit` once as is and once with the server started with `-holylib_enable_networking 0` (the networking module can't be switched while running).
 
 ## Making an NPC
 
