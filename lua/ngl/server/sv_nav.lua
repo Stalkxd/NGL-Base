@@ -2854,6 +2854,8 @@ concommand.Add("ngl_nav_info", function(ply)
 	local st = Nav.Stats
 	tell(ply, string.format("Nav loaded: %d points, %d jump links, %d edits, %d-unit spacing. Searches: %d queued, %d cached. Since start: %d found, %d failed, %d served from cache, %d dropped, %d rejected (queue full)",
 		Nav.Count, #Nav.Links, Nav.Edits and #Nav.Edits or 0, Nav.S, #searches, table.Count(Nav.Cache), st.ok, st.fail, st.cached, st.dropped, st.rejected))
+	tell(ply, string.format("Pathing (control points, ngl_path_commit %d): %d paths asked for by NPCs, %d kept at a control point without a search, %d early rethinks (target moved far), %d taken from a squad leader",
+		GetConVar("ngl_path_commit") and GetConVar("ngl_path_commit"):GetInt() or 0, st.requests or 0, st.kept or 0, st.early or 0, st.shared or 0))
 end)
 
 -- Draws the grid around the caller for 15 s. debugoverlay only shows on a
