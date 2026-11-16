@@ -32,6 +32,7 @@ local cvStepRange = CreateConVar("ngl_move_step_range", "3000", FCVAR_ARCHIVE, "
 local cvStep = CreateConVar("ngl_move_step", "0.1", FCVAR_ARCHIVE, "Seconds between steps for NPCs past ngl_move_step_range. Keep it at most cl_interp (0.1), or they stutter.", 0.03, 0.5)
 local cvRateSleep = CreateConVar("ngl_ai_rate_sleep", "3", FCVAR_ARCHIVE, "Seconds between AI thinks for idle NPCs (no enemy, no order, standing still) far from every player. Damage, an ally's alert or an order wakes them at once.", 0, 30)
 local cvLagRange = CreateConVar("ngl_lagcomp_range", "3000", FCVAR_ARCHIVE, "NPCs further than this from every player are not lag compensated (when the engine compensates them at all). 0 = leave lag compensation alone.", 0, 50000)
+local cvCommit = CreateConVar("ngl_path_commit", "1200", FCVAR_ARCHIVE, "Control points: an NPC on a path walks this far along it (to its next control point) before it thinks about the path again, instead of every 3 s. There it keeps the path if its target is still where the path goes. It rethinks before that only if the target moves far from where the path goes, it gets stuck, or it can walk straight at the target. 0 = the old way (a new path every 3 s).", 0, 20000)
 local cvShare = CreateConVar("ngl_ai_share_sight", "1", FCVAR_ARCHIVE, "1 = squad and group members near their leader pick enemies from the leader's search instead of searching the grid themselves.", 0, 1)
 
 ----------------------------------------------------------------------------
@@ -1223,6 +1224,40 @@ local function firstWaypoint(path, pos)
 	return best
 end
 
+-- Control points. An NPC on a path commits to it up to its next control
+-- point, the first waypoint at least ngl_path_commit units further along,
+-- and only thinks about the path again once it gets there: if the target is
+-- still where the path goes it keeps the path (no search at all) and walks
+-- on to the next control point. Before that it rethinks only when the target
+-- moved far from where the path goes (EARLY_*), when it's stuck (stuck check
+-- drops the path), or when it can walk straight at the target (chase drops
+-- the path and moves directly). Control points fall on different waypoints
+-- for every NPC, so the rethinks of a crowd spread out over time instead of
+-- coming every 3 s for everyone.
+local EARLY_MIN_SQR = 300 * 300   -- the target moved at least this far...
+local EARLY_MAX_SQR = 1200 * 1200 -- ...and at most this far always counts
+local EARLY_FRAC_SQR = 0.4 * 0.4  -- in between: 40% of the distance still to go
+local EARLY_GAP = 1               -- s between early rethinks at least
+local commitDist = cvCommit:GetFloat()
+cvars.AddChangeCallback("ngl_path_commit", function(_, _, v) commitDist = tonumber(v) or 0 end, "NGL.Core")
+
+-- Index of the control point: the first waypoint at least `dist` units
+-- along the path after waypoint `idx` (the last one if the path is shorter).
+local function controlPoint(path, idx, dist)
+	local n = #path
+	idx = idx or 1
+	if dist <= 0 or idx >= n then return n end
+	local prev, d = path[idx], 0
+	for k = idx + 1, n do
+		local p = path[k]
+		d = d + prev:Distance(p)
+		if d >= dist then return k end
+		prev = p
+	end
+	return n
+end
+Core.ControlPoint = controlPoint
+
 -- Can we walk straight there? Asked of the nav grid (table lookups, no
 -- traces), at most once a second per NPC unless the target moves: a ledge,
 -- wall or drop in the way means taking a path round it instead.
@@ -1306,18 +1341,49 @@ local function chase(npc, now, pos, tPos, visible)
 		return
 	end
 
-	-- Keep the current path while the enemy hasn't moved far from its end.
+	local st = nav.Stats
+	local commit = commitDist
 	local tgt = npc.NGLPathTarget
-	if npc.NGLPath and tgt and tgt:DistToSqr(tPos) < REPATH_SQR and now < (npc.NGLRepathAt or 0) then return end
+	local path = npc.NGLPath
+	-- (A path someone else set, a wander path say, has no control point
+	-- of ours: think again at once.)
+	if path and tgt and (commit <= 0 or npc.NGLPathCPFor == path) then
+		local moved = tgt:DistToSqr(tPos)
+		if commit <= 0 then
+			-- Old way: keep it while the target hasn't moved far from its end,
+			-- for at most 3 s.
+			if moved < REPATH_SQR and now < (npc.NGLRepathAt or 0) then return end
+		else
+			local cp = npc.NGLPathCP
+			if (npc.NGLPathIdx or 1) <= cp then
+				-- On the way to the control point: only rethink early if the
+				-- target went far from where the path goes. How far is far
+				-- grows with the distance still to go (a target 3000 units
+				-- away moving 300 changes nothing about the next stretch).
+				local d2 = pos:DistToSqr(tgt) * EARLY_FRAC_SQR
+				if d2 < EARLY_MIN_SQR then d2 = EARLY_MIN_SQR elseif d2 > EARLY_MAX_SQR then d2 = EARLY_MAX_SQR end
+				if moved < d2 or now < (npc.NGLRepathAt or 0) then return end
+				st.early = (st.early or 0) + 1
+			elseif moved < REPATH_SQR then
+				-- At the control point and the target is still where the path
+				-- goes: keep walking it, up to the next control point. No search.
+				npc.NGLPathCP = controlPoint(path, npc.NGLPathIdx, commit)
+				st.kept = (st.kept or 0) + 1
+				return
+			end
+		end
+	end
 
 	local req = (npc.NGLPathReq or 0) + 1
 	npc.NGLPathReq = req
-	npc.NGLRepathAt = now + 3
+	npc.NGLRepathAt = now + (commit > 0 and EARLY_GAP or 3)
+	st.requests = (st.requests or 0) + 1
 	local target = Vector(tPos.x, tPos.y, tPos.z)
 	-- In a squad whose leader already has a path there: take it.
-	local sp, sk, st = sharedPath(npc, pos, target)
+	local sp, sk, stgt = sharedPath(npc, pos, target)
 	if sp then
-		npc.NGLPath, npc.NGLPathIdx, npc.NGLPathTarget = sp, sk, st
+		npc.NGLPath, npc.NGLPathIdx, npc.NGLPathTarget = sp, sk, stgt
+		npc.NGLPathCP, npc.NGLPathCPFor = controlPoint(sp, sk, commit), sp
 		npc.NGLPathPending = false
 		npc.NGLGoal = target
 		nav.Stats.shared = (nav.Stats.shared or 0) + 1
@@ -1332,6 +1398,7 @@ local function chase(npc, now, pos, tPos, visible)
 		if path and #path > 0 then
 			npc.NGLPath = path
 			npc.NGLPathIdx = firstWaypoint(path, npc:GetPos())
+			npc.NGLPathCP, npc.NGLPathCPFor = controlPoint(path, npc.NGLPathIdx, commitDist), path
 			npc.NGLPathTarget = target
 		else
 			npc.NGLPath = nil

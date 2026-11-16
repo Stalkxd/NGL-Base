@@ -377,6 +377,25 @@ local function finish(run)
 			los_shared_per_s = rate("losShared"),
 		}
 	end
+	-- Pathing while sampling (control points, sv_core.lua chase): paths NPCs
+	-- asked for, paths kept at a control point without a search, early
+	-- rethinks, and what the nav grid did with the requests.
+	local n0 = run.nav0
+	if n0 and n0.stop then
+		local dt = math.max(0.001, run.fxEnd - n0.t)
+		local function rate(k) return ((n0.stop[k] or 0) - (n0.start[k] or 0)) / dt end
+		run.pathing = {
+			commit = GetConVar("ngl_path_commit") and GetConVar("ngl_path_commit"):GetFloat() or nil,
+			requests_per_s = rate("requests"),
+			kept_per_s = rate("kept"),
+			early_per_s = rate("early"),
+			shared_per_s = rate("shared"),
+			searched_per_s = rate("ok") + rate("fail"),
+			cached_per_s = rate("cached"),
+			field_per_s = rate("field"),
+			rejected_per_s = rate("rejected"),
+		}
+	end
 	local base = stats(run.baseline.frame)
 	local loaded = stats(run.loaded.frame)
 	local frameSource = "server"
@@ -425,6 +444,7 @@ local function finish(run)
 		baseline_ticks = run.baseline.ticks,
 		client = client,
 		server_fx = run.fx,
+		pathing = run.pathing,
 		-- HolyLib edition (sv_holylib.lua): what was on, and each player's
 		-- network channel while sampling (needs HolyLib's gameserver module).
 		holylib = NGL.HL and NGL.HL.Info and NGL.HL.Info.present and {
@@ -563,6 +583,11 @@ local function finish(run)
 				lt, ls, ls / (lt + ls) * 100))
 		end
 	end
+	if run.pathing then
+		local pa = run.pathing
+		say(p, string.format("  Pathing:               %.1f paths asked for/s (%.1f from a squad leader, %.1f searched, %.1f cached), %.1f kept at a control point/s, %.1f early rethinks/s (ngl_path_commit %d)",
+			pa.requests_per_s, pa.shared_per_s, pa.searched_per_s, pa.cached_per_s + pa.field_per_s, pa.kept_per_s, pa.early_per_s, pa.commit or 0))
+	end
 	if result.holylib then
 		local h = result.holylib
 		say(p, string.format("  HolyLib:               fast paths %s, networking module %s (fasttransmit %s), bulk transmit %s",
@@ -687,6 +712,8 @@ hook.Add("Tick", "NGL.Bench.Harness", function()
 			run.lastTick = nil
 			local C = NGL.FX and NGL.FX.Count
 			if C then run.fx0 = { start = table.Copy(C), t = SysTime() } end
+			local NS = NGL.Nav and NGL.Nav.Stats
+			if NS then run.nav0 = { start = table.Copy(NS), t = SysTime() } end
 			if NGL.HL and NGL.HL.NetStart then NGL.HL.NetStart() end
 			sendPhase(run, "loaded")
 			say(run.ply, string.format("Sampling for %ds...", dur))
@@ -709,6 +736,8 @@ hook.Add("Tick", "NGL.Bench.Harness", function()
 			run.fxEnd = SysTime()
 			local C = NGL.FX and NGL.FX.Count
 			if C and run.fx0 then run.fx0.stop = table.Copy(C) end
+			local NS = NGL.Nav and NGL.Nav.Stats
+			if NS and run.nav0 then run.nav0.stop = table.Copy(NS) end
 			if NGL.HL and NGL.HL.NetStop then run.net = NGL.HL.NetStop() end
 			if IsValid(run.reporter) then
 				run.phase = "collecting"

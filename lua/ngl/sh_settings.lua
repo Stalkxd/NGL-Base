@@ -54,6 +54,7 @@ S.Server = {
 	{ "ngl_nav_auto", "Make the grid on its own on new maps", false },
 	{ "ngl_nav_source", "No grid: use the map's navmesh", false },
 	{ "ngl_nav_budget", "Path search budget (ms a tick)", 0.1, 20, 1 },
+	{ "ngl_path_commit", "Walk this far on a path before rethinking it", 0, 5000, 0, help = "Control points: NPCs only look at their path again this far along it, unless their target moves far, they get stuck or can walk straight there. 0 = a new path every 3 s." },
 	{ cmd = "ngl_nav_generate", label = "Make the nav grid now", help = "Rebuilds this map's grid (a minute or two)." },
 	{ cmd = "ngl_nav_info", label = "Nav grid info (console)" },
 	{ title = "Commands" },
